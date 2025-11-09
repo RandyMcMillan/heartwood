@@ -1,0 +1,31 @@
+[package]
+name = "sqlite3-sys"
+version = "0.15.2"
+edition = "2021"
+license = "Apache-2.0/MIT"
+authors = [
+    "Ivan Stankovic <pokemon@fly.srk.fer.hr>",
+    "Ivan Ukhov <ivan.ukhov@gmail.com>",
+    "Vincenzo Palazzo <vincenzopalazzodev@gmail.com>",
+]
+description = "The package provides bindings to SQLite."
+documentation = "https://docs.rs/sqlite3-sys"
+homepage = "https://github.com/stainless-steel/sqlite3-sys"
+repository = "https://github.com/stainless-steel/sqlite3-sys"
+categories = ["database", "external-ffi-bindings"]
+keywords = ["database"]
+
+[features]
+default = ["linkage"]
+bundled = ["sqlite3-src/bundled"]
+linkage = ["sqlite3-src"]
+
+[dependencies]
+libc = "0.2"
+
+[dependencies.sqlite3-src]
+version = "0.5"
+optional = true
+
+[dev-dependencies]
+temporary = "0.6"
