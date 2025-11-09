@@ -1,0 +1,31 @@
+[package]
+name = "winpipe"
+version = "0.1.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Alexander Schütz <aschuetz@protonmail.com>"]
+keywords = ["pipe", "pipes", "windows", "named_pipes"]
+categories = ["api-bindings"]
+description = "Blocking rust wrapper for Windows named pipes with very similar api to UnixStream/UnixListen."
+readme = "README.md"
+repository = "https://github.com/AlexanderSchuetz97/winpipe"
+
+
+
+[dependencies]
+log = {version = "0.4.22", optional = true}
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = {version = "0.58.0", features = ["Win32_System_Pipes", "Win32", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Diagnostics", "Win32_System_Diagnostics_Debug", "Win32_System_Threading", "Win32_System_IO"] }
+defer-heavy = "0.1.0"
+rand = "0.8.5"
+sync-ptr = "0.1.1"
+
+[features]
+default = ["logging"]
+logging = ["log"]
+
+[dev-dependencies]
+colog = "1.3.0"
+serial_test = {version ="3.1.1", default-features = false}
+log = "0.4.22"
