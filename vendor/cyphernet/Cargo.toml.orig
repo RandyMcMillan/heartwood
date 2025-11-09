@@ -1,0 +1,101 @@
+[workspace]
+default-members = [
+    "addr",
+    "cyphergraphy",
+    "eidolon",
+    "socks5-client",
+    "noise",
+    ".",
+]
+
+[workspace.package]
+authors = ["Dr. Maxim Orlovsky <orlovsky@cyphernet.org>"]
+homepage = "https://cyphernet.org"
+repository = "https://github.com/Cyphernet-DAO/rust-cyphernet"
+rust-version = "1.69" # B/c of amplify dependency
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+amplify = "4.6.0"
+cyphergraphy = { path = "cyphergraphy", version = "0.3.0" }
+cypheraddr = { path = "addr", version = "0.4.0" }
+eidolon-auth = { path = "eidolon", version = "0.3.0" }
+socks5-client = { path = "socks5-client", version = "0.4.1" }
+
+###
+### Main package (`cyphernet`)
+###
+
+[package]
+name = "cyphernet"
+version = "0.5.2"
+description = "Cyphernet is a set of libraries for privacy-preserving networking apps"
+keywords = ["privacy", "noise-protocol", "cypherpunk", "tor", "nym"]
+categories = ["network-programming", "cryptography", "encoding"]
+readme = "README.md"
+authors = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+rust-version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+
+[dependencies]
+cyphergraphy = { workspace = true }
+cypheraddr = { workspace = true }
+eidolon-auth = { workspace = true, optional = true }
+socks5-client = { workspace = true }
+noise-framework = { path = "noise", version = "0.4.0", optional = true }
+
+[features]
+default = []
+all = [
+    "eidolon",
+    "mixnets", "dns",
+    "p2p-ed25519", "p2p-secp256k1",
+    "x25519", "ed25519", "secp256k1", "bip340",
+    "sha2", "sha3", "blake3",
+    "noise_all",
+    "pem", "multibase", "serde",
+]
+
+# Crates
+eidolon = ["eidolon-auth"]
+
+# Addresses
+tor = ["cypheraddr/tor", "socks5-client/tor"]
+i2p = ["cypheraddr/i2p", "socks5-client/i2p"]
+nym = ["cypheraddr/nym", "socks5-client/nym"]
+mixnets = ["tor", "i2p", "nym"]
+dns = ["cypheraddr/dns", "socks5-client/dns"]
+p2p-ed25519 = ["cypheraddr/p2p-ed25519"]
+p2p-secp256k1 = ["cypheraddr/p2p-secp256k1"]
+
+# Elliptic curve algorithms
+x25519 = ["cyphergraphy/x25519"]
+ed25519 = ["cyphergraphy/ed25519"]
+secp256k1 = ["cyphergraphy/secp256k1"]
+bip340 = ["cyphergraphy/bip340"]
+
+# Digests
+sha2 = ["cyphergraphy/sha2"]
+sha3 = ["cyphergraphy/sha3"]
+blake3 = ["cyphergraphy/blake3"]
+
+# Noise variants algorithms
+noise_all = ["noise_sha2", "noise_sha3", "noise_blake3", "noise_x25519", "noise_secp256k1"]
+noise_sha2 = ["noise-framework/sha2"]
+noise_sha3 = ["noise-framework/sha3"]
+noise_blake3 = ["noise-framework/blake3"]
+noise_x25519 = ["noise-framework/x25519"]
+noise_secp256k1 = ["noise-framework/secp256k1"]
+
+# Encodings
+pem = ["cyphergraphy/pem"]
+multibase = ["cyphergraphy/multibase"]
+serde = ["cypheraddr/serde"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustc-args = ["--cfg", "docsrs"]
