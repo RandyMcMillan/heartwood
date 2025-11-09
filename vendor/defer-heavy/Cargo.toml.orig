@@ -1,0 +1,16 @@
+[package]
+name = "defer-heavy"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Alexander Schütz <aschuetz@protonmail.com>"]
+description = "A versatile and easy to use defer statement for Rust. Similar to Go's or Zig's defer."
+categories = ["no-std", "rust-patterns"]
+keywords = ["defer", "deferred"]
+readme = "README.md"
+
+[features]
+default = ["mt"]
+mt = []
+
+[dependencies]
