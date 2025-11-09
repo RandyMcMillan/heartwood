@@ -1,0 +1,24 @@
+[package]
+name = "git-ref-format-macro"
+version = "0.5.0"
+authors = ["Kim Altintop <kim@eagain.st>"]
+edition = "2021"
+homepage = "https://app.radicle.xyz/nodes/seed.radicle.xyz/rad:z6cFWeWpnZNHh9rUW8phgA3b5yGt/tree/README.md"
+repository = "https://app.radicle.xyz/nodes/seed.radicle.xyz/rad:z6cFWeWpnZNHh9rUW8phgA3b5yGt"
+license = "GPL-3.0-or-later"
+description = "Macros for the git-ref-format crate"
+keywords = ["git", "references"]
+
+[lib]
+doctest = false
+proc-macro = true
+test = false
+
+[dependencies]
+proc-macro-error2 = "2"
+quote = "1"
+syn = "2"
+
+[dependencies.git-ref-format-core]
+version = "0.5.0"
+path = "../core"
