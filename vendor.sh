@@ -6,7 +6,7 @@
 # inside each vendor dependency, stages the changes, commits them, and pushes
 # immediately on every iteration.
 
-
+cargo vendor;
 for dep in $(/bin/ls vendor);do rm -rf vendor/$dep/.git;git add vendor/$dep; git commit vendor/$dep -m $dep;git push randymcmillan 1909/922879/920656/93578340/6cfed884-vendor:1909/922879/920656/93578340/6cfed884-vendor;done
 
 # Exit immediately if a command exits with a non-zero status.
