@@ -1,0 +1,15 @@
+[package]
+name = "culpa"
+version = "1.0.2"
+edition = "2018"
+license = "MIT OR Apache-2.0"
+
+description = "A library for error-handling syntax in Rust"
+repository = "https://github.com/Nullus157/culpa"
+keywords = ["error-handling", "exceptions"]
+
+[dependencies.culpa-macros]
+path = "macros"
+version = "=1.0.2"
+
+[workspace]
