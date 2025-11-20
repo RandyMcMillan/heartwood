@@ -1,0 +1,8 @@
+template: template.sh.tera
+run: bash
+helpers:
+  - assert.sh
+  - cap.sh
+  - ctx.sh
+  - dict.sh
+  - files.sh

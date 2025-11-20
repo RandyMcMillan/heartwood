@@ -1,0 +1,16 @@
+title: Test Subplot against reference subplots
+authors:
+- The Subplot project
+markdowns:
+- reference.md
+bindings:
+- reference.yaml
+- subplot.yaml
+- lib/runcmd.yaml
+- lib/files.yaml
+impls:
+  python:
+    - reference.py
+    - subplot.py
+    - lib/files.py
+    - lib/runcmd.py

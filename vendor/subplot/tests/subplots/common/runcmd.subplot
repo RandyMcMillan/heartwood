@@ -1,0 +1,16 @@
+title: Acceptance criteria for the lib/runcmd Subplot library
+authors:
+  - The Subplot project
+markdowns:
+- runcmd.md
+bindings:
+- lib/runcmd.yaml
+- runcmd_test.yaml
+- lib/files.yaml
+impls:
+  python:
+    - lib/runcmd.py
+    - runcmd_test.py
+    - lib/files.py
+  rust:
+    - runcmd_test.rs

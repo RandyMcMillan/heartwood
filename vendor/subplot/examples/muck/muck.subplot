@@ -1,0 +1,12 @@
+---
+title: Muck JSON storage server and API
+authors:
+  - Lars Wirzenius
+date: work in progress
+markdowns:
+  - muck.md
+bindings:
+  - muck.yaml
+impls:
+  python:
+    - muck.py

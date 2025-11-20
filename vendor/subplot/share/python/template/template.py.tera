@@ -1,0 +1,78 @@
+#############################################################################
+# Functions that implement steps.
+
+{% for func in functions %}
+#----------------------------------------------------------------------------
+# This code comes from: {{ func.source }}
+
+{{ func.code }}
+{% endfor %}
+
+
+#############################################################################
+# Scaffolding for generated test program.
+
+{% include "context.py" %}
+{% include "encoding.py" %}
+{% include "files.py" %}
+{% include "asserts.py" %}
+{% include "scenarios.py" %}
+{% include "main.py" %}
+
+
+#############################################################################
+# Test data files that were embedded in the source document. Base64
+# encoding is used to allow arbitrary data.
+
+{% for file in files %}
+# {{ file.filename }}
+filename = decode_str('{{ file.filename | base64 }}')
+contents = decode_bytes('{{ file.contents | base64 }}')
+store_file(filename, contents)
+{% endfor %}
+
+
+
+#############################################################################
+# Classes for individual scenarios.
+
+{% for scenario in scenarios %}
+#----------------------------------------------------------------------------
+# Scenario: {{ scenario.title }}
+class Scenario_{{ loop.index }}():
+    def __init__(self):
+        ctx = Context()
+        self._scenario = Scenario(ctx)
+        self._scenario.set_title(decode_str('{{ scenario.title | base64 }}'))
+        {% for step in scenario.steps %}
+        # Step: {{ step.text }}
+        step = Step()
+        step.set_kind('{{ step.kind | lower }}')
+        step.set_text(decode_str('{{ step.text | base64 }}'))
+        step.set_function({{ step.function }})
+        if '{{ step.cleanup }}':
+            step.set_cleanup({{ step.cleanup }})
+        self._scenario.append_step(step)
+        {% for part in step.parts %}{% if part.CapturedText is defined -%}
+        name = decode_str('{{ part.CapturedText.name | base64 }}')
+        text = decode_str('{{ part.CapturedText.text | base64 }}')
+        step.set_arg(name, text)
+        {% endif -%}
+        {% endfor -%}
+    {% endfor %}
+
+    def get_title(self):
+        return self._scenario.get_title()
+
+    def run(self, datadir, extra_env):
+        self._scenario.run(datadir, extra_env)
+{% endfor %}
+
+_scenarios = { {% for scenario in scenarios %}
+    Scenario_{{ loop.index }}(),{% endfor %}
+}
+
+
+#############################################################################
+# Call main function and clean up.
+main(_scenarios)

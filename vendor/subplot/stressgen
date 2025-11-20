@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+
+import sys
+
+
+def generate_prelude(f, basename):
+    f.write(
+        """\
+---
+title: "stress test"
+bindings: {basename}.yaml
+functions: {basename}.py
+...
+""".format(
+            basename=basename
+        )
+    )
+
+
+def generate_scenario(f, scen_number, steps):
+    f.write("\n")
+    f.write("# Scenario {}\n".format(scen_number))
+    f.write("~~~scenario\n")
+    for i in range(steps):
+        f.write("given precondition {}\n".format(i))
+    f.write("~~~\n")
+
+
+def generate_bindings(f, num_bindings):
+    for i in range(num_bindings):
+        f.write("- given: precondition {}\n".format(i))
+        f.write("  function: nop\n")
+
+
+def generate_functions(f):
+    f.write("def nop(ctx):\n")
+    f.write("  pass\n")
+
+
+def main():
+    basename = sys.argv[1]
+    scenarios = int(sys.argv[2])
+    steps = int(sys.argv[3])
+
+    with open(basename + ".md", "w") as f:
+        generate_prelude(f, basename)
+        for i in range(scenarios):
+            generate_scenario(f, i, steps)
+
+    with open(basename + ".yaml", "w") as f:
+        generate_bindings(f, steps)
+
+    with open(basename + ".py", "w") as f:
+        generate_functions(f)
+
+
+if __name__ == "__main__":
+    main()

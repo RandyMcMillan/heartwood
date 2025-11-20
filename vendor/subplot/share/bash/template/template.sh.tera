@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+
+set -eu -o pipefail
+
+declare -a ENV
+
+TEMP="$(getopt --long env: -o e: -- "$@")"
+eval set -- "$TEMP"
+unset TEMP
+
+while true
+do
+    case "$1" in
+	'-e'|'--env')
+	    case "$2" in
+		*=*)
+		    # Use value from command-line
+		    ENV=("${ENV[@]}" "$2")
+		;;
+		*)
+		    # Forward variable from environment
+		    ENV=("${ENV[@]}" "$2=${!2}")
+		;;
+	    esac
+	    shift 2
+	    continue
+	;;
+	'--')
+	    shift
+	    break
+	;;
+	*)
+	    echo Unexpected argument >&2
+	    exit 1
+	;;
+    esac
+done
+
+#############################################################################
+# Functions that implement steps.
+
+{% for func in functions %}
+#----------------------------------------------------------------------------
+# This code comes from: {{ func.source }}
+
+{{ func.code }}
+{% endfor %}
+
+
+#############################################################################
+# Scaffolding for generated test program.
+
+{% include "dict.sh" %}
+{% include "ctx.sh" %}
+{% include "cap.sh" %}
+{% include "files.sh" %}
+{% include "assert.sh" %}
+
+# Remember where we started from. The step functions may need to refer
+# to files there.
+srcdir="$(pwd)"
+echo "srcdir $srcdir"
+
+# Create a new temporary directory and chdir there. This allows step
+# functions to create new files in the current working directory
+# without having to be so careful.
+_datadir="$(mktemp -d)"
+echo "datadir $_datadir"
+cd "$_datadir"
+
+
+# Store test data files that were embedded in the source document.
+# Base64 encoding is used to allow arbitrary data.
+
+files_new
+{% for file in files %}
+# {{ file.filename }}
+filename="$(decode_base64 '{{ file.filename | base64 }}')"
+contents="$(decode_base64 '{{ file.contents | base64 }}')"
+files_set "$filename" "$contents"
+{% endfor %}
+
+
+#############################################################################
+# Code to implement the scenarios.
+
+{% for scenario in scenarios %}
+######################################
+# Scenario: {{ scenario.title }}
+scenario_{{ loop.index }}() {
+    local title scendir step name text ret
+    declare -a cleanups
+    declare -a steps
+    declare -a cleanups_captures
+    declare -A captures
+
+    title="$(decode_base64 '{{ scenario.title | base64 }}')"
+    echo "scenario: $title"
+
+    scendir="$(mktemp -d -p "$_datadir")"
+    cd "$scendir"
+    export HOME="$scendir"
+    export TMPDIR="$scendir"
+
+    ctx_new
+    cleanups[0]=''
+    steps[0]=''
+    cleanups_captures[0]=''
+    ret=0
+    
+    {% for step in scenario.steps %}
+    if [ "$ret" = 0 ]
+    then
+	# Step: {{ step.text }}
+	step="{{ step.kind | lower }} $(decode_base64 '{{ step.text | base64 }}')"
+	echo "  step: $step"
+
+	cap_new
+	captures=()
+	{% for part in step.parts %}{% if part.CapturedText is defined -%}
+	name="$(decode_base64 '{{ part.CapturedText.name | base64 }}')"
+	text="$(decode_base64 '{{ part.CapturedText.text | base64 }}')"
+	captures["$name"]="$text"
+	cap_set "$name" "$text"
+	{% endif -%}
+	{% endfor -%}
+	if {{ step.function }}
+	then
+	    cleanup='{{ step.cleanup }}'
+	    if [ "$cleanup" != "" ]
+	    then
+		{% raw %}
+		cleanups+=("$cleanup")
+		steps+=("$step")
+		cleanups_captures+=("${captures[*]@A}")
+		{% endraw %}
+            fi
+        else
+	    ret=$?
+        fi
+    fi
+    {% endfor %}
+
+    {% raw %}
+    echo "${!cleanups[*]}" | tr ' ' '\n' | tac | while read i
+    do
+	step="${steps[$i]}"
+	func="${cleanups[$i]}"
+	eval "${cleanups_captures[$i]}"
+	cap_new
+	for name in "${!captures[@]}"
+	do
+	    text="${captures["$name"]}"
+	    cap_set "$name" "$text"
+	done
+	echo "  cleanup: $step"
+	$func
+    done
+    {% endraw %}
+
+    return $ret
+}
+{% endfor %}
+
+#############################################################################
+# Update the environment
+
+export SHELL=/bin/sh
+
+# Include any configured environment variables
+for var in "${ENV[@]}"
+do
+	export "$var"
+done
+
+#############################################################################
+# Run the scenarios.
+
+if [ "$#" = 0 ]
+then {% for scenario in scenarios %}
+   scenario_{{ loop.index }}{% endfor %}
+   : # Avoid empty then-branch if no scenarios
+else
+
+
+    for pattern in "$@"
+    do
+	pattern="$(echo "$pattern" | tr A-Z a-z)"
+{% for scenario in scenarios %}
+        if echo "{{ scenario.title | lower }}" | grep -F -e "$pattern" > /dev/null
+	then
+            scenario_{{ loop.index }}
+	fi
+{% endfor %}
+    done
+fi
+
+
+#############################################################################
+# Clean up temporary directory and report success.
+
+rm -rf "$_datadir"
+echo "OK, all scenarios finished successfully"

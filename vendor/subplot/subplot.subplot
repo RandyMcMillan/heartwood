@@ -1,0 +1,19 @@
+title: "Subplot"
+authors:
+  - The Subplot project
+markdowns:
+  - subplot.md
+bindings:
+- subplot.yaml
+- lib/runcmd.yaml
+- lib/files.yaml
+impls:
+  python:
+    - subplot.py
+    - lib/files.py
+    - lib/runcmd.py
+  rust:
+    - subplotlib/subplot-rust-support.rs
+classes:
+- json
+- ignored

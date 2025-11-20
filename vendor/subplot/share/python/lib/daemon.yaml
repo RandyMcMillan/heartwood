@@ -1,0 +1,165 @@
+- given: there is no "{args:text}" process
+  impl:
+    python:
+      function: daemon_no_such_process
+  doc: |
+    Ensure a given process is not running.
+
+- given: a daemon helper shell script {filename}
+  impl:
+    python:
+      function: _daemon_shell_script
+  types:
+    filename: file
+  doc: |
+    Install a helper script from an embedded file.
+
+- when: I start "{path}{args:text}" as a background process as {name}, on port {port}
+  impl:
+    python:
+      function: daemon_start_on_port
+  doc: |
+    Start a process in the background (as a daemon) and wait until it
+    listens on its assigned port.
+
+- when: I start "(?P<path>[^ "]+)(?P<args>[^"]*)" as a background process as (?P<name>[^,]+), on port (?P<port>\d+), with environment (?P<env>.*)
+  regex: true
+  types:
+    args: text
+    path: path
+    name: text
+    port: uint
+    env: text
+  impl:
+    python:
+      function: daemon_start_on_port
+  doc: |
+    Start a process in the background (as a daemon) and wait until it
+    listens on its assigned port. Remember the process under the given
+    name.
+
+- when: I try to start "{path}{args:text}" as {name}, on port {port}
+  impl:
+    python:
+      function: _daemon_start_soonish
+      cleanup: _daemon_stop_soonish
+  doc: |
+    Try to start a background process (as a daemon), but don't fail if
+    starting it fails.
+
+- when: I try to start "(?P<path>[^ "]+)(?P<args>[^"]*)" as (?P<name>[^,]+), on port (?P<port>\d+), with environment (?P<env>.*)
+  regex: true
+  types:
+    path: path
+    args: text
+    name: text
+    port: uint
+    env: text
+  impl:
+    python:
+      function: _daemon_start_soonish
+      cleanup: _daemon_stop_soonish
+  doc: |
+    Start a process in the background (as a daemon) and wait until it
+    listens on its assigned port. Remember the process under the given
+    name. Don't fail if this fails.
+
+- when: I start "{path}{args:text}" as a background process as {name}
+  impl:
+    python:
+      function: _daemon_start
+  doc: |
+    Start a process in the background (as a daemon). Remember the
+    process under the given name. Don't fail if this fails.
+
+- when: I start "(?P<path>[^ "]+)(?P<args>[^"]*)" as a background process as (?P<name>[^,]+), with environment (?P<env>.*)
+  regex: true
+  types:
+    path: path
+    args: text
+    name: text
+    env: text
+  impl:
+    python:
+      function: _daemon_start
+  doc: |
+    Start a process in the background (as a daemon), with specific
+    environment variables set. Remember the process under the given
+    name. Don't fail if this fails.
+
+- when: I stop background process {name}
+  impl:
+    python:
+      function: daemon_stop
+  doc: |
+    Stop a background process that was started earlier with the given
+    name.
+
+- when: daemon {name} has produced output
+  impl:
+    python:
+      function: daemon_has_produced_output
+  doc: |
+    Wait until the named daemon has produced output to its stdout or
+    stderr.
+
+- then: a process "{args:text}" is running
+  impl:
+    python:
+      function: daemon_process_exists
+  doc: |
+    Check that a given process is running.
+
+- then: there is no "{args:text}" process
+  impl:
+    python:
+      function: daemon_no_such_process
+  doc: |
+    Check that a given process is not running.
+
+- then: starting daemon fails with "{message:text}"
+  impl:
+    python:
+      function: daemon_start_fails_with
+  doc: |
+    Check that starting a daemon previously failed, and the error
+    message contains the given text.
+
+- then: starting the daemon succeeds
+  impl:
+    python:
+      function: daemon_start_succeeds
+  doc: |
+    Check that staring a daemon previous succeeded.
+
+- then: daemon {name} stdout is "{text:text}"
+  impl:
+    python:
+      function: daemon_stdout_is
+  doc: |
+    Check that the named daemon has written exactly the given text to
+    its stdout.
+
+- then: daemon {name} stdout contains "{text:text}"
+  impl:
+    python:
+      function: daemon_stdout_contains
+  doc: |
+    Check that the named daemon has written the given text to its
+    stdout, possibly among other text.
+
+- then: daemon {name} stdout doesn't contain "{text:text}"
+  impl:
+    python:
+      function: daemon_stdout_doesnt_contain
+  doc: |
+    Check that the named daemon has not written the given text to its
+    stdout.
+
+- then: daemon {name} stderr is "{text:text}"
+  impl:
+    python:
+      function: daemon_stderr_is
+  doc: |
+    Check that the named daemon has written exactly the given text to
+    its stderr.

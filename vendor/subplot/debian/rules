@@ -1,0 +1,16 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	true
+
+override_dh_auto_install:
+	cargo install --path=. --root=debian/subplot --offline --locked
+	rm -f debian/subplot/.crates.toml
+	rm -f debian/subplot/.crates2.json
+	dh_lintian
+
+override_dh_auto_test:
+	echo disabled: ./check

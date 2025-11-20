@@ -1,0 +1,22 @@
+[advisories]
+version = 2
+yanked = "allow"
+
+[licenses]
+version = 2
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "MIT",
+    "MIT-0",
+    "Unicode-DFS-2016",
+]
+confidence-threshold = 0.8
+
+[licenses.private]
+ignore = false
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+highlight = "all"

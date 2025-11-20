@@ -1,0 +1,31 @@
+{%- macro builder(stepfn, step) -%}
+{{stepfn}}::Builder::default()
+    {% for part in step.parts %}{% if part.CapturedText is defined -%}
+        {%- set name = part.CapturedText.name -%}
+        {%- set text = part.CapturedText.text -%}
+        {%- set type = step.types[name] | default(value='text') -%}
+        .{{name}}(
+            {% if type in ['number', 'int', 'uint'] %}{{text}}
+            {%- elif type in ['text', 'word']%}
+            // "{{text | commentsafe }}"
+            &base64_decode("{{text | base64}}")
+            {%- elif type in ['file'] %}
+            {
+                use std::path::PathBuf;
+                // {{ text | commentsafe }}
+                let target_name: PathBuf = base64_decode("{{ text | base64 }}").into();
+                SUBPLOT_EMBEDDED_FILES
+                    .iter()
+                    .find(|df| df.name() == target_name)
+                    .expect("Unable to find file at runtime")
+                    .clone()
+            }
+            {%- elif type in ['path'] %}
+            std::path::PathBuf::from(base64_decode("{{ text | base64 }}"))
+            {%- else %} /* WOAH unknown type {{step.types[name]}} */ {{text}}
+            {%- endif %}
+        )
+    {% endif -%}
+    {% endfor -%}
+        .build(format!("{} {}", "{{step.kind | lower}}", base64_decode("{{step.text | base64}}")), {{ step.origin | location }})
+{%- endmacro builder -%}

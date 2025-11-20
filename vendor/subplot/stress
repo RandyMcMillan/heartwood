@@ -1,0 +1,43 @@
+#!/bin/sh
+
+set -eu
+
+NSCEN=1000
+NSTEP=100
+
+if [ "$#" = 2 ]
+then
+    NSCEN="$1"
+    NSTEP="$2"
+fi
+
+ts() {
+    local start="$1"
+    local now="$(date +%s)"
+    echo "$now - $start" | bc
+}
+
+docgen() {
+    cargo run -q --bin subplot -- docgen "$1" -o "$2"
+}
+
+codegen() {
+    cargo run -q --bin subplot -- codegen "$1" -o "$2"
+}
+
+start="$(ts 0)"
+
+./stressgen s "$NSCEN" "$NSTEP"
+gen="$(ts "$start")"
+
+docgen s.md s.html
+doc="$(ts "$start")"
+
+codegen s.md test.py
+code="$(ts "$start")"
+
+python3 ./test.py > /dev/null
+run="$(ts "$start")"
+
+printf "| %8d | %8d | %8d | %8d | %8d | %8d |\n" \
+       "$NSCEN" "$NSTEP" "$gen" "$doc" "$code" "$run"

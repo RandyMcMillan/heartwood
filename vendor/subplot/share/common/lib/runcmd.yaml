@@ -1,0 +1,242 @@
+# Bindings for the runcmd steplibrary
+
+- given: helper script {script} for runcmd
+  impl:
+    python:
+      function: runcmd_helper_script
+    rust:
+      function: subplotlib::steplibrary::runcmd::helper_script
+  types:
+    script: file
+  doc: |
+    Install a helper script from an embedded file.
+
+- given: srcdir is in the PATH
+  impl:
+    python:
+      function: runcmd_helper_srcdir_path
+    rust:
+      function: subplotlib::steplibrary::runcmd::helper_srcdir_path
+  doc: |
+    Make sure the source directory of the project being testes is on
+    the shell PATH. This makes it easy for tests to invoke programs
+    from the source tree.
+
+- when: I run {argv0}{args:text}
+  impl:
+    python:
+      function: runcmd_step
+    rust:
+      function: subplotlib::steplibrary::runcmd::run
+  doc: |
+    Run a program, and make sure it succeeds.
+
+- when: I run, in {dirname}, {argv0}{args}
+  impl:
+    python:
+      function: runcmd_step_in
+    rust:
+      function: subplotlib::steplibrary::runcmd::run_in
+  types:
+    dirname: path
+    argv0: word
+    args: text
+  doc: |
+    Change to a different directory and run a program, and make sure
+    it succeeds;
+
+- when: I try to run {argv0}{args:text}
+  impl:
+    python:
+      function: runcmd_try_to_run
+    rust:
+      function: subplotlib::steplibrary::runcmd::try_to_run
+  doc: |
+    Run a program, but allow it to fail. Other steps can check if it
+    succeeded.
+
+- when: I try to run, in {dirname}, {argv0}{args}
+  impl:
+    python:
+      function: runcmd_try_to_run_in
+    rust:
+      function: subplotlib::steplibrary::runcmd::try_to_run_in
+  types:
+    dirname: path
+    argv0: word
+    args: text
+  doc: |
+    Change to a different directory and run a program, but allow it to
+    fail. Other steps can check if it succeeded.
+
+# Steps to examine exit code of latest command.
+
+- then: exit code is {exit}
+  impl:
+    python:
+      function: runcmd_exit_code_is
+    rust:
+      function: subplotlib::steplibrary::runcmd::exit_code_is
+  types:
+    exit: int
+  doc: |
+    Make sure the latest command run by `lib/runcmd` had a specific
+    exit code.
+
+- then: exit code is not {exit}
+  impl:
+    python:
+      function: runcmd_exit_code_is_not
+    rust:
+      function: subplotlib::steplibrary::runcmd::exit_code_is_not
+  types:
+    exit: int
+  doc: |
+    Make sure the latest command run by `lib/runcmd` did not have a
+    specific exit code.
+
+- then: command is successful
+  impl:
+    python:
+      function: runcmd_exit_code_is_zero
+    rust:
+      function: subplotlib::steplibrary::runcmd::exit_code_is_zero
+  doc: |
+    Make sure the latest command run by `lib/runcmd` indicated the
+    command succeeded.
+
+- then: command fails
+  impl:
+    python:
+      function: runcmd_exit_code_is_nonzero
+    rust:
+      function: subplotlib::steplibrary::runcmd::exit_code_is_nonzero
+  doc: |
+    Make sure the latest command run by `lib/runcmd` indicated the
+    command failed.
+
+# Steps to examine stdout/stderr for exact content.
+
+- then: stdout is exactly "{text:text}"
+  impl:
+    python:
+      function: runcmd_stdout_is
+    rust:
+      function: subplotlib::steplibrary::runcmd::stdout_is
+  doc: |
+    Make sure the standard output of the latest command run by
+    `lib/runcmd` is exactly as desired.
+
+- then: 'stdout isn''t exactly "{text:text}"'
+  impl:
+    python:
+      function: runcmd_stdout_isnt
+    rust:
+      function: subplotlib::steplibrary::runcmd::stdout_isnt
+  doc: |
+    Make sure the standard output of the latest command run by
+    `lib/runcmd` is different from what is not wanted.
+
+- then: stderr is exactly "{text:text}"
+  impl:
+    python:
+      function: runcmd_stderr_is
+    rust:
+      function: subplotlib::steplibrary::runcmd::stderr_is
+  doc: |
+    Make sure the standard error output of the latest command run by
+    `lib/runcmd` is exactly as desired.
+
+- then: 'stderr isn''t exactly "{text:text}"'
+  impl:
+    python:
+      function: runcmd_stderr_isnt
+    rust:
+      function: subplotlib::steplibrary::runcmd::stderr_isnt
+  doc: |
+    Make sure the standard error output of the latest command run by
+    `lib/runcmd` is different from what is not wanted.
+
+# Steps to examine stdout/stderr for sub-strings.
+
+- then: stdout contains "{text:text}"
+  impl:
+    python:
+      function: runcmd_stdout_contains
+    rust:
+      function: subplotlib::steplibrary::runcmd::stdout_contains
+  doc: |
+    Make sure the standard output of the latest command run by
+    `lib/runcmd` contains the desired sub-string.
+
+- then: 'stdout doesn''t contain "{text:text}"'
+  impl:
+    python:
+      function: runcmd_stdout_doesnt_contain
+    rust:
+      function: subplotlib::steplibrary::runcmd::stdout_doesnt_contain
+  doc: |
+    Make sure the standard output of the latest command run by
+    `lib/runcmd` does not contain the sub-string.
+
+- then: stderr contains "{text:text}"
+  impl:
+    python:
+      function: runcmd_stderr_contains
+    rust:
+      function: subplotlib::steplibrary::runcmd::stderr_contains
+  doc: |
+    Make sure the standard output of the latest command run by
+    `lib/runcmd` contains the desired sub-string.
+
+- then: 'stderr doesn''t contain "{text:text}"'
+  impl:
+    python:
+      function: runcmd_stderr_doesnt_contain
+    rust:
+      function: subplotlib::steplibrary::runcmd::stderr_doesnt_contain
+  doc: |
+    Make sure the standard error output of the latest command run by
+    `lib/runcmd` does not contain the sub-string.
+
+# Steps to match stdout/stderr against regular expressions.
+
+- then: stdout matches regex {regex:text}
+  impl:
+    python:
+      function: runcmd_stdout_matches_regex
+    rust:
+      function: subplotlib::steplibrary::runcmd::stdout_matches_regex
+  doc: |
+    Make sure the standard output of the latest command run by
+    `lib/runcmd` matches the desired regular expression.
+
+- then: stdout doesn't match regex {regex:text}
+  impl:
+    python:
+      function: runcmd_stdout_doesnt_match_regex
+    rust:
+      function: subplotlib::steplibrary::runcmd::stdout_doesnt_match_regex
+  doc: |
+    Make sure the standard output of the latest command run by
+    `lib/runcmd` does not match a regular expression.
+
+- then: stderr matches regex {regex:text}
+  impl:
+    python:
+      function: runcmd_stderr_matches_regex
+    rust:
+      function: subplotlib::steplibrary::runcmd::stderr_matches_regex
+  doc: |
+    Make sure the standard error output of the latest command run by
+    `lib/runcmd` matches the desired regular expression.
+
+- then: stderr doesn't match regex {regex:text}
+  impl:
+    python:
+      function: runcmd_stderr_doesnt_match_regex
+    rust:
+      function: subplotlib::steplibrary::runcmd::stderr_doesnt_match_regex
+  doc: |
+    Make sure the standard error output of the latest command run by
+    `lib/runcmd` does not match a regular expression.

@@ -1,0 +1,4 @@
+template: template.rs.tera
+run: cargo test
+helpers:
+  - macros.rs.tera

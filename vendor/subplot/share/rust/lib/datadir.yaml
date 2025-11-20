@@ -1,0 +1,24 @@
+# Bindings for the datadir steps
+# These steps are pretty simplistic since Datadir is mostly
+# a utility context for use by other step libraries, however some
+# of the capabilities are worth exporting as steps
+
+- given: datadir has at least {bytes}B of space
+  impl:
+    rust:
+      function: subplotlib::steplibrary::datadir::datadir_has_enough_space
+  types:
+    bytes: uint
+  doc: |
+    Check the test data directory has at least the given amount of
+    free space expressed as bytes.
+
+- given: datadir has at least {megabytes}M of space
+  impl:
+    rust:
+      function: subplotlib::steplibrary::datadir::datadir_has_enough_space_megabytes
+  types:
+    megabytes: uint
+  doc: |
+    Check the test data directory has at least the given amount of
+    free space expressed as megabytes.

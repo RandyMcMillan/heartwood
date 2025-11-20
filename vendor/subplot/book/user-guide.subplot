@@ -1,0 +1,10 @@
+title: "Subplot user guide"
+authors:
+  - The Subplot project
+markdowns:
+  - user-guide.md
+bindings:
+  - lib/runcmd.yaml
+impls:
+  python:
+    - lib/runcmd.py

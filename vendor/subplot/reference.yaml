@@ -1,0 +1,9 @@
+- given: "a clone of {url} in src at {commit}"
+  impl:
+    python:
+      function: clone_to_src
+
+- when: "I docgen {filename} to {output}, in {dirname}"
+  impl:
+    python:
+      function: docgen

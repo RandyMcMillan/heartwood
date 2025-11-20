@@ -1,0 +1,90 @@
+- given: "a fresh Muck server"
+  impl:
+    python:
+      function: fixme
+
+- given: "I am {name}"
+  impl:
+    python:
+      function: fixme
+
+- given: "I am {name}, with super capability"
+  impl:
+    python:
+      function: fixme
+
+- when: "I do POST /res with (?P<json>\\{.*\\})"
+  impl:
+    python:
+      function: fixme
+  regex: true
+  types:
+    json: text
+
+- when: "I do PUT /res with Muck-Id: \\{(?P<id>\\S+)\\}, Muck-Revision: \\{(?P<rev>\\S+)\\}, and body (?P<json>\\{.*\\})"
+  impl:
+    python:
+      function: fixme
+  regex: true
+  types:
+    id: word
+    rev: word
+    json: text
+
+- when: "I do GET /res with Muck-Id: \\{(?P<id>\\S+)\\}"
+  impl:
+    python:
+      function: fixme
+  regex: true
+  types:
+    id: word
+
+- when: "I do DELETE /res with Muck-Id: \\{(?P<id>\\S+)\\}"
+  impl:
+    python:
+      function: fixme
+  regex: true
+  types:
+    id: word
+
+- when: "I restart Muck"
+  impl:
+    python:
+      function: fixme
+  regex: true
+
+- then: "response code is {code:uint}"
+  impl:
+    python:
+      function: fixme
+
+- then: "header {header} is {name}"
+  impl:
+    python:
+      function: fixme
+
+- then: "header (?P<header>\\S+) matches \\{(?P<name>\\S+)\\}"
+  impl:
+    python:
+      function: fixme
+  regex: true
+  types:
+    header: word
+    name: word
+
+- then: "body matches (?P<json>\\{.*\\})"
+  impl:
+    python:
+      function: fixme
+  regex: true
+  types:
+    json: text
+
+- then: "revisions \\{(?P<rev1>\\S+)\\} and \\{(?P<rev2>\\S+)\\} are different"
+  impl:
+    python:
+      function: fixme
+  regex: true
+  types:
+    rev1: word
+    rev2: word

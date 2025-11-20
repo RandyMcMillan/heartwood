@@ -1,0 +1,310 @@
+# Bindings for the lib/files step library
+
+# Create or modify files.
+
+- given: file {embedded_file}
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::create_from_embedded
+    python:
+      function: files_create_from_embedded
+  types:
+    embedded_file: file
+  doc: |
+    Create a file on disk from an embedded file in the subplot
+    document. The created file has the same name as the embedded file.
+
+- given: file {filename_on_disk} from {embedded_file}
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::create_from_embedded_with_other_name
+    python:
+      function: files_create_from_embedded_with_other_name
+  types:
+    filename_on_disk: path
+    embedded_file: file
+  doc: |
+    Create a file on disk from an embedded file in the subplot
+    document. Set the name of the created file.
+
+- when: I write "{text}" to file {filename}
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::create_from_text
+    python:
+      function: files_create_from_text
+  types:
+    filename: path
+    text: text
+  doc: |
+    Create a file on disk with the given content.
+
+# Manage directories (distinct from files).
+
+- given: a directory {path}
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::make_directory
+    python:
+      function: files_make_directory
+  types:
+    path: path
+  doc: |
+    Create a directory on disk.
+
+- when: I create directory {path}
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::make_directory
+    python:
+      function: files_make_directory
+  types:
+    path: path
+  doc: |
+    Create a directory on disk.
+
+- when: I remove directory {path}
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::remove_directory
+    python:
+      function: files_remove_directory
+  types:
+    path: path
+  doc: |
+    Remove a directory on disk.
+
+- then: directory {path} exists
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::path_exists
+    python:
+      function: files_directory_exists
+  types:
+    path: path
+  doc: |
+    Check that a directory exists.
+
+- then: directory {path} does not exist
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::path_does_not_exist
+    python:
+      function: files_directory_does_not_exist
+  types:
+    path: path
+  doc: |
+    Check that a directory does not exist.
+
+- then: directory {path} is empty
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::path_is_empty
+    python:
+      function: files_directory_is_empty
+  types:
+    path: path
+  doc: |
+    Check that a directory exists and does not contain anything.
+
+- then: directory {path} is not empty
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::path_is_not_empty
+    python:
+      function: files_directory_is_not_empty
+  types:
+    path: path
+  doc: |
+    Check that a directory exists and contains something.
+
+# File metadata management and testing.
+
+- given: file (?P<filename>\S+) has modification time (?P<mtime>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})
+  regex: true
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::touch_with_timestamp
+    python:
+      function: files_touch_with_timestamp
+  types:
+    filename: path
+    mtime: text
+  doc: |
+    Create a file with specific modification time.
+
+- when: I remember metadata for file {filename}
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::remember_metadata
+    python:
+      function: files_remember_metadata
+  types:
+    filename: path
+  doc: |
+    Remember the metadata of a file.
+
+- when: I touch file {filename}
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::touch
+    python:
+      function: files_touch
+  types:
+    filename: path
+  doc: |
+    Update the modification time of a file to be current time.
+
+- then: file {filename} has same metadata as before
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::has_remembered_metadata
+    python:
+      function: files_has_remembered_metadata
+  types:
+    filename: path
+  doc: |
+    Check that a file has the same metadata as remembered from
+    earlier.
+
+- then: file {filename} has different metadata from before
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::has_different_metadata
+    python:
+      function: files_has_different_metadata
+  types:
+    filename: path
+  doc: |
+    Check that a file metadata has changed from earlier.
+
+- then: file {filename} has changed from before
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::has_different_metadata
+    python:
+      function: files_has_different_metadata
+  types:
+    filename: path
+  doc: |
+    Check that file metadata has changed from before.
+
+- then: file {filename} has a very recent modification time
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::mtime_is_recent
+    python:
+      function: files_mtime_is_recent
+  types:
+    filename: path
+  doc: |
+    Check that file modification time is recent.
+
+- then: file {filename} has a very old modification time
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::mtime_is_ancient
+    python:
+      function: files_mtime_is_ancient
+  types:
+    filename: path
+  doc: |
+    Check that file modification is far in the past.
+
+# Testing file existence.
+
+- then: file {filename} exists
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::file_exists
+    python:
+      function: files_file_exists
+  types:
+    filename: path
+  doc: |
+    Check that a file exist.
+
+- then: file {filename} does not exist
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::file_does_not_exist
+    python:
+      function: files_file_does_not_exist
+  types:
+    filename: path
+  doc: |
+    Check that a file does not exist.
+
+- then: only files (?P<filenames>.+) exist
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::only_these_exist
+    python:
+      function: files_only_these_exist
+  regex: true
+  types:
+    filenames: text
+  doc: |
+    Check that the test directory only contains specific files.
+
+# Tests on file content.
+
+- then: file {filename} contains "{data}"
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::file_contains
+    python:
+      function: files_file_contains
+  types:
+    filename: path
+    data: text
+  doc: |
+    Check that a file contains a string.
+
+- then: file {filename} doesn't contain "{data}"
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::file_doesnt_contain
+    python:
+      function: files_file_doesnt_contain
+  types:
+    filename: path
+    data: text
+  doc: |
+    Check that a file does not contain a string.
+
+- then: file {filename} matches regex /{regex}/
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::file_matches_regex
+    python:
+      function: files_file_matches_regex
+  types:
+    filename: path
+    regex: text
+  doc: |
+    Check that file content matches a regular expression.
+
+- then: file {filename} matches regex "{regex}"
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::file_matches_regex
+    python:
+      function: files_file_matches_regex
+  types:
+    filename: path
+    regex: text
+  doc: |
+    Check that file content matches a regular expression.
+
+- then: files {filename1} and {filename2} match
+  impl:
+    rust:
+      function: subplotlib::steplibrary::files::file_match
+    python:
+      function: files_match
+  types:
+    filename1: path
+    filename2: path
+  doc: |
+    Check that two files have the same content.

@@ -1,0 +1,28 @@
+# CI configuration for subplot
+
+default:
+  image: registry.gitlab.com/subplot/subplot-container-images:main
+
+check:
+  stage: test
+  script:
+    - sudo apt update
+    - sudo apt -y build-dep .
+    - ./check -v
+
+check-msrv:
+  stage: test
+  script:
+    - sudo apt update
+    - sudo apt -y build-dep .
+    - rustup default 1.79
+    - ./check -v --sloppy
+
+check-minimal-versions:
+  stage: test
+  script:
+    - sudo apt update
+    - sudo apt -y build-dep .
+    - cargo minimal-versions build
+    - cargo minimal-versions test --workspace
+

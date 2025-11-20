@@ -1,0 +1,121 @@
+- given: an installed subplot
+  impl:
+    python:
+      function: install_subplot
+      cleanup: uninstall_subplot
+    rust:
+      function: install_subplot
+      cleanup: uninstall_subplot
+
+- then: scenario "{name:text}" was run
+  impl:
+    python:
+      function: scenario_was_run
+    rust:
+      function: scenario_was_run
+
+- then: scenario "{name:text}" was not run
+  impl:
+    python:
+      function: scenario_was_not_run
+    rust:
+      function: scenario_was_not_run
+
+- then: step "(?P<keyword>given|when|then) (?P<name>.+)" was run
+  impl:
+    python:
+      function: step_was_run
+    rust:
+      function: step_was_run
+  regex: true
+  types:
+    keyword: text
+    name: text
+
+- then: step "(?P<keyword1>given|when|then) (?P<name1>.+)" was run, and then step "(?P<keyword2>given|when|then) (?P<name2>.+)"
+  impl:
+    python:
+      function: step_was_run_and_then
+    rust:
+      function: step_was_run_and_then
+  regex: true
+  types:
+    keyword1: text
+    keyword2: text
+    name1: text
+    name2: text
+
+- then: cleanup for "(?P<keyword1>given|when|then) (?P<name1>.+)" was run, and then for "(?P<keyword2>given|when|then) (?P<name2>.+)"
+  impl:
+    python:
+      function: cleanup_was_run
+    rust:
+      function: cleanup_was_run
+  regex: true
+  types:
+    keyword1: text
+    keyword2: text
+    name1: text
+    name2: text
+
+- then: cleanup for "(?P<keyword>given|when|then) (?P<name>.+)" was not run
+  impl:
+    python:
+      function: cleanup_was_not_run
+    rust:
+      function: cleanup_was_not_run
+  regex: true
+  types:
+    keyword: text
+    name: text
+
+- then: JSON output matches {filename}
+  impl:
+    python:
+      function: json_output_matches_file
+    rust:
+      function: json_output_matches_file
+
+- then: "{filename} does not end in a newline"
+  impl:
+    python:
+      function: file_ends_in_zero_newlines
+    rust:
+      function: file_ends_in_zero_newlines
+
+- then: "{filename} ends in one newline"
+  impl:
+    python:
+      function: file_ends_in_one_newline
+    rust:
+      function: file_ends_in_one_newline
+
+- then: "{filename} ends in two newlines"
+  impl:
+    python:
+      function: file_ends_in_two_newlines
+    rust:
+      function: file_ends_in_two_newlines
+
+# The following are purely descriptive steps and are not used to test anything
+
+- given: the necessary starting conditions
+  impl:
+    python:
+      function: do_nothing
+    rust:
+      function: do_nothing
+
+- when: I do the required actions
+  impl:
+    python:
+      function: do_nothing
+    rust:
+      function: do_nothing
+
+- then: the desired outcome is achieved
+  impl:
+    python:
+      function: do_nothing
+    rust:
+      function: do_nothing

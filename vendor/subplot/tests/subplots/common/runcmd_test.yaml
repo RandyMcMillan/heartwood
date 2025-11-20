@@ -1,0 +1,18 @@
+- given: "executable script {filename} from {embedded}"
+  impl:
+    python:
+      function: create_script_from_embedded
+    rust:
+      function: create_script_from_embedded
+  types:
+    filename: path
+    embedded: file
+
+- when: "I prepend {dirname} to PATH"
+  impl:
+    python:
+      function: runcmd_prepend_to_path
+    rust:
+      function: prepend_to_path
+  types:
+    dirname: path

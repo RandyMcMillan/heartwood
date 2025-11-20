@@ -1,0 +1,46 @@
+{% import "macros.rs.tera" as macros %}
+
+use subplotlib::prelude::*;
+
+{% for func in functions %}
+
+// --------------------------------
+// This came from {{ func.source }}
+
+{{ func.code }}
+
+{% endfor %}
+
+// --------------------------------
+
+lazy_static! {
+    static ref SUBPLOT_EMBEDDED_FILES: Vec<SubplotDataFile> = vec![
+{% for file in files %}
+        SubplotDataFile::new("{{ file.filename | base64 }}",
+                             "{{ file.contents | base64 }}"),
+{% endfor %}
+    ];
+}
+
+{% for scenario in scenarios %}
+
+// ---------------------------------
+
+// {{ scenario.title | commentsafe }}
+#[test]
+#[allow(non_snake_case)]
+fn {{ scenario.title | nameslug }}() {
+    let mut scenario = Scenario::new(&base64_decode("{{scenario.title | base64}}"), {{ scenario.origin | location }});
+    {% for step in scenario.steps %}
+    let step = {{ macros::builder(stepfn=step.function, step=step) }};
+    {%- if step.cleanup %}
+    let cleanup = {{ macros::builder(stepfn=step.cleanup, step=step) }};
+    scenario.add_step(step, Some(cleanup));
+    {%- else %}
+    scenario.add_step(step, None);
+    {%- endif %}
+    {% endfor %}
+
+    scenario.run().unwrap();
+}
+{% endfor %}

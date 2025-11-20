@@ -1,0 +1,10 @@
+title: "**echo**(1) acceptance tests"
+authors:
+  - The Subplot project
+markdowns:
+  - echo.md
+bindings:
+  - echo.yaml
+impls:
+  bash:
+    - echo.sh

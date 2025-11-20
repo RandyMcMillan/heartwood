@@ -1,0 +1,19 @@
+- given: website {url}
+  impl:
+    python:
+      function: remember_url
+
+- when: I look at the front page
+  impl:
+    python:
+      function: fetch_url
+
+- then: it mentions "{text:text}"
+  impl:
+    python:
+      function: page_contains
+
+- then: it doesn't contain "{text:text}"
+  impl:
+    python:
+      function: page_doesnt_contain

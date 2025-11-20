@@ -1,0 +1,19 @@
+Source: subplot
+Maintainer: Lars Wirzenius <liw@liw.fi>
+Section: utils
+Priority: optional
+Standards-Version: 4.2.0
+Build-Depends: debhelper (>= 10~), python3, python3-requests,
+  librsvg2-bin, graphviz, plantuml, daemonize, procps, tidy
+Homepage: https://subplot.liw.fi
+
+Package: subplot
+Architecture: any
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Recommends: librsvg2-bin, graphviz
+Suggests: plantuml
+Built-Using: ${cargo:Built-Using}
+Description: automatic tool for acceptance testing
+ Capture and communicate acceptance criteria for software and systems,
+ and how they are verified, in a way that's understood by all project
+ stakeholders.

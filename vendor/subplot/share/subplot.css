@@ -1,0 +1,114 @@
+html {
+    margin: 0;
+    padding: 0;
+    border: 0;
+}
+body {
+    margin-left: 2em;
+    margin-right: 2em;
+}
+
+/* Table of contents. */
+
+div.toc ul {
+    list-style-type: none;
+}
+
+div.toc .toc-link {
+    text-decoration: none;
+}
+
+div.toc .toc-link .heading-number {
+    text-decoration: none;
+    margin-right: 0.5em;
+}
+
+div.toc .toc-link .heading-text {
+    text-decoration: underline;
+}
+
+/* Headings for chapters and sections */
+
+h1, h2, h3, h4, h5, h6 {
+    font-family: sans-serif;
+}
+
+/* Images */
+
+img {
+    margin-left: 1em;
+}
+
+/* Code blocks, embedded files. */
+
+pre {
+    font-family: monospace;
+    margin-left: 1em;
+    background: #f0f0f0;
+    border: solid black 1px;
+    padding: 5px;
+}
+
+/* Scenarios. */
+
+div.scenario {
+    margin-left: 1em;
+    background: #f0f0f0;
+    border: solid black 1px;
+    padding: 5px;
+}
+
+span.keyword {
+}
+
+span.uncaptured {
+    font-style: italic;
+}
+
+span.capture-file {
+    font-family: monospace;
+    background: #cccccc;
+}
+
+span.capture-path {
+    font-family: monospace;
+    background: #cccccc;
+}
+
+span.capture-word {
+    font-family: monospace;
+    background: #cccccc;
+}
+
+span.capture-text {
+    font-family: monospace;
+    background: #cccccc;
+}
+
+/* Tables */
+
+table {
+    margin-left: 1em;
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    border: 1px solid black;
+    line-height: 150%;
+}
+
+td, th {
+    text-align: left;
+    vertical-align: top;
+    padding-left: 0.5em;
+    padding-top: 0.25em;
+    padding-bottom: 0.25em;
+}
+
+th {
+    font-weight: bold;
+    border-bottom: 1px solid black;
+}
+
+tr:nth-child(even) {
+    background-color: #f2f2f2;
+}

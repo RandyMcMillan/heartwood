@@ -1,0 +1,48 @@
+#!/bin/bash
+
+set -euo pipefail
+
+# Get output directory.
+if [ "$#" != 1 ]; then
+	echo "Usage: $0 OUTPUT-DIR" 1>&2
+	exit 1
+fi
+output="$1"
+
+# Build Subplot so that we can use it to generate
+# documentation.
+
+cargo build
+PATH="${CARGO_TARGET_DIR:-target}:$PATH"
+type -all subplot
+
+# Build subplots that come with Subplot
+
+opts="--resources $(pwd)/src/share"
+find . -name "*.subplot" |
+	grep -Fv .gitlab/ |
+	while read -r file; do
+		base="$(basename "$file" .subplot)"
+		(
+			cd "$(dirname "$file")"
+			# shellcheck disable=SC2154 disable=SC2086
+			if subplot $opts metadata --merciful "$base.subplot" | awk '/^title:/ && NF > 1' | grep .; then
+				subplot $opts docgen --merciful "$base.subplot" -o "$output/$base.html"
+			fi
+		)
+	done
+
+# Build Subplot library documentation.
+
+libdocs="$output/libdocs"
+mkdir -p "$libdocs"
+
+find share -name '*.yaml' ! -name template.yaml |
+	while read -r yaml; do
+		dir="$(dirname "$yaml")"
+		md="$dir/$(basename "$yaml" .yaml).md"
+		subplot "--resources=$(pwd)" libdocgen --output "$md" "$yaml"
+		pandoc --standalone --self-contained \
+			--metadata title="$(basename "$yaml" .yaml)" \
+			-o "$libdocs/$(basename "$md" .md)".html "$md"
+	done

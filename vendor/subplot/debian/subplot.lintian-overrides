@@ -1,0 +1,3 @@
+subplot binary: no-manual-page
+subplot: shell-script-fails-syntax-check
+subplot: script-not-executable

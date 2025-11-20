@@ -1,0 +1,29 @@
+- when: user runs echo without arguments
+  impl:
+    bash:
+      function: run_echo_without_args
+
+- when: user runs echo with arguments {args:text}
+  impl:
+    bash:
+      function: run_echo_with_args
+
+- then: exit code is {exit_code:uint}
+  impl:
+    bash:
+      function: exit_code_is
+
+- then: standard output contains a newline
+  impl:
+    bash:
+      function: stdout_is_a_newline
+
+- then: standard output contains "{text:text}"
+  impl:
+    bash:
+      function: stdout_is_text
+
+- then: standard error is empty
+  impl:
+    bash:
+      function: stderr_is_empty

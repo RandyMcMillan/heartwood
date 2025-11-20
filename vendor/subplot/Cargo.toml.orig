@@ -1,0 +1,57 @@
+[package]
+name = "subplot"
+version = "0.11.0"
+authors = [
+  "Lars Wirzenius <liw@liw.fi>",
+  "Daniel Silverstone <dsilvers@digital-scurf.org>",
+]
+edition = "2021"
+license = "MIT-0"
+description = '''
+tools for specifying, documenting,
+and implementing automated acceptance tests for systems and software'''
+homepage = "https://subplot.tech/"
+repository = "https://gitlab.com/subplot/subplot"
+default-run = "subplot"
+rust-version = "1.79"
+
+[workspace]
+members = ["subplotlib", "subplotlib-derive", "subplot-build", "examples/seq"]
+
+[dependencies]
+anyhow = "1.0.4"
+base64 = "0.22.1"
+clap = { version = "4", features = ["derive", "env", "string"] }
+env_logger = "0.11.3"
+file_diff = "1"
+git-testament = "0.2"
+html-escape = "0.2.13"
+lazy_static = "1"
+line-col = "0.2.1"
+log = "0.4.16"
+pikchr = "0.1"
+pulldown-cmark = "0.12.0"
+regex = "1"
+roadmap = "0.6.1"
+serde = { version = "1.0.101", features = ["derive"] }
+serde_json = "1.0"
+marked-yaml = { version = "0.7.0", features = ["serde-path"] }
+tempfile = "3.1.0"
+tempfile-fast = "0.3.1"
+thiserror = "1"
+time = { version = "0.3.4", features = ["formatting", "macros"] }
+
+# Dependencies which need pegging for cargo minimal-versions to work
+# This one comes via tera
+slug = "0.1.1"
+getopts = "0.2.21" # Minimise
+
+[dependencies.tera]
+version = "1.18"
+default-features = false
+# Expand out tera's default featurs, except for chrono related ones
+features = ["slug", "percent-encoding", "humansize", "rand"]
+
+[build-dependencies]
+walkdir = "2"
+anyhow = "1"

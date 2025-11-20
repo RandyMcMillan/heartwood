@@ -1,0 +1,9 @@
+template: template.py.tera
+helpers:
+  - context.py
+  - encoding.py
+  - files.py
+  - asserts.py
+  - scenarios.py
+  - main.py
+run: python3

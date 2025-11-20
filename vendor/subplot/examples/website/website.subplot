@@ -1,0 +1,10 @@
+title: Subplot website tutorial
+authors:
+  - The Subplot project
+markdowns:
+  - website.md
+bindings:
+  - website.yaml
+impls:
+  python:
+    - website.py

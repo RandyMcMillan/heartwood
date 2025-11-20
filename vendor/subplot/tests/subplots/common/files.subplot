@@ -1,0 +1,11 @@
+title: Acceptance criteria for the files Subplot library
+authors:
+  - The Subplot project
+markdowns:
+- files.md
+bindings:
+- lib/files.yaml
+impls:
+  python:
+    - lib/files.py
+  rust: []

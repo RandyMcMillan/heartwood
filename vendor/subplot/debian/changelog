@@ -1,0 +1,91 @@
+subplot (0.11.0) unstable; urgency=medium
+
+  * New release.
+
+ -- Lars Wirzenius <liw@liw.fi>  Tue, 20 Aug 2024 06:59:57 +0300
+
+subplot (0.10.0-1) unstable; urgency=medium
+
+  * New release
+
+ -- Lars Wirzenius <liw@liw.fi>  Sat, 15 Jun 2024 11:46:53 +0300
+
+subplot (0.9.0-1) unstable; urgency=medium
+
+  * New release.
+
+ -- Daniel Silverstone <dsilvers@digital-scurf.org>  Sun, 27 Aug 2023 11:30:00 +0100
+
+subplot (0.8.0-1) unstable; urgency=medium
+
+  * New release.
+
+ -- Daniel Silverstone <dsilvers@digital-scurf.org>  Wed, 14 Jun 2023 19:07:32 +0100
+
+subplot (0.7.1-1) unstable; urgency=medium
+
+  * New release.
+
+ -- Lars Wirzenius <liw@liw.fi>  Sun, 30 Apr 2023 11:51:05 +0300
+
+subplot (0.7.0-1) unstable; urgency=medium
+
+  * New release.
+
+ -- Daniel Silverstone <dsilvers@digital-scurf.org>  Mon, 10 Apr 2023 12:56:14 +0100
+
+subplot (0.6.0-1) unstable; urgency=medium
+
+  * New release.
+
+ -- Daniel Silverstone <dsilvers@digital-scurf.org>  Sun, 13 Nov 2022 19:41:24 +0000
+
+subplot (0.5.0-1) unstable; urgency=medium
+
+  * New release.
+
+ -- Lars Wirzenius <liw@liw.fi>  Tue, 13 Sep 2022 10:47:07 +0300
+
+subplot (0.4.2) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Lars Wirzenius <liw@liw.fi>  Thu, 28 Jul 2022 16:35:39 +0300
+
+subplot (0.4.0) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Daniel Silverstone <dsilvers@digital-scurf.org>  Fri, 15 April 2022 15:00:00 +0100
+
+subplot (0.3.1) unstable; urgency=medium
+
+  * New upstream release.
+  * Licence changed to MIT-0.
+
+ -- Lars Wirzenius <liw@liw.fi>  Tue, 16 Nov 2021 14:31:32 +0200
+
+subplot (0.3.0-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Lars Wirzenius <liw@liw.fi>  Thu, 21 Oct 2021 11:07:02 +0300
+
+subplot (0.2.2-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Lars Wirzenius <liw@liw.fi>  Sat, 07 Aug 2021 12:49:47 +0300
+
+subplot (0.2.1-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Lars Wirzenius <liw@liw.fi>  Sun, 11 Jul 2021 12:26:22 +0300
+
+subplot (0.1-1) unstable; urgency=low
+
+  * Initial packaging. This is not intended to be uploaded to Debian, so
+    no closing of an ITP bug.
+
+ -- Lars Wirzenius <liw@liw.fi>  Sat, 28 Sep 2019 16:45:49 +0300
