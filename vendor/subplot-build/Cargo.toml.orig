@@ -1,0 +1,20 @@
+[package]
+name = "subplot-build"
+version = "0.11.0"
+authors = [
+  "Lars Wirzenius <liw@liw.fi>",
+  "Daniel Silverstone <dsilvers@digital-scurf.org>",
+]
+edition = "2021"
+license = "MIT-0"
+description = '''A library for using Subplot code generation from another project's
+`build.rs` module.'''
+homepage = "https://subplot.tech/"
+repository = "https://gitlab.com/subplot/subplot"
+rust-version = "1.79"
+
+
+[dependencies]
+subplot = { version = "0.11.0", path = ".." }
+tracing = "0.1.9"
+tempfile = "3.1.0"
