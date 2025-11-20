@@ -1,0 +1,45 @@
+[package]
+name = "radicle-git-ext"
+version = "0.8.1"
+authors = [
+  "Alexis Sellier <alexis@radicle.xyz>",
+  "Kim Altintop <kim@eagain.st>",
+  "Fintan Halpenny <fintan.halpenny@gmail.com",
+  "Han Xu <keepsimple@gmail.com>",
+]
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Utilities and extensions to the git2 crate"
+keywords = ["git", "radicle"]
+
+[lib]
+doctest = false
+test = false
+
+[features]
+minicbor = ["git-ref-format/minicbor"]
+bstr = ["git-ref-format/bstr"]
+percent-encoding = ["git-ref-format/percent-encoding"]
+
+[dependencies]
+percent-encoding = "2"
+thiserror = "1"
+
+[dependencies.git2]
+version = "0.19"
+default-features = false
+features = ["vendored-libgit2"]
+
+[dependencies.git-ref-format]
+version = "0.3.1"
+path = "./git-ref-format"
+features = ["macro", "serde"]
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+optional = true
+
+[dependencies.radicle-std-ext]
+version = "0.1.0"
+path = "../radicle-std-ext"
