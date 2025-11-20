@@ -1,0 +1,19 @@
+[package]
+name = "culpa-macros"
+version = "1.0.2"
+edition = "2018"
+license = "MIT OR Apache-2.0"
+
+description = "Internal implementation details of `culpa`"
+repository = "https://github.com/Nullus157/culpa"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "1.0.29"
+proc-macro2 = "1.0.63"
+
+[dependencies.syn]
+features = ["fold", "full", "parsing"]
+version = "2.0.22"
