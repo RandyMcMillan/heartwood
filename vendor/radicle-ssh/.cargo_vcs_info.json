@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "0e48723b419be95340a5d9858d76963e8e97137b"
+  },
+  "path_in_vcs": "crates/radicle-ssh"
+}
