@@ -1,0 +1,30 @@
+[package]
+name = "marked-yaml"
+version = "0.7.2"
+authors = ["Daniel Silverstone <dsilvers@digital-scurf.org>"]
+edition = "2021"
+description = "A simplified YAML structure with provenance spans"
+homepage = "https://github.com/kinnison/marked-yaml/"
+repository = "https://github.com/kinnison/marked-yaml.git"
+readme = "README.md"
+keywords = ["yaml", "provenance"]
+categories = ["data-structures", "encoding", "parsing"]
+license = "MIT"
+
+[badges]
+maintenance = { status = "experimental" }
+
+[features]
+default = []
+serde = ["dep:serde"]
+serde-path = ["serde", "dep:serde_path_to_error"]
+
+[dependencies]
+doc-comment = "0.3"
+yaml-rust = { version = "0.9", package = "yaml-rust2" }
+hashlink = "0.9.0"
+serde = { version = "1.0.194", optional = true, features = ["derive"] }
+serde_path_to_error = { version = "0.1.16", optional = true }
+
+[package.metadata.docs.rs]
+all-features = true
