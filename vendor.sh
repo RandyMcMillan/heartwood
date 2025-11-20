@@ -6,8 +6,9 @@
 # inside each vendor dependency, stages the changes, commits them, and pushes
 # immediately on every iteration.
 
+BRANCH_SPEC="$(git branch --show-current):$(git branch --show-current)"
 cargo vendor;
-for dep in $(/bin/ls vendor);do rm -rf vendor/$dep/.git;git add vendor/$dep; git commit vendor/$dep -m $dep;git push randymcmillan 1909/922879/920656/93578340/6cfed884-vendor:1909/922879/920656/93578340/6cfed884-vendor;done
+for dep in $(/bin/ls vendor);do rm -rf vendor/$dep/.git;git add vendor/$dep; git commit vendor/$dep -m $dep;git push randymcmillan $BRANCH_SPEC;done
 
 # Exit immediately if a command exits with a non-zero status.
 set -e
@@ -15,8 +16,8 @@ set -e
 # --- Configuration ---
 VENDOR_DIR="vendor"
 # Push target uses the format: <remote_name> <source_branch>:<target_branch>
-REMOTE_NAME="randymcmillan"
-BRANCH_SPEC="1909/922879/920656/93578340/6cfed884-vendor:1909/922879/920656/93578340/6cfed884-vendor"
+REMOTE_NAME="RandyMcMillan"
+BRANCH_SPEC="$(git branch --show-current):$(git branch --show-current)"
 
 # --- Script Execution ---
 
