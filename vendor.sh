@@ -8,7 +8,7 @@
 
 BRANCH_SPEC="$(git branch --show-current):$(git branch --show-current)"
 cargo vendor;
-for dep in $(/bin/ls vendor);do rm -rf vendor/$dep/.git;git add vendor/$dep; git commit vendor/$dep -m $dep;git push origin $BRANCH_SPEC;done
+for dep in $(/bin/ls vendor);do rm -rf vendor/$dep/.git;git add vendor/$dep; git commit vendor/$dep -m $dep;git push origin $BRANCH_SPEC-vendor;done
 
 # Exit immediately if a command exits with a non-zero status.
 set -e
