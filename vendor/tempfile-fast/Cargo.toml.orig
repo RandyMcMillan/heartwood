@@ -1,0 +1,19 @@
+[package]
+name = "tempfile-fast"
+version = "0.3.4"
+authors = ["Chris West (Faux) <git@goeswhere.com>"]
+
+description = "Support for Linux-specific tempfile extensions"
+repository = "https://github.com/FauxFaux/tempfile-fast-rs"
+readme = "README.md"
+categories = ["filesystem", "os"]
+license = "MIT"
+
+edition = "2018"
+
+[dependencies]
+rand = "0.8"
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.34"
