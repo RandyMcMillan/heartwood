@@ -1,0 +1,10 @@
+title: Testing the Rust crate "subplotlib"
+markdowns:
+  - subplotlib.md
+bindings:
+  - subplotlib.yaml
+  - lib/datadir.yaml
+impls:
+  rust:
+    - helpers/subplotlib_context.rs
+    - helpers/subplotlib_impl.rs

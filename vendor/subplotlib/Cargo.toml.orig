@@ -1,0 +1,39 @@
+[package]
+name = "subplotlib"
+version = "0.11.0"
+authors = [
+  "Lars Wirzenius <liw@liw.fi>",
+  "Daniel Silverstone <dsilvers@digital-scurf.org>",
+]
+edition = "2021"
+license = "MIT-0"
+description = '''
+Utility functions and types for `subplot codegen` generated Rust based
+test suites.  Relies on `subplotlib-derive` for associated macros.'''
+homepage = "https://subplot.tech/"
+repository = "https://gitlab.com/subplot/subplot"
+rust-version = "1.79"
+
+
+[dependencies]
+subplotlib-derive = { version = "0.11.0", path = "../subplotlib-derive" }
+lazy_static = "1"
+base64 = "0.22.1"
+state = "0.5"
+tempfile = "3.1"
+fs2 = "0.4"
+time = { version = "0.3", features = ["macros", "parsing"] }
+filetime = "0.2.9"
+regex = "1.4"
+shell-words = "1.0"
+unescape = "0.1"
+remove_dir_all = "0.8"
+culpa = "1.0.1"
+
+
+[build-dependencies]
+glob = "0.3"
+subplot-build = { version = "0.11.0", path = "../subplot-build" }
+
+[dev-dependencies]
+serde_json = "1.0"

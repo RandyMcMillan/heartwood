@@ -1,0 +1,32 @@
+- given: a counter starting at {initial}
+  impl:
+    rust:
+      function: a_trivial_setup
+      cleanup: a_trivial_cleanup
+  types:
+    initial: int
+- when: the counter is incremented
+  impl:
+    rust:
+      function: increment_counter
+- then: the counter is {num}
+  impl:
+    rust:
+      function: check_counter
+  types:
+    num: number
+- given: I have read the file {file} into {somename}
+  impl:
+    rust:
+      function: acquire_file_content
+  types:
+    file: file
+    somename: text
+- when: I look at {somename}
+  impl:
+    rust:
+      function: remember_target
+- then: I see "{text:text}"
+  impl:
+    rust:
+      function: check_contents
