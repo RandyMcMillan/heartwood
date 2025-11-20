@@ -1,0 +1,12 @@
+digraph "" {
+   radicle_node [label="Radicle node"];
+   broker [label="CI broker"];
+   adapter [label="Adapter"];
+   engine [label="External CI system"];
+
+   radicle_node -> broker [label="change event"];
+   broker -> adapter [label="invoke"];
+   adapter -> engine [label="run"];
+   engine -> adapter [label="web hook?"];
+   adapter -> broker [label="result"];
+}

@@ -1,0 +1,8 @@
+@startuml
+node -> broker : RefsFetched event
+broker -> adapter : spawn
+broker -> adapter : send request
+adapter -> broker : response: run id
+note over adapter : perform the run
+adapter -> broker : response: result
+@enduml

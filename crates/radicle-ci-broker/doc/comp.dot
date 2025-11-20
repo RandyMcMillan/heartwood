@@ -1,0 +1,11 @@
+digraph "" {
+   radicle_node [label="Radicle node"];
+   broker [label="CI broker"];
+   native [label="Native CI"];
+   commands [label="Shell commands"];
+
+   radicle_node -> broker [label="change event"];
+   broker -> native [label="invoke"];
+   native -> commands [label="run"];
+   native -> broker [label="result"];
+}

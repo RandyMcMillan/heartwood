@@ -1,0 +1,13 @@
+@startuml
+node -> broker : RefsFetched event
+broker -> adapter : spawn
+broker -> adapter : send request
+adapter-> engine : trigger run
+engine -> worker : start run
+note over worker : perform the run
+engine -> adapter : response with run id
+adapter -> broker : response: run id
+worker -> engine : run finished
+engine -> adapter : web hook?
+adapter -> broker : response: result
+@enduml

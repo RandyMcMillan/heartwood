@@ -1,0 +1,16 @@
+title: Radicle CI broker
+subtitle: Acceptance criteria
+authors:
+  - The Radicle Project
+  - Lars Wirzenius
+markdowns:
+  - ci-broker.md
+bindings:
+  - ci-broker.yaml
+  - lib/files.yaml
+  - lib/runcmd.yaml
+impls:
+  rust:
+    - src/subplot.rs
+classes:
+  - json

@@ -1,0 +1,19 @@
+- given: "an installed cib"
+  impl:
+    rust:
+      function: install_cib
+
+- given: "an installed cibtool"
+  impl:
+    rust:
+      function: install_cibtool
+
+- given: "an installed synthetic-events"
+  impl:
+    rust:
+      function: install_synthetic_events
+
+- then: "stdout has one line"
+  impl:
+    rust:
+      function: stdout_has_one_line

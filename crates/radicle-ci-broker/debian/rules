@@ -1,0 +1,14 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	true
+
+override_dh_auto_install:
+	cargo install --offline --path=. --root=debian/radicle-ci-broker
+	rm -f debian/*/.crates*.*
+
+override_dh_auto_test:
+	echo tests are disabled, for now

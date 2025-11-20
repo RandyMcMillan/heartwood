@@ -1,0 +1,89 @@
+ul.repolist li {
+    margin-top: 1em;
+}
+
+ol.runlist li {
+    margin-top: 1em;
+}
+span.success {
+    color: white;
+    background-color: green;
+}
+span.failure {
+    color: red;
+    background-color: white;
+}
+span.unknown {
+    color: white;
+    background-color: grey;
+}
+
+span.missing_log {
+    color: red;
+}
+
+span.alias {
+    font-weight: bold;
+}
+
+code.branch {
+    font-weight: bold;
+}
+
+code.patch {
+    font-weight: bold;
+}
+
+code.commit, span.commit {
+    font-weight: bold;
+}
+
+code.revision {
+    font-weight: bold;
+}
+
+code.repoid, span.repoid {
+    font-weight: bold;
+}
+
+span.broker_run_id {
+    font-style: monospace;
+}
+
+span.adapter_run_id {
+    font-style: monospace;
+}
+
+span.triggered {
+    font-weight: bold;
+}
+
+span.running {
+    color: red;
+}
+
+span.finished {
+}
+
+span.who {
+    font-family: monospace;
+}
+
+table {
+    width: 100%;
+    table-layout: fixed;
+}
+
+td, th {
+    text-align: left;
+    vertical-align: top;
+    padding-top: 0.5em;
+    padding-bottom: 0.5em;
+}
+
+tr {
+}
+
+tr:nth-child(even) {
+    background-color: #f2f2f2;
+}
