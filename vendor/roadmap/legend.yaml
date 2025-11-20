@@ -1,0 +1,38 @@
+goal:
+  label: |
+    This is the end goal:
+    if we reach here, there
+    is nothing more to be
+    done in the project
+  depends:
+  - finished
+  - blocked
+
+finished:
+  status: finished
+  label: |
+    This task is finished;
+    the arrow indicates what
+    follows this task (unless
+    it's blocked)
+
+ready:
+  label: |
+    This task is ready 
+    to be done: it is not
+    blocked by anything
+
+next:
+  status: next
+  label: |
+    This task is chosen 
+    to be done next
+
+blocked:
+  label: |
+    This task is blocked
+    and can't be done until
+    something happens
+  depends:
+  - ready
+  - next

@@ -1,0 +1,19 @@
+[package]
+name = "roadmap"
+version = "0.6.1"
+authors = ["Lars Wirzenius <liw@liw.fi>"]
+edition = "2018"
+license = "MIT-0"
+description = "model a project roadmap as a directed acyclic graph"
+repository = "https://gitlab.com/larswirzenius/roadmap"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5.1", features = ["derive"] }
+serde = { version = "1.0.134", features = ["derive"] }
+marked-yaml = { version = "0.7", features = ["serde-path"] }
+tempfile = "3.10.0"
+textwrap = "0.16.1"
+thiserror = "1"
