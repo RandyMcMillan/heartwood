@@ -6,7 +6,7 @@ project.
 
 For cases where `threshold > 1`, it is necessary to gather a quorum of
 signatures to update the Radicle identity. To do this, we use the `rad id`
-command. For now, since we are the only delegate, and `treshold` is `1`, we
+command. For now, since we are the only delegate, and `threshold` is `1`, we
 can update the identity ourselves.
 
 Let's add Bob as a delegate using their DID,
@@ -19,6 +19,7 @@ $ rad id update --title "Add Bob" --description "Add Bob as a delegate" --delega
 ╭────────────────────────────────────────────────────────────────────────╮
 │ Title    Add Bob                                                       │
 │ Revision 0ca42d376bd566631083c8913cf86bec722da392                      │
+│ Parent   0656c217f917c3e06234771e9ecae53aba5e173e                      │
 │ Blob     053541ba7b90534b35dd8718e0ceaa408979b02b                      │
 │ Author   did:key:z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi      │
 │ State    accepted                                                      │
@@ -58,7 +59,7 @@ the delegates and threshold:
     +   "did:key:z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi",
     +   "did:key:z6Mkt67GdsW7715MEfRuP4pSZxJRJh6kj6Y48WRqVv4N1tRk"
       ],
-    ...
+    …
     -  "threshold": 1
     +  "threshold": 2
 
@@ -129,6 +130,7 @@ $ rad id show 0ca42d376bd566631083c8913cf86bec722da392
 ╭────────────────────────────────────────────────────────────────────────╮
 │ Title    Add Bob                                                       │
 │ Revision 0ca42d376bd566631083c8913cf86bec722da392                      │
+│ Parent   0656c217f917c3e06234771e9ecae53aba5e173e                      │
 │ Blob     053541ba7b90534b35dd8718e0ceaa408979b02b                      │
 │ Author   did:key:z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi      │
 │ State    accepted                                                      │

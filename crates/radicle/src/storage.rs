@@ -1,7 +1,7 @@
 pub mod git;
 pub mod refs;
 
-use std::collections::{hash_map, HashSet};
+use std::collections::{HashSet, hash_map};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::{fmt, io};
@@ -11,25 +11,53 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use crate::git::Oid;
-use crypto::{PublicKey, Unverified, Verified};
+use crypto::PublicKey;
 pub use git::{Validation, Validations};
 
 use crate::cob;
 use crate::collections::RandomMap;
-use crate::git::canonical;
-use crate::git::fmt::{refspec::PatternString, refspec::Refspec, Qualified, RefStr, RefString};
-use crate::git::raw::ErrorExt as _;
 use crate::git::RefError;
-use crate::identity::{doc, Did, PayloadError};
+use crate::git::canonical;
+use crate::git::fmt::{Qualified, RefStr, RefString, refspec::PatternString, refspec::Refspec};
+use crate::git::raw::ErrorExt as _;
+use crate::identity::{Did, PayloadError, doc};
 use crate::identity::{Doc, DocAt, DocError};
 use crate::identity::{Identity, RepoId};
-use crate::node::device::Device;
 use crate::node::SyncedAt;
 use crate::storage::git::NAMESPACES_GLOB;
-use crate::storage::refs::Refs;
+use crate::storage::refs::{FeatureLevel, Refs, SignedRefs};
 
-use self::refs::{RefsAt, SignedRefs};
+use self::refs::RefsAt;
 use crate::git::UserInfo;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignedRefsInfo {
+    /// Repositories with this set to `None` are ones that are seeded but not forked.
+    None,
+    /// Local signed refs, if any.
+    Some(refs::SignedRefs),
+    NeedsMigration,
+}
+
+impl SignedRefsInfo {
+    pub(crate) fn new(
+        result: Result<Option<SignedRefs>, refs::sigrefs::read::error::Read>,
+    ) -> Result<Self, refs::sigrefs::read::error::Read> {
+        Ok(match result {
+            Ok(Some(refs))
+                if refs.feature_level() >= FeatureLevel::LATEST && refs.parent().is_some() =>
+            {
+                SignedRefsInfo::Some(refs)
+            }
+            Ok(Some(_)) => SignedRefsInfo::NeedsMigration,
+            Ok(None) => SignedRefsInfo::None,
+            Err(refs::sigrefs::read::error::Read::Downgrade { .. }) => {
+                SignedRefsInfo::NeedsMigration
+            }
+            Err(err) => return Err(err),
+        })
+    }
+}
 
 /// Basic repository information.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,12 +65,11 @@ pub struct RepositoryInfo {
     /// Repository identifier.
     pub rid: RepoId,
     /// Head of default branch.
-    pub head: Oid,
+    pub head: Option<Oid>,
     /// Identity document.
     pub doc: Doc,
-    /// Local signed refs, if any.
-    /// Repositories with this set to `None` are ones that are seeded but not forked.
-    pub refs: Option<refs::SignedRefsAt>,
+    /// Information about local signed references.
+    pub refs: SignedRefsInfo,
     /// Sync time of the repository.
     pub synced_at: Option<SyncedAt>,
 }
@@ -88,7 +115,7 @@ impl FromIterator<PublicKey> for Namespaces {
     }
 }
 
-/// Output of [`WriteRepository::set_head`].
+/// Output of [`WriteRepository::set_default_branch_to_canonical_head`].
 pub struct SetHead {
     /// Old branch head.
     pub old: Option<Oid>,
@@ -107,7 +134,7 @@ impl SetHead {
 #[derive(Error, Debug)]
 pub enum RepositoryError {
     #[error(transparent)]
-    Storage(#[from] Error),
+    Storage(Box<Error>),
     #[error(transparent)]
     Store(#[from] cob::store::Error),
     #[error(transparent)]
@@ -119,15 +146,27 @@ pub enum RepositoryError {
     #[error(transparent)]
     Quorum(#[from] canonical::error::QuorumError),
     #[error(transparent)]
-    Refs(#[from] refs::Error),
+    Refs(Box<refs::Error>),
     #[error("missing canonical reference rule for default branch")]
     MissingBranchRule,
     #[error("could not get the default branch rule: {0}")]
-    DefaultBranchRule(#[from] doc::DefaultBranchRuleError),
+    DefaultBranchRule(#[from] doc::DefaultBranchError),
     #[error("failed to get canonical reference rules: {0}")]
     CanonicalRefs(#[from] doc::CanonicalRefsError),
     #[error(transparent)]
     FindObjects(#[from] canonical::effects::FindObjectsError),
+}
+
+impl From<Error> for RepositoryError {
+    fn from(err: Error) -> Self {
+        Self::Storage(Box::new(err))
+    }
+}
+
+impl From<refs::Error> for RepositoryError {
+    fn from(err: refs::Error) -> Self {
+        Self::Refs(Box::new(err))
+    }
 }
 
 impl RepositoryError {
@@ -313,60 +352,44 @@ impl fmt::Display for RefUpdate {
 }
 
 /// Project remotes. Tracks the git state of a project.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Remotes<V>(RandomMap<RemoteId, Remote<V>>);
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Remotes(RandomMap<RemoteId, Remote>);
 
-impl<V> FromIterator<(RemoteId, Remote<V>)> for Remotes<V> {
-    fn from_iter<T: IntoIterator<Item = (RemoteId, Remote<V>)>>(iter: T) -> Self {
+impl FromIterator<(RemoteId, Remote)> for Remotes {
+    fn from_iter<T: IntoIterator<Item = (RemoteId, Remote)>>(iter: T) -> Self {
         Self(iter.into_iter().collect())
     }
 }
 
-impl<V> Deref for Remotes<V> {
-    type Target = RandomMap<RemoteId, Remote<V>>;
+impl Deref for Remotes {
+    type Target = RandomMap<RemoteId, Remote>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl<V> Remotes<V> {
-    pub fn new(remotes: RandomMap<RemoteId, Remote<V>>) -> Self {
+impl Remotes {
+    pub fn new(remotes: RandomMap<RemoteId, Remote>) -> Self {
         Self(remotes)
     }
 }
 
-impl Remotes<Verified> {
-    pub fn unverified(self) -> Remotes<Unverified> {
-        Remotes(
-            self.into_iter()
-                .map(|(id, r)| (id, r.unverified()))
-                .collect(),
-        )
-    }
-}
-
-impl<V> Default for Remotes<V> {
-    fn default() -> Self {
-        Self(RandomMap::default())
-    }
-}
-
-impl<V> IntoIterator for Remotes<V> {
-    type Item = (RemoteId, Remote<V>);
-    type IntoIter = hash_map::IntoIter<RemoteId, Remote<V>>;
+impl IntoIterator for Remotes {
+    type Item = (RemoteId, Remote);
+    type IntoIter = hash_map::IntoIter<RemoteId, Remote>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
     }
 }
 
-impl<V> From<Remotes<V>> for RandomMap<RemoteId, Refs> {
-    fn from(other: Remotes<V>) -> Self {
+impl From<Remotes> for RandomMap<RemoteId, SignedRefs> {
+    fn from(other: Remotes) -> Self {
         let mut remotes = RandomMap::with_hasher(fastrand::Rng::new().into());
 
         for (k, v) in other.into_iter() {
-            remotes.insert(k, v.refs.into());
+            remotes.insert(k, v.refs);
         }
         remotes
     }
@@ -374,41 +397,20 @@ impl<V> From<Remotes<V>> for RandomMap<RemoteId, Refs> {
 
 /// A project remote.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Remote<V = Verified> {
+pub struct Remote {
     /// Git references published under this remote, and their hashes.
     #[serde(flatten)]
-    pub refs: SignedRefs<V>,
+    pub refs: SignedRefs,
 }
 
-impl Remote<Unverified> {
-    /// Create a new unverified remotes object.
-    pub fn new(refs: impl Into<SignedRefs<Unverified>>) -> Self {
+impl Remote {
+    /// Create a new remotes object.
+    pub fn new(refs: impl Into<SignedRefs>) -> Self {
         Self { refs: refs.into() }
-    }
-}
-
-impl Remote<Unverified> {
-    pub fn verified<R: ReadRepository>(self, repo: &R) -> Result<Remote<Verified>, Error> {
-        let refs = self.refs.verified(repo)?;
-
-        Ok(Remote { refs })
-    }
-}
-
-impl Remote<Verified> {
-    /// Create a new unverified remotes object.
-    pub fn new(refs: impl Into<SignedRefs<Verified>>) -> Self {
-        Self { refs: refs.into() }
-    }
-
-    pub fn unverified(self) -> Remote<Unverified> {
-        Remote {
-            refs: self.refs.unverified(),
-        }
     }
 
     pub fn to_refspecs(&self) -> Vec<Refspec<PatternString, PatternString>> {
-        let ns = self.id.to_namespace();
+        let ns = self.id().to_namespace();
         // Nb. the references in Refs are expected to be Qualified
         self.refs
             .keys()
@@ -424,8 +426,8 @@ impl Remote<Verified> {
     }
 }
 
-impl<V> Deref for Remote<V> {
-    type Target = SignedRefs<V>;
+impl Deref for Remote {
+    type Target = SignedRefs;
 
     fn deref(&self) -> &Self::Target {
         &self.refs
@@ -434,7 +436,7 @@ impl<V> Deref for Remote<V> {
 
 /// Read-only operations on a storage instance.
 pub trait ReadStorage {
-    type Repository: ReadRepository;
+    type Repository: ReadRepository + self::refs::sigrefs::git::reference::Reader;
 
     /// Get user info for this storage.
     fn info(&self) -> &UserInfo;
@@ -518,6 +520,13 @@ pub trait ReadRepository: Sized + ValidateRepository {
     /// Returns the [`Oid`] as well as the qualified reference name.
     fn head(&self) -> Result<(Qualified<'_>, Oid), RepositoryError>;
 
+    /// Gets the qualified reference name of the default branch of self,
+    /// according to the identity document.
+    #[deprecated]
+    fn default_branch(&self) -> Result<Qualified<'_>, RepositoryError> {
+        Ok(self.identity_doc()?.default_branch()?.to_owned())
+    }
+
     /// Compute the canonical head of this repository.
     ///
     /// Ignores any existing `HEAD` reference.
@@ -536,9 +545,6 @@ pub trait ReadRepository: Sized + ValidateRepository {
 
     /// Get the root commit of the canonical identity branch.
     fn identity_root(&self) -> Result<Oid, RepositoryError>;
-
-    /// Get the root commit of the identity branch of a sepcific remote.
-    fn identity_root_of(&self, remote: &RemoteId) -> Result<Oid, RepositoryError>;
 
     /// Load the identity history.
     fn identity(&self) -> Result<Identity, RepositoryError>
@@ -598,7 +604,7 @@ pub trait ReadRepository: Sized + ValidateRepository {
     /// Skips references with names that are not parseable into [`Qualified`].
     ///
     /// This function always peels reference to the commit. For tags, this means the [`Oid`] of the
-    /// commit pointed to by the tag is returned, and not the [`Oid`] of the tag itsself.
+    /// commit pointed to by the tag is returned, and not the [`Oid`] of the tag itself.
     fn references_glob(
         &self,
         pattern: &crate::git::fmt::refspec::PatternStr,
@@ -629,10 +635,10 @@ pub trait ReadRepository: Sized + ValidateRepository {
 /// Access the remotes of a repository.
 pub trait RemoteRepository {
     /// Get the given remote.
-    fn remote(&self, remote: &RemoteId) -> Result<Remote<Verified>, refs::Error>;
+    fn remote(&self, remote: &RemoteId) -> Result<Remote, refs::Error>;
 
     /// Get all remotes.
-    fn remotes(&self) -> Result<Remotes<Verified>, refs::Error>;
+    fn remotes(&self) -> Result<Remotes, refs::Error>;
 
     /// Get [`RefsAt`] of all remotes.
     fn remote_refs_at(&self) -> Result<Vec<RefsAt>, refs::Error>;
@@ -655,14 +661,40 @@ where
     ///
     /// Returns any ref found under that remote that isn't signed.
     /// If a signed ref is missing from the repository, an error is returned.
-    fn validate_remote(&self, remote: &Remote<Verified>) -> Result<Validations, Error>;
+    fn validate_remote(&self, remote: &Remote) -> Result<Validations, Error>;
 }
 
 /// Allows read-write access to a repository.
 pub trait WriteRepository: ReadRepository + SignRepository {
-    /// Set the repository head to the canonical branch.
-    /// This computes the head based on the delegate set.
-    fn set_head(&self) -> Result<SetHead, RepositoryError>;
+    /// Sets the canonical symbolic references.
+    ///
+    /// This only depends on canonical references (thus the `xyz.radicle.crefs`
+    /// payload, and possibly the `xyz.radicle.project` payload in the identity
+    /// document). The targeted canonical references are not computed and might
+    /// not even exist.
+    fn set_canonical_symbolic_refs(&self, message: &str) -> Result<(), RepositoryError> {
+        for (name, target) in self.identity_doc()?.canonical_refs()?.symbolic().iter() {
+            self.set_symbolic_ref(name, target, message)?;
+        }
+        Ok(())
+    }
+
+    /// Sets a symbolic reference, if it does not exist or its target is different
+    /// from the given one.
+    fn set_symbolic_ref<Name, Target>(
+        &self,
+        name: &Name,
+        target: &Target,
+        message: &str,
+    ) -> Result<(), RepositoryError>
+    where
+        Name: AsRef<RefStr>,
+        Target: AsRef<RefStr>;
+
+    /// Computes the head of the default branch based on the delegate set,
+    /// and sets it.
+    fn set_default_branch_to_canonical_head(&self) -> Result<SetHead, RepositoryError>;
+
     /// Set the repository 'rad/id' to the canonical commit, agreed by quorum.
     fn set_identity_head(&self) -> Result<Oid, RepositoryError> {
         let head = self.canonical_identity_head()?;
@@ -694,9 +726,12 @@ pub trait WriteRepository: ReadRepository + SignRepository {
 /// Allows signing refs.
 pub trait SignRepository {
     /// Sign the repository's refs under the `refs/rad/sigrefs` branch.
-    fn sign_refs<G>(&self, signer: &Device<G>) -> Result<SignedRefs<Verified>, RepositoryError>
-    where
-        G: crypto::signature::Signer<crypto::Signature>;
+    fn sign_refs(&self, signer: &impl crypto::Signer) -> Result<SignedRefs, RepositoryError>;
+
+    /// Sign the repository's refs under the `refs/rad/sigrefs` branch, even if unchanged.
+    ///
+    /// Most users will prefer [`Self::sign_refs`].
+    fn force_sign_refs(&self, signer: &impl crypto::Signer) -> Result<SignedRefs, RepositoryError>;
 }
 
 impl<T, S> ReadStorage for T
@@ -758,5 +793,5 @@ where
 #[cfg(test)]
 mod tests {
     #[test]
-    fn test_storage() {}
+    fn storage() {}
 }

@@ -12,7 +12,6 @@ use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
-use amplify::Wrapper;
 use nonempty::NonEmpty;
 use serde::{Deserialize, Serialize};
 use storage::{HasRepoId, RepositoryError};
@@ -21,18 +20,19 @@ use thiserror::Error;
 use crate::cob;
 use crate::cob::common::{Author, Authorization, CodeLocation, Label, Reaction, Timestamp};
 use crate::cob::store::Transaction;
+use crate::cob::store::access::WriteAs;
 use crate::cob::store::{Cob, CobAction};
 use crate::cob::thread;
 use crate::cob::thread::Thread;
 use crate::cob::thread::{Comment, CommentId, Edit, Reactions};
-use crate::cob::{op, store, ActorId, Embed, EntryId, ObjectId, TypeName, Uri};
+use crate::cob::{ActorId, Embed, EntryId, ObjectId, TypeName, Uri, op, store};
 use crate::crypto::PublicKey;
 use crate::git;
-use crate::identity::doc::{DocAt, DocError};
 use crate::identity::PayloadError;
-use crate::node::device::Device;
+use crate::identity::doc::{DefaultBranchError, DocAt, DocError};
 use crate::prelude::*;
 use crate::storage;
+use crate::storage::git::Repository;
 
 pub use cache::Cache;
 
@@ -56,44 +56,88 @@ impl<'a> PatchStream<'a> {
 }
 
 /// Unique identifier for a patch revision.
-#[derive(
-    Wrapper,
-    Debug,
-    Clone,
-    Copy,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    From,
-    Display,
-)]
-#[display(inner)]
-#[wrap(Deref)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RevisionId(EntryId);
 
+impl RevisionId {
+    pub fn into_inner(self) -> EntryId {
+        self.0
+    }
+}
+
+impl std::fmt::Display for RevisionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<EntryId> for RevisionId {
+    fn from(id: EntryId) -> Self {
+        Self(id)
+    }
+}
+
+impl From<RevisionId> for EntryId {
+    fn from(id: RevisionId) -> Self {
+        id.0
+    }
+}
+
+impl Deref for RevisionId {
+    type Target = EntryId;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<EntryId> for RevisionId {
+    fn borrow(&self) -> &EntryId {
+        &self.0
+    }
+}
+
 /// Unique identifier for a patch review.
-#[derive(
-    Wrapper,
-    Debug,
-    Clone,
-    Copy,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    From,
-    Display,
-)]
-#[display(inner)]
-#[wrapper(Deref)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReviewId(EntryId);
+
+impl ReviewId {
+    pub fn into_inner(self) -> EntryId {
+        self.0
+    }
+}
+
+impl std::fmt::Display for ReviewId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<EntryId> for ReviewId {
+    fn from(id: EntryId) -> Self {
+        Self(id)
+    }
+}
+
+impl From<ReviewId> for EntryId {
+    fn from(id: ReviewId) -> Self {
+        id.0
+    }
+}
+
+impl Deref for ReviewId {
+    type Target = EntryId;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<EntryId> for ReviewId {
+    fn borrow(&self) -> &EntryId {
+        &self.0
+    }
+}
 
 /// Index of a revision in the revisions list.
 pub type RevisionIx = usize;
@@ -119,6 +163,10 @@ pub enum Error {
     /// Identity document is missing.
     #[error("missing identity document")]
     MissingIdentity,
+    #[error(transparent)]
+    DefaultBranch(#[from] DefaultBranchError),
+    #[error(transparent)]
+    TargetBranch(#[from] TargetBranchError),
     /// Review is empty.
     #[error("empty review; verdict or summary not provided")]
     EmptyReview,
@@ -217,7 +265,7 @@ pub enum Action {
         /// Should be [`Some`] otherwise.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply_to: Option<CommentId>,
-        /// Embeded content.
+        /// Embedded content.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         embeds: Vec<Embed<Uri>>,
     },
@@ -265,7 +313,7 @@ pub enum Action {
     RevisionEdit {
         revision: RevisionId,
         description: String,
-        /// Embeded content.
+        /// Embedded content.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         embeds: Vec<Embed<Uri>>,
     },
@@ -295,7 +343,7 @@ pub enum Action {
         /// Should be the root [`CommentId`] if it's a top-level comment.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply_to: Option<CommentId>,
-        /// Embeded content.
+        /// Embedded content.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         embeds: Vec<Embed<Uri>>,
     },
@@ -368,14 +416,11 @@ impl<R: WriteRepository> Merged<'_, R> {
     ///
     /// This removes Git refs relating to the patch, both in the working copy,
     /// and the stored copy; and updates `rad/sigrefs`.
-    pub fn cleanup<G>(
+    pub fn cleanup(
         self,
         working: &git::raw::Repository,
-        signer: &Device<G>,
-    ) -> Result<(), storage::RepositoryError>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
+        signer: &impl crypto::Signer,
+    ) -> Result<(), storage::RepositoryError> {
         let nid = signer.public_key();
         let stored_ref = git::refs::patch(&self.patch).with_namespace(nid.into());
         let working_ref = git::refs::workdir::patch_upstream(&self.patch);
@@ -396,8 +441,91 @@ impl<R: WriteRepository> Merged<'_, R> {
     }
 }
 
+/// A valid target branch for a [`Patch`].
+///
+/// The construction of a [`TargetBranch`] ensures that the reference is a Git
+/// branch, i.e. the reference name begins with `refs/heads`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "git::fmt::RefString", into = "git::fmt::RefString")]
+pub struct TargetBranch(git::fmt::Qualified<'static>);
+
+#[derive(Debug, Error)]
+pub enum TargetBranchError {
+    /// Invalid merge target.
+    #[error("invalid merge target '{0}': must be a branch")]
+    InvalidMergeTarget(git::fmt::RefString),
+    /// Invalid reference format.
+    #[error(transparent)]
+    InvalidReference(#[from] git::fmt::Error),
+}
+
+impl TryFrom<git::fmt::RefString> for TargetBranch {
+    type Error = TargetBranchError;
+
+    fn try_from(refname: git::fmt::RefString) -> Result<Self, Self::Error> {
+        Self::new(refname)
+    }
+}
+
+impl From<TargetBranch> for git::fmt::RefString {
+    fn from(tb: TargetBranch) -> Self {
+        tb.0.to_ref_string()
+    }
+}
+
+impl TryFrom<&str> for TargetBranch {
+    type Error = TargetBranchError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        let refstr = git::fmt::RefString::try_from(s)?;
+        Self::try_from(refstr)
+    }
+}
+
+impl std::str::FromStr for TargetBranch {
+    type Err = TargetBranchError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_from(s)
+    }
+}
+
+impl std::fmt::Display for TargetBranch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl TargetBranch {
+    fn new<R>(refname: R) -> Result<Self, TargetBranchError>
+    where
+        R: AsRef<git::fmt::RefStr>,
+    {
+        let refname = refname.as_ref();
+        match git::fmt::Qualified::from_refstr(refname).to_owned() {
+            None => Ok(Self(git::fmt::lit::refs_heads(refname).into())),
+            Some(branch) if branch.as_str().starts_with("refs/heads/") => {
+                Ok(Self(branch.clone().to_owned()))
+            }
+            Some(_) => Err(TargetBranchError::InvalidMergeTarget(
+                refname.to_ref_string(),
+            )),
+        }
+    }
+
+    /// Return the [`str`] representation of the [`TargetBranch`].
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Return the fully qualified branch reference.
+    pub fn into_qualified(self) -> git::fmt::Qualified<'static> {
+        self.0
+    }
+}
+
 /// Where a patch is intended to be merged.
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MergeTarget {
     /// Intended for the default branch of the project delegates.
@@ -406,16 +534,19 @@ pub enum MergeTarget {
     /// If it were otherwise, patches could become un-mergeable.
     #[default]
     Delegates,
+    /// Intended for a specific branch.
+    Branch(TargetBranch),
 }
 
 impl MergeTarget {
     /// Get the head of the target branch.
-    pub fn head<R: ReadRepository>(&self, repo: &R) -> Result<git::Oid, RepositoryError> {
+    pub fn head(&self, repo: &Repository) -> Result<git::Oid, RepositoryError> {
         match self {
             MergeTarget::Delegates => {
                 let (_, target) = repo.head()?;
                 Ok(target)
             }
+            MergeTarget::Branch(branch) => Ok(repo.backend.refname_to_id(branch.as_str())?.into()),
         }
     }
 }
@@ -488,8 +619,36 @@ impl Patch {
     }
 
     /// Target this patch is meant to be merged in.
-    pub fn target(&self) -> MergeTarget {
-        self.target
+    pub fn target(&self) -> &MergeTarget {
+        &self.target
+    }
+
+    /// Resolves the intended target branch for this patch.
+    ///
+    /// If a custom target was specified, it returns that branch.
+    /// Otherwise, it falls back to the project's default branch.
+    pub fn merge_target_branch<'a>(
+        &'a self,
+        doc: &'a Doc,
+    ) -> Result<git::fmt::Qualified<'a>, DefaultBranchError> {
+        match &self.target {
+            MergeTarget::Delegates => Ok(doc.default_branch()?),
+            MergeTarget::Branch(branch) => Ok(branch.clone().into_qualified()),
+        }
+    }
+
+    /// Check the [`MergeTarget`] of the [`Patch`], and return `true` if the
+    /// given `branch` is the same.
+    ///
+    /// Note that the [`Doc`] is used to resolve the default branch of the
+    /// project.
+    pub fn is_targeted_by(
+        &self,
+        doc: &Doc,
+        branch: &git::fmt::Qualified,
+    ) -> Result<bool, DefaultBranchError> {
+        let target = self.merge_target_branch(doc)?;
+        Ok(target == *branch)
     }
 
     /// Timestamp of the first revision of the patch.
@@ -696,9 +855,17 @@ impl Patch {
                 }
             }
             Action::Assign { .. } => Authorization::Deny,
-            Action::Merge { .. } => match self.target() {
-                MergeTarget::Delegates => Authorization::Deny,
-            },
+            Action::Merge { .. } => {
+                let expected_dest = self.merge_target_branch(doc)?;
+
+                if let Ok(crefs) = doc.canonical_refs()
+                    && let Some((_, rule)) = crefs.rules().matches(&expected_dest).next()
+                {
+                    return Ok(Authorization::from(rule.allowed().contains(&actor.into())));
+                }
+
+                Authorization::Deny
+            }
             // Anyone can submit a review.
             Action::Review { .. } => Authorization::Allow,
             Action::ReviewRedact { review, .. } => {
@@ -724,10 +891,10 @@ impl Patch {
                 review, comment, ..
             }
             | Action::ReviewCommentRedact { review, comment } => {
-                if let Some((_, review)) = lookup::review(self, review)? {
-                    if let Some(comment) = review.comments.comment(comment) {
-                        return Ok(Authorization::from(*actor == comment.author()));
-                    }
+                if let Some((_, review)) = lookup::review(self, review)?
+                    && let Some(comment) = review.comments.comment(comment)
+                {
+                    return Ok(Authorization::from(actor == comment.author()));
                 }
                 // Redacted.
                 Authorization::Unknown
@@ -737,14 +904,14 @@ impl Patch {
             // The reviewer, commenter or revision author can resolve and unresolve review comments.
             Action::ReviewCommentResolve { review, comment }
             | Action::ReviewCommentUnresolve { review, comment } => {
-                if let Some((revision, review)) = lookup::review(self, review)? {
-                    if let Some(comment) = review.comments.comment(comment) {
-                        return Ok(Authorization::from(
-                            actor == &comment.author()
-                                || actor == review.author.public_key()
-                                || actor == revision.author.public_key(),
-                        ));
-                    }
+                if let Some((revision, review)) = lookup::review(self, review)?
+                    && let Some(comment) = review.comments.comment(comment)
+                {
+                    return Ok(Authorization::from(
+                        actor == comment.author()
+                            || actor == review.author.public_key()
+                            || actor == revision.author.public_key(),
+                    ));
                 }
                 // Redacted.
                 Authorization::Unknown
@@ -771,10 +938,10 @@ impl Patch {
             | Action::RevisionCommentRedact {
                 revision, comment, ..
             } => {
-                if let Some(revision) = lookup::revision(self, revision)? {
-                    if let Some(comment) = revision.discussion.comment(comment) {
-                        return Ok(Authorization::from(actor == &comment.author()));
-                    }
+                if let Some(revision) = lookup::revision(self, revision)?
+                    && let Some(comment) = revision.discussion.comment(comment)
+                {
+                    return Ok(Authorization::from(actor == comment.author()));
                 }
                 // Redacted.
                 Authorization::Unknown
@@ -807,7 +974,7 @@ impl Patch {
                 // In this case, since there is not enough information to determine
                 // whether the action is authorized or not, we simply ignore it.
                 // It's likely that the target object was redacted, and we can't
-                // verify whether the action would have been allowed or not.
+                // verify whether or not the action would have been allowed.
                 Ok(())
             }
         }
@@ -941,7 +1108,7 @@ impl Patch {
                     return Ok(());
                 };
                 if let Some(rev) = rev {
-                    // Insert a review if there isn't already one. Otherwise we just ignore
+                    // Insert a review if there isn't already one. Otherwise, we just ignore
                     // this operation
                     if let btree_map::Entry::Vacant(e) = rev.reviews.entry(author) {
                         let id = ReviewId(entry);
@@ -1082,25 +1249,22 @@ impl Patch {
                 if lookup::revision_mut(self, &revision)?.is_none() {
                     return Ok(());
                 };
-                match self.target() {
-                    MergeTarget::Delegates => {
-                        let proj = identity.project()?;
-                        let branch = git::refs::branch(proj.default_branch());
 
-                        // Nb. We don't return an error in case the merge commit is not an
-                        // ancestor of the default branch. The default branch can change
-                        // *after* the merge action is created, which is out of the control
-                        // of the merge author. We simply skip it, which allows archiving in
-                        // case of a rebase off the master branch, or a redaction of the
-                        // merge.
-                        let Ok(head) = repo.reference_oid(&author, &branch) else {
-                            return Ok(());
-                        };
-                        if commit != head && !repo.is_ancestor_of(commit, head)? {
-                            return Ok(());
-                        }
-                    }
+                let expected_branch = self.merge_target_branch(identity)?;
+
+                // Nb. We don't return an error in case the merge commit is not an
+                // ancestor of the default branch. The default branch can change
+                // *after* the merge action is created, which is out of the control
+                // of the merge author. We simply skip it, which allows archiving in
+                // case of a rebase off the master branch, or a redaction of the
+                // merge.
+                let Ok(head) = repo.reference_oid(&author, &expected_branch) else {
+                    return Ok(());
+                };
+                if commit != head && !repo.is_ancestor_of(commit, head)? {
+                    return Ok(());
                 }
+
                 self.merges.insert(
                     author,
                     Merge {
@@ -2038,20 +2202,24 @@ impl<R: ReadRepository> store::Transaction<Patch, R> {
     }
 }
 
-pub struct PatchMut<'a, 'g, R, C> {
+pub struct PatchMut<'a, 'b, 'g, Repo, Signer: crypto::Signer, Cache> {
     pub id: ObjectId,
 
     patch: Patch,
-    store: &'g mut Patches<'a, R>,
-    cache: &'g mut C,
+    store: &'g mut Patches<'a, Repo, WriteAs<'b, Signer>>,
+    cache: &'g mut Cache,
 }
 
-impl<'a, 'g, R, C> PatchMut<'a, 'g, R, C>
+impl<'a, 'b, 'g, Repo, Signer: crypto::Signer, Update> PatchMut<'a, 'b, 'g, Repo, Signer, Update>
 where
-    C: cob::cache::Update<Patch>,
-    R: ReadRepository + SignRepository + cob::Store<Namespace = NodeId>,
+    Repo: ReadRepository + SignRepository + cob::Store<Namespace = NodeId>,
+    Update: cob::cache::Update<Patch>,
 {
-    pub fn new(id: ObjectId, patch: Patch, cache: &'g mut Cache<Patches<'a, R>, C>) -> Self {
+    pub fn new(
+        id: ObjectId,
+        patch: Patch,
+        cache: &'g mut Cache<'a, Repo, WriteAs<'b, Signer>, Update>,
+    ) -> Self {
         Self {
             id,
             patch,
@@ -2074,20 +2242,14 @@ where
         Ok(())
     }
 
-    pub fn transaction<G, F>(
-        &mut self,
-        message: &str,
-        signer: &Device<G>,
-        operations: F,
-    ) -> Result<EntryId, Error>
+    pub fn transaction<F>(&mut self, message: &str, operations: F) -> Result<EntryId, Error>
     where
-        G: crypto::signature::Signer<crypto::Signature>,
-        F: FnOnce(&mut Transaction<Patch, R>) -> Result<(), store::Error>,
+        F: FnOnce(&mut Transaction<Patch, Repo>) -> Result<(), store::Error>,
     {
         let mut tx = Transaction::default();
         operations(&mut tx)?;
 
-        let (patch, commit) = tx.commit(message, self.id, &mut self.store.raw, signer)?;
+        let (patch, commit) = tx.commit(message, self.id, &mut self.store.raw)?;
         self.cache
             .update(&self.store.as_ref().id(), &self.id, &patch)
             .map_err(|e| Error::CacheUpdate {
@@ -2100,73 +2262,46 @@ where
     }
 
     /// Edit patch metadata.
-    pub fn edit<G, S>(
-        &mut self,
-        title: cob::Title,
-        target: MergeTarget,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-        S: ToString,
-    {
-        self.transaction("Edit", signer, |tx| tx.edit(title, target))
+    pub fn edit(&mut self, title: cob::Title, target: MergeTarget) -> Result<EntryId, Error> {
+        self.transaction("Edit", |tx| tx.edit(title, target))
     }
 
     /// Edit revision metadata.
-    pub fn edit_revision<G, S>(
+    pub fn edit_revision(
         &mut self,
         revision: RevisionId,
-        description: S,
+        description: impl ToString,
         embeds: impl IntoIterator<Item = Embed<Uri>>,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-        S: ToString,
-    {
-        self.transaction("Edit revision", signer, |tx| {
+    ) -> Result<EntryId, Error> {
+        self.transaction("Edit revision", |tx| {
             tx.edit_revision(revision, description, embeds.into_iter().collect())
         })
     }
 
     /// Redact a revision.
-    pub fn redact<G>(&mut self, revision: RevisionId, signer: &Device<G>) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("Redact revision", signer, |tx| tx.redact(revision))
+    pub fn redact(&mut self, revision: RevisionId) -> Result<EntryId, Error> {
+        self.transaction("Redact revision", |tx| tx.redact(revision))
     }
 
     /// Create a thread on a patch revision.
-    pub fn thread<G, S>(
+    pub fn thread(
         &mut self,
         revision: RevisionId,
-        body: S,
-        signer: &Device<G>,
-    ) -> Result<CommentId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-        S: ToString,
-    {
-        self.transaction("Create thread", signer, |tx| tx.thread(revision, body))
+        body: impl ToString,
+    ) -> Result<CommentId, Error> {
+        self.transaction("Create thread", |tx| tx.thread(revision, body))
     }
 
     /// Comment on a patch revision.
-    pub fn comment<G, S>(
+    pub fn comment(
         &mut self,
         revision: RevisionId,
-        body: S,
+        body: impl ToString,
         reply_to: Option<CommentId>,
         location: Option<CodeLocation>,
         embeds: impl IntoIterator<Item = Embed<Uri>>,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-        S: ToString,
-    {
-        self.transaction("Comment", signer, |tx| {
+    ) -> Result<EntryId, Error> {
+        self.transaction("Comment", |tx| {
             tx.comment(
                 revision,
                 body,
@@ -2178,87 +2313,61 @@ where
     }
 
     /// React on a patch revision.
-    pub fn react<G>(
+    pub fn react(
         &mut self,
         revision: RevisionId,
         reaction: Reaction,
         location: Option<CodeLocation>,
         active: bool,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("React", signer, |tx| {
-            tx.react(revision, reaction, location, active)
-        })
+    ) -> Result<EntryId, Error> {
+        self.transaction("React", |tx| tx.react(revision, reaction, location, active))
     }
 
     /// Edit a comment on a patch revision.
-    pub fn comment_edit<G, S>(
+    pub fn comment_edit(
         &mut self,
         revision: RevisionId,
         comment: CommentId,
-        body: S,
+        body: impl ToString,
         embeds: impl IntoIterator<Item = Embed<Uri>>,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-        S: ToString,
-    {
-        self.transaction("Edit comment", signer, |tx| {
+    ) -> Result<EntryId, Error> {
+        self.transaction("Edit comment", |tx| {
             tx.comment_edit(revision, comment, body, embeds.into_iter().collect())
         })
     }
 
     /// React to a comment on a patch revision.
-    pub fn comment_react<G>(
+    pub fn comment_react(
         &mut self,
         revision: RevisionId,
         comment: CommentId,
         reaction: Reaction,
         active: bool,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("React comment", signer, |tx| {
+    ) -> Result<EntryId, Error> {
+        self.transaction("React comment", |tx| {
             tx.comment_react(revision, comment, reaction, active)
         })
     }
 
     /// Redact a comment on a patch revision.
-    pub fn comment_redact<G>(
+    pub fn comment_redact(
         &mut self,
         revision: RevisionId,
         comment: CommentId,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("Redact comment", signer, |tx| {
-            tx.comment_redact(revision, comment)
-        })
+    ) -> Result<EntryId, Error> {
+        self.transaction("Redact comment", |tx| tx.comment_redact(revision, comment))
     }
 
     /// Comment on a line of code as part of a review.
-    pub fn review_comment<G, S>(
+    pub fn review_comment(
         &mut self,
         review: ReviewId,
-        body: S,
+        body: impl ToString,
         location: Option<CodeLocation>,
         reply_to: Option<CommentId>,
         embeds: impl IntoIterator<Item = Embed<Uri>>,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-        S: ToString,
-    {
-        self.transaction("Review comment", signer, |tx| {
+    ) -> Result<EntryId, Error> {
+        self.transaction("Review comment", |tx| {
             tx.review_comment(
                 review,
                 body,
@@ -2270,164 +2379,118 @@ where
     }
 
     /// Edit review comment.
-    pub fn edit_review_comment<G, S>(
+    pub fn edit_review_comment(
         &mut self,
         review: ReviewId,
         comment: EntryId,
-        body: S,
+        body: impl ToString,
         embeds: impl IntoIterator<Item = Embed<Uri>>,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-        S: ToString,
-    {
-        self.transaction("Edit review comment", signer, |tx| {
+    ) -> Result<EntryId, Error> {
+        self.transaction("Edit review comment", |tx| {
             tx.edit_review_comment(review, comment, body, embeds.into_iter().collect())
         })
     }
 
     /// React to a review comment.
-    pub fn react_review_comment<G>(
+    pub fn react_review_comment(
         &mut self,
         review: ReviewId,
         comment: EntryId,
         reaction: Reaction,
         active: bool,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("React to review comment", signer, |tx| {
+    ) -> Result<EntryId, Error> {
+        self.transaction("React to review comment", |tx| {
             tx.react_review_comment(review, comment, reaction, active)
         })
     }
 
     /// React to a review comment.
-    pub fn redact_review_comment<G>(
+    pub fn redact_review_comment(
         &mut self,
         review: ReviewId,
         comment: EntryId,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("Redact review comment", signer, |tx| {
+    ) -> Result<EntryId, Error> {
+        self.transaction("Redact review comment", |tx| {
             tx.redact_review_comment(review, comment)
         })
     }
 
     /// Review a patch revision.
-    pub fn review<G>(
+    pub fn review(
         &mut self,
         revision: RevisionId,
         verdict: Option<Verdict>,
         summary: Option<String>,
         labels: Vec<Label>,
-        signer: &Device<G>,
-    ) -> Result<ReviewId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
+    ) -> Result<ReviewId, Error> {
         if verdict.is_none() && summary.is_none() {
             return Err(Error::EmptyReview);
         }
-        self.transaction("Review", signer, |tx| {
-            tx.review(revision, verdict, summary, labels)
-        })
-        .map(ReviewId)
+        self.transaction("Review", |tx| tx.review(revision, verdict, summary, labels))
+            .map(ReviewId)
     }
 
     /// Edit a review.
-    pub fn review_edit<G>(
+    pub fn review_edit(
         &mut self,
         review: ReviewId,
         verdict: Option<Verdict>,
         summary: String,
         labels: Vec<Label>,
         embeds: impl IntoIterator<Item = Embed<Uri>>,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("Edit review", signer, |tx| {
+    ) -> Result<EntryId, Error> {
+        self.transaction("Edit review", |tx| {
             tx.review_edit(review, verdict, summary, labels, embeds)
         })
     }
 
     /// React to a review.
-    pub fn review_react<G>(
+    pub fn review_react(
         &mut self,
         review: ReviewId,
         reaction: Reaction,
         active: bool,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("React to review", signer, |tx| {
+    ) -> Result<EntryId, Error> {
+        self.transaction("React to review", |tx| {
             tx.review_react(review, reaction, active)
         })
     }
 
     /// Redact a patch review.
-    pub fn redact_review<G>(
-        &mut self,
-        review: ReviewId,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("Redact review", signer, |tx| tx.redact_review(review))
+    pub fn redact_review(&mut self, review: ReviewId) -> Result<EntryId, Error> {
+        self.transaction("Redact review", |tx| tx.redact_review(review))
     }
 
     /// Resolve a patch review comment.
-    pub fn resolve_review_comment<G>(
+    pub fn resolve_review_comment(
         &mut self,
         review: ReviewId,
         comment: CommentId,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("Resolve review comment", signer, |tx| {
+    ) -> Result<EntryId, Error> {
+        self.transaction("Resolve review comment", |tx| {
             tx.review_comment_resolve(review, comment)
         })
     }
 
     /// Unresolve a patch review comment.
-    pub fn unresolve_review_comment<G>(
+    pub fn unresolve_review_comment(
         &mut self,
         review: ReviewId,
         comment: CommentId,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("Unresolve review comment", signer, |tx| {
+    ) -> Result<EntryId, Error> {
+        self.transaction("Unresolve review comment", |tx| {
             tx.review_comment_unresolve(review, comment)
         })
     }
 
     /// Merge a patch revision.
-    pub fn merge<G>(
+    pub fn merge(
         &mut self,
         revision: RevisionId,
         commit: git::Oid,
-        signer: &Device<G>,
-    ) -> Result<Merged<'_, R>, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
+    ) -> Result<Merged<'_, Repo>, Error> {
         // TODO: Don't allow merging the same revision twice?
-        let entry = self.transaction("Merge revision", signer, |tx| tx.merge(revision, commit))?;
+        let entry = self.transaction("Merge revision", |tx| tx.merge(revision, commit))?;
 
         Ok(Merged {
             entry,
@@ -2437,108 +2500,73 @@ where
     }
 
     /// Update a patch with a new revision.
-    pub fn update<G>(
+    pub fn update(
         &mut self,
         description: impl ToString,
         base: impl Into<git::Oid>,
         oid: impl Into<git::Oid>,
-        signer: &Device<G>,
-    ) -> Result<RevisionId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("Add revision", signer, |tx| {
-            tx.revision(description, base, oid)
-        })
-        .map(RevisionId)
+    ) -> Result<RevisionId, Error> {
+        self.transaction("Add revision", |tx| tx.revision(description, base, oid))
+            .map(RevisionId)
     }
 
     /// Lifecycle a patch.
-    pub fn lifecycle<G>(&mut self, state: Lifecycle, signer: &Device<G>) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("Lifecycle", signer, |tx| tx.lifecycle(state))
+    pub fn lifecycle(&mut self, state: Lifecycle) -> Result<EntryId, Error> {
+        self.transaction("Lifecycle", |tx| tx.lifecycle(state))
     }
 
     /// Assign a patch.
-    pub fn assign<G>(
-        &mut self,
-        assignees: BTreeSet<Did>,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("Assign", signer, |tx| tx.assign(assignees))
+    pub fn assign(&mut self, assignees: BTreeSet<Did>) -> Result<EntryId, Error> {
+        self.transaction("Assign", |tx| tx.assign(assignees))
     }
 
     /// Archive a patch.
-    pub fn archive<G>(&mut self, signer: &Device<G>) -> Result<bool, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.lifecycle(Lifecycle::Archived, signer)?;
+    pub fn archive(&mut self) -> Result<bool, Error> {
+        self.lifecycle(Lifecycle::Archived)?;
 
         Ok(true)
     }
 
     /// Mark an archived patch as ready to be reviewed again.
     /// Returns `false` if the patch was not archived.
-    pub fn unarchive<G>(&mut self, signer: &Device<G>) -> Result<bool, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
+    pub fn unarchive(&mut self) -> Result<bool, Error> {
         if !self.is_archived() {
             return Ok(false);
         }
-        self.lifecycle(Lifecycle::Open, signer)?;
+        self.lifecycle(Lifecycle::Open)?;
 
         Ok(true)
     }
 
     /// Mark a patch as ready to be reviewed.
     /// Returns `false` if the patch was not a draft.
-    pub fn ready<G>(&mut self, signer: &Device<G>) -> Result<bool, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
+    pub fn ready(&mut self) -> Result<bool, Error> {
         if !self.is_draft() {
             return Ok(false);
         }
-        self.lifecycle(Lifecycle::Open, signer)?;
+        self.lifecycle(Lifecycle::Open)?;
 
         Ok(true)
     }
 
     /// Mark an open patch as a draft.
     /// Returns `false` if the patch was not open and free of merges.
-    pub fn unready<G>(&mut self, signer: &Device<G>) -> Result<bool, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
+    pub fn unready(&mut self) -> Result<bool, Error> {
         if !matches!(self.state(), State::Open { conflicts } if conflicts.is_empty()) {
             return Ok(false);
         }
-        self.lifecycle(Lifecycle::Draft, signer)?;
+        self.lifecycle(Lifecycle::Draft)?;
 
         Ok(true)
     }
 
     /// Label a patch.
-    pub fn label<G>(
-        &mut self,
-        labels: impl IntoIterator<Item = Label>,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("Label", signer, |tx| tx.label(labels))
+    pub fn label(&mut self, labels: impl IntoIterator<Item = Label>) -> Result<EntryId, Error> {
+        self.transaction("Label", |tx| tx.label(labels))
     }
 }
 
-impl<R, C> Deref for PatchMut<'_, '_, R, C> {
+impl<Repo, Signer: crypto::Signer, Cache> Deref for PatchMut<'_, '_, '_, Repo, Signer, Cache> {
     type Target = Patch;
 
     fn deref(&self) -> &Self::Target {
@@ -2574,39 +2602,46 @@ pub struct ByRevision {
     pub revision: Revision,
 }
 
-pub struct Patches<'a, R> {
-    raw: store::Store<'a, Patch, R>,
+pub struct Patches<'a, Repo, Access> {
+    raw: store::Store<'a, Patch, Repo, Access>,
 }
 
-impl<'a, R> Deref for Patches<'a, R> {
-    type Target = store::Store<'a, Patch, R>;
+impl<'a, Repo, Access> Deref for Patches<'a, Repo, Access> {
+    type Target = store::Store<'a, Patch, Repo, Access>;
 
     fn deref(&self) -> &Self::Target {
         &self.raw
     }
 }
 
-impl<R> HasRepoId for Patches<'_, R>
+impl<Repo, Access> HasRepoId for Patches<'_, Repo, Access>
 where
-    R: ReadRepository,
+    Repo: HasRepoId,
 {
     fn rid(&self) -> RepoId {
-        self.as_ref().id()
+        self.raw.rid()
     }
 }
 
-impl<'a, R> Patches<'a, R>
+impl<'a, Repo, Access> Patches<'a, Repo, Access>
 where
-    R: ReadRepository + cob::Store<Namespace = NodeId>,
+    Repo: ReadRepository + cob::Store<Namespace = NodeId>,
+    Access: store::access::Access,
 {
     /// Open a patches store.
-    pub fn open(repository: &'a R) -> Result<Self, RepositoryError> {
+    pub fn open(repository: &'a Repo, access: Access) -> Result<Self, RepositoryError> {
         let identity = repository.identity_head()?;
-        let raw = store::Store::open(repository)?.identity(identity);
+        let raw = store::Store::open(repository, access)?.identity(identity);
 
         Ok(Self { raw })
     }
+}
 
+impl<'a, Repo, Access> Patches<'a, Repo, Access>
+where
+    Repo: ReadRepository + cob::Store<Namespace = NodeId>,
+    Access: store::access::Access,
+{
     /// Patches count by state.
     pub fn counts(&self) -> Result<PatchCounts, store::Error> {
         let all = self.all()?;
@@ -2678,12 +2713,13 @@ where
     }
 }
 
-impl<'a, R> Patches<'a, R>
+impl<'a, 'b, Repo, Signer> Patches<'a, Repo, WriteAs<'b, Signer>>
 where
-    R: ReadRepository + SignRepository + cob::Store<Namespace = NodeId>,
+    Repo: ReadRepository + SignRepository + cob::Store<Namespace = NodeId>,
+    Signer: crypto::Signer,
 {
     /// Open a new patch.
-    pub fn create<'g, C, G>(
+    pub fn create<'g, Cache>(
         &'g mut self,
         title: cob::Title,
         description: impl ToString,
@@ -2691,12 +2727,11 @@ where
         base: impl Into<git::Oid>,
         oid: impl Into<git::Oid>,
         labels: &[Label],
-        cache: &'g mut C,
-        signer: &Device<G>,
-    ) -> Result<PatchMut<'a, 'g, R, C>, Error>
+        cache: &'g mut Cache,
+    ) -> Result<PatchMut<'a, 'b, 'g, Repo, Signer, Cache>, Error>
     where
-        C: cob::cache::Update<Patch>,
-        G: crypto::signature::Signer<crypto::Signature>,
+        Cache: cob::cache::Update<Patch>,
+        Signer: crypto::Signer,
     {
         self._create(
             title,
@@ -2707,12 +2742,11 @@ where
             labels,
             Lifecycle::default(),
             cache,
-            signer,
         )
     }
 
     /// Draft a patch. This patch will be created in a [`State::Draft`] state.
-    pub fn draft<'g, C, G>(
+    pub fn draft<'g, Cache>(
         &'g mut self,
         title: cob::Title,
         description: impl ToString,
@@ -2720,12 +2754,10 @@ where
         base: impl Into<git::Oid>,
         oid: impl Into<git::Oid>,
         labels: &[Label],
-        cache: &'g mut C,
-        signer: &Device<G>,
-    ) -> Result<PatchMut<'a, 'g, R, C>, Error>
+        cache: &'g mut Cache,
+    ) -> Result<PatchMut<'a, 'b, 'g, Repo, Signer, Cache>, Error>
     where
-        C: cob::cache::Update<Patch>,
-        G: crypto::signature::Signer<crypto::Signature>,
+        Cache: cob::cache::Update<Patch>,
     {
         self._create(
             title,
@@ -2736,16 +2768,15 @@ where
             labels,
             Lifecycle::Draft,
             cache,
-            signer,
         )
     }
 
     /// Get a patch mutably.
-    pub fn get_mut<'g, C>(
+    pub fn get_mut<'g, Cache>(
         &'g mut self,
         id: &ObjectId,
-        cache: &'g mut C,
-    ) -> Result<PatchMut<'a, 'g, R, C>, store::Error> {
+        cache: &'g mut Cache,
+    ) -> Result<PatchMut<'a, 'b, 'g, Repo, Signer, Cache>, store::Error> {
         let patch = self
             .raw
             .get(id)?
@@ -2760,7 +2791,7 @@ where
     }
 
     /// Create a patch. This is an internal function used by `create` and `draft`.
-    fn _create<'g, C, G>(
+    fn _create<'g, Cache>(
         &'g mut self,
         title: cob::Title,
         description: impl ToString,
@@ -2769,14 +2800,13 @@ where
         oid: impl Into<git::Oid>,
         labels: &[Label],
         state: Lifecycle,
-        cache: &'g mut C,
-        signer: &Device<G>,
-    ) -> Result<PatchMut<'a, 'g, R, C>, Error>
+        cache: &'g mut Cache,
+    ) -> Result<PatchMut<'a, 'b, 'g, Repo, Signer, Cache>, Error>
     where
-        C: cob::cache::Update<Patch>,
-        G: crypto::signature::Signer<crypto::Signature>,
+        Cache: cob::cache::Update<Patch>,
+        Signer: crypto::Signer,
     {
-        let (id, patch) = Transaction::initial("Create patch", &mut self.raw, signer, |tx, _| {
+        let (id, patch) = Transaction::initial("Create patch", &mut self.raw, |tx, _| {
             tx.revision(description, base, oid)?;
             tx.edit(title, target)?;
 
@@ -2868,7 +2898,7 @@ mod ser {
 
     use serde::ser::SerializeSeq;
 
-    use crate::cob::{thread::Reactions, ActorId, CodeLocation};
+    use crate::cob::{ActorId, CodeLocation, thread::Reactions};
 
     /// Serialize a `Revision`'s reaction as an object containing the
     /// `location`, `emoji`, and all `authors` that have performed the
@@ -2992,20 +3022,356 @@ mod test {
 
     use super::*;
     use crate::cob::common::CodeRange;
-    use crate::cob::test::Actor;
-    use crate::crypto::test::signer::MockSigner;
+    use crate::cob::test::SignerOpExt as _;
+    use crate::crypto::{Signer as _, SigningKey};
+    use crate::git::BranchName;
     use crate::identity;
+    use crate::identity::doc::RawDoc;
+    use crate::identity::project::{Project, ProjectName};
     use crate::patch::cache::Patches as _;
     use crate::profile::env;
     use crate::test;
     use crate::test::arbitrary;
-    use crate::test::arbitrary::gen;
+    use crate::test::arbitrary::r#gen;
     use crate::test::storage::MockRepository;
 
     use cob::migrate;
 
+    fn revision() -> (RevisionId, Revision) {
+        let author = arbitrary::r#gen::<Did>(1);
+        let description = arbitrary::r#gen::<String>(1);
+        let base = arbitrary::oid();
+        let oid = arbitrary::oid();
+        let timestamp = env::local_time();
+        let resolves = BTreeSet::new();
+        let id = RevisionId::from(arbitrary::oid());
+        let mut revision = Revision::new(
+            id,
+            Author { id: author },
+            description,
+            base,
+            oid,
+            timestamp.into(),
+            resolves,
+        );
+        let comment = Comment::new(
+            *author,
+            "#1 comment".to_string(),
+            None,
+            None,
+            vec![],
+            timestamp.into(),
+        );
+        let thread = Thread::new(arbitrary::oid(), comment);
+        revision.discussion = thread;
+        (id, revision)
+    }
+
     #[test]
-    fn test_json_serialization() {
+    fn target_branch() {
+        let unqualified = TargetBranch::try_from("master").unwrap();
+        assert_eq!(unqualified.as_str(), "refs/heads/master");
+
+        let qualified = TargetBranch::try_from("refs/heads/feature/1").unwrap();
+        assert_eq!(qualified.as_str(), "refs/heads/feature/1");
+
+        assert!(matches!(
+            TargetBranch::try_from("refs/tags/v1.0"),
+            Err(TargetBranchError::InvalidMergeTarget(refname)) if refname.as_str() == "refs/tags/v1.0"
+        ));
+
+        assert!(matches!(
+            TargetBranch::try_from("refs/remotes/origin/master"),
+            Err(TargetBranchError::InvalidMergeTarget(refname)) if refname.as_str() == "refs/remotes/origin/master"
+        ));
+
+        assert!(matches!(
+            TargetBranch::try_from("invalid branch name"),
+            Err(TargetBranchError::InvalidReference(_))
+        ));
+    }
+
+    #[test]
+    fn json_serialisation_target() {
+        let edit_none = Action::Edit {
+            title: cob::Title::new("My patch").unwrap(),
+            target: MergeTarget::Delegates,
+        };
+        assert_eq!(
+            serde_json::to_string(&edit_none).unwrap(),
+            String::from(r#"{"type":"edit","title":"My patch","target":"delegates"}"#)
+        );
+
+        let edit_some = Action::Edit {
+            title: cob::Title::new("My patch").unwrap(),
+            target: MergeTarget::Branch(TargetBranch::try_from("refs/heads/accepted").unwrap()),
+        };
+        assert_eq!(
+            serde_json::to_string(&edit_some).unwrap(),
+            String::from(
+                r#"{"type":"edit","title":"My patch","target":{"branch":"refs/heads/accepted"}}"#
+            )
+        );
+    }
+
+    #[test]
+    fn merge_target_resolution() {
+        let alice = SigningKey::mock(23);
+        let project = Project::new(
+            ProjectName::from_str("test_merge_target_resolution").unwrap(),
+            String::from(""),
+            BranchName::from(git::fmt::RefString::try_from("master").unwrap()),
+        );
+
+        let doc = RawDoc::new(
+            project.unwrap(),
+            vec![alice.did()],
+            1,
+            identity::Visibility::Public,
+        )
+        .verified()
+        .unwrap();
+
+        let patch_none = Patch::new(
+            cob::Title::new("My patch").unwrap(),
+            MergeTarget::Delegates,
+            revision(),
+        );
+        assert_eq!(
+            patch_none.merge_target_branch(&doc).unwrap().as_str(),
+            "refs/heads/master"
+        );
+
+        let patch_unqualified = Patch::new(
+            cob::Title::new("My patch").unwrap(),
+            MergeTarget::Branch(TargetBranch::try_from("accepted").unwrap()),
+            revision(),
+        );
+        assert_eq!(
+            patch_unqualified
+                .merge_target_branch(&doc)
+                .unwrap()
+                .as_str(),
+            "refs/heads/accepted"
+        );
+
+        let patch_qualified_branch = Patch::new(
+            cob::Title::new("My patch").unwrap(),
+            MergeTarget::Branch(TargetBranch::try_from("refs/heads/accepted").unwrap()),
+            revision(),
+        );
+        assert_eq!(
+            patch_qualified_branch
+                .merge_target_branch(&doc)
+                .unwrap()
+                .as_str(),
+            "refs/heads/accepted"
+        );
+    }
+
+    #[test]
+    fn patch_merge_authorization_ref_formats() {
+        let base = git::Oid::from_str("cb18e95ada2bb38aadd8e6cef0963ce37a87add3").unwrap();
+        let oid = git::Oid::from_str("518d5069f94c03427f694bb494ac1cd7d1339380").unwrap();
+        let alice = SigningKey::mock(14);
+
+        let mut raw_doc = RawDoc::new(
+            r#gen::<Project>(1),
+            vec![alice.did()],
+            1,
+            identity::Visibility::Public,
+        );
+
+        let rules = serde_json::json!({
+            "refs/heads/accepted": {
+                "allow": "delegates",
+                "threshold": 1
+            },
+            "refs/tags/v1.0": {
+                "allow": "delegates",
+                "threshold": 1
+            }
+        });
+        let crefs = serde_json::json!({ "rules": rules });
+        raw_doc.payload.insert(
+            identity::doc::PayloadId::canonical_refs().clone(),
+            identity::doc::Payload::from(crefs),
+        );
+
+        let doc = raw_doc.verified().unwrap();
+
+        let merge_action = Action::Merge {
+            revision: RevisionId(arbitrary::entry_id()),
+            commit: oid,
+        };
+
+        let patch_unqualified = Patch::new(
+            cob::Title::new("My Patch").unwrap(),
+            MergeTarget::Branch(TargetBranch::try_from("accepted").unwrap()),
+            (
+                RevisionId(arbitrary::entry_id()),
+                Revision::new(
+                    RevisionId(arbitrary::entry_id()),
+                    Author::new(alice.did()),
+                    String::new(),
+                    base,
+                    oid,
+                    env::local_time().into(),
+                    Default::default(),
+                ),
+            ),
+        );
+        assert_eq!(
+            patch_unqualified
+                .authorization(&merge_action, &alice.did().into(), &doc)
+                .unwrap(),
+            Authorization::Allow
+        );
+
+        let patch_qualified_branch = Patch::new(
+            cob::Title::new("My Patch").unwrap(),
+            MergeTarget::Branch(TargetBranch::try_from("refs/heads/accepted").unwrap()),
+            (
+                RevisionId(arbitrary::entry_id()),
+                Revision::new(
+                    RevisionId(arbitrary::entry_id()),
+                    Author::new(alice.did()),
+                    String::new(),
+                    base,
+                    oid,
+                    env::local_time().into(),
+                    Default::default(),
+                ),
+            ),
+        );
+        assert_eq!(
+            patch_qualified_branch
+                .authorization(&merge_action, &alice.did().into(), &doc)
+                .unwrap(),
+            Authorization::Allow
+        );
+    }
+
+    #[test]
+    fn patch_merge_custom_destination_authorized() {
+        let base = git::Oid::from_str("cb18e95ada2bb38aadd8e6cef0963ce37a87add3").unwrap();
+        let oid = git::Oid::from_str("518d5069f94c03427f694bb494ac1cd7d1339380").unwrap();
+        let alice = SigningKey::mock(14);
+        let bob = SigningKey::mock(23);
+
+        let mut raw_doc = RawDoc::new(
+            r#gen::<Project>(1),
+            vec![bob.did()],
+            1,
+            identity::Visibility::Public,
+        );
+
+        let rules = serde_json::json!({
+            "refs/heads/accepted": {
+                "allow": [alice.did()],
+                "threshold": 1
+            }
+        });
+        let crefs = serde_json::json!({
+            "rules": rules
+        });
+        raw_doc.payload.insert(
+            identity::doc::PayloadId::canonical_refs().clone(),
+            identity::doc::Payload::from(crefs),
+        );
+
+        let doc = raw_doc.verified().unwrap();
+        let patch = Patch::new(
+            cob::Title::new("My Patch").unwrap(),
+            MergeTarget::Branch(TargetBranch::try_from("accepted").unwrap()),
+            (
+                RevisionId(arbitrary::entry_id()),
+                Revision::new(
+                    RevisionId(arbitrary::entry_id()),
+                    Author::new(bob.did()),
+                    String::new(),
+                    base,
+                    oid,
+                    env::local_time().into(),
+                    Default::default(),
+                ),
+            ),
+        );
+
+        let merge_action = Action::Merge {
+            revision: RevisionId(arbitrary::entry_id()),
+            commit: oid,
+        };
+
+        assert_eq!(
+            patch
+                .authorization(&merge_action, &alice.did().into(), &doc)
+                .unwrap(),
+            Authorization::Allow,
+        );
+    }
+
+    #[test]
+    fn patch_merge_custom_destination_unauthorized() {
+        let base = git::Oid::from_str("cb18e95ada2bb38aadd8e6cef0963ce37a87add3").unwrap();
+        let oid = git::Oid::from_str("518d5069f94c03427f694bb494ac1cd7d1339380").unwrap();
+        let alice = SigningKey::mock(14);
+        let bob = SigningKey::mock(23);
+
+        let mut raw_doc = RawDoc::new(
+            r#gen::<Project>(1),
+            vec![alice.did()],
+            1,
+            identity::Visibility::Public,
+        );
+
+        let rules = serde_json::json!({
+            "refs/heads/accepted": {
+                "allow": [alice.did()],
+                "threshold": 1
+            }
+        });
+        let crefs = serde_json::json!({
+            "rules": rules
+        });
+        raw_doc.payload.insert(
+            identity::doc::PayloadId::canonical_refs().clone(),
+            identity::doc::Payload::from(crefs),
+        );
+
+        let doc = raw_doc.verified().unwrap();
+        let patch = Patch::new(
+            cob::Title::new("My Patch").unwrap(),
+            MergeTarget::Branch(TargetBranch::try_from("accepted").unwrap()),
+            (
+                RevisionId(arbitrary::entry_id()),
+                Revision::new(
+                    RevisionId(arbitrary::entry_id()),
+                    Author::new(alice.did()),
+                    String::new(),
+                    base,
+                    oid,
+                    env::local_time().into(),
+                    Default::default(),
+                ),
+            ),
+        );
+
+        let merge_action = Action::Merge {
+            revision: RevisionId(arbitrary::entry_id()),
+            commit: oid,
+        };
+
+        assert_eq!(
+            patch
+                .authorization(&merge_action, &bob.did().into(), &doc)
+                .unwrap(),
+            Authorization::Deny,
+        );
+    }
+
+    #[test]
+    fn json_serialization() {
         let edit = Action::Label {
             labels: BTreeSet::new(),
         };
@@ -3016,7 +3382,7 @@ mod test {
     }
 
     #[test]
-    fn test_reactions_json_serialization() {
+    fn reactions_json_serialization() {
         #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
         #[serde(rename_all = "camelCase")]
         struct TestReactions {
@@ -3058,22 +3424,21 @@ mod test {
     }
 
     #[test]
-    fn test_patch_create_and_get() {
+    fn patch_create_and_get() {
         let alice = test::setup::NodeWithRepo::default();
         let checkout = alice.repo.checkout();
         let branch = checkout.branch_with([("README", b"Hello World!")]);
-        let mut patches = Cache::no_cache(&*alice.repo).unwrap();
+        let mut patches = Cache::no_cache(&*alice.repo, &alice.signer).unwrap();
         let author: Did = alice.signer.public_key().into();
         let target = MergeTarget::Delegates;
         let patch = patches
             .create(
                 cob::Title::new("My first patch").unwrap(),
                 "Blah blah blah.",
-                target,
+                target.clone(),
                 branch.base,
                 branch.oid,
                 &[],
-                &alice.signer,
             )
             .unwrap();
 
@@ -3084,7 +3449,7 @@ mod test {
         assert_eq!(patch.description(), "Blah blah blah.");
         assert_eq!(patch.author().id(), &author);
         assert_eq!(patch.state(), &State::Open { conflicts: vec![] });
-        assert_eq!(patch.target(), target);
+        assert_eq!(patch.target(), &target);
         assert_eq!(patch.version(), 0);
 
         let (rev_id, revision) = patch.latest();
@@ -3100,11 +3465,11 @@ mod test {
     }
 
     #[test]
-    fn test_patch_discussion() {
+    fn patch_discussion() {
         let alice = test::setup::NodeWithRepo::default();
         let checkout = alice.repo.checkout();
         let branch = checkout.branch_with([("README", b"Hello World!")]);
-        let mut patches = Cache::no_cache(&*alice.repo).unwrap();
+        let mut patches = Cache::no_cache(&*alice.repo, &alice.signer).unwrap();
         let patch = patches
             .create(
                 cob::Title::new("My first patch").unwrap(),
@@ -3113,7 +3478,6 @@ mod test {
                 branch.base,
                 branch.oid,
                 &[],
-                &alice.signer,
             )
             .unwrap();
 
@@ -3122,7 +3486,7 @@ mod test {
         let (revision_id, _) = patch.revisions().last().unwrap();
         assert!(
             patch
-                .comment(revision_id, "patch comment", None, None, [], &alice.signer)
+                .comment(revision_id, "patch comment", None, None, [],)
                 .is_ok(),
             "can comment on patch"
         );
@@ -3133,11 +3497,11 @@ mod test {
     }
 
     #[test]
-    fn test_patch_merge() {
+    fn patch_merge() {
         let alice = test::setup::NodeWithRepo::default();
         let checkout = alice.repo.checkout();
         let branch = checkout.branch_with([("README", b"Hello World!")]);
-        let mut patches = Cache::no_cache(&*alice.repo).unwrap();
+        let mut patches = Cache::no_cache(&*alice.repo, &alice.signer).unwrap();
         let mut patch = patches
             .create(
                 cob::Title::new("My first patch").unwrap(),
@@ -3146,13 +3510,12 @@ mod test {
                 branch.base,
                 branch.oid,
                 &[],
-                &alice.signer,
             )
             .unwrap();
 
         let id = patch.id;
         let (rid, _) = patch.revisions().next().unwrap();
-        let _merge = patch.merge(rid, branch.base, &alice.signer).unwrap();
+        let _merge = patch.merge(rid, branch.base).unwrap();
         let patch = patches.get(&id).unwrap().unwrap();
 
         let merges = patch.merges.iter().collect::<Vec<_>>();
@@ -3164,11 +3527,11 @@ mod test {
     }
 
     #[test]
-    fn test_patch_review() {
+    fn patch_review() {
         let alice = test::setup::NodeWithRepo::default();
         let checkout = alice.repo.checkout();
         let branch = checkout.branch_with([("README", b"Hello World!")]);
-        let mut patches = Cache::no_cache(&*alice.repo).unwrap();
+        let mut patches = Cache::no_cache(&*alice.repo, &alice.signer).unwrap();
         let mut patch = patches
             .create(
                 cob::Title::new("My first patch").unwrap(),
@@ -3177,7 +3540,6 @@ mod test {
                 branch.base,
                 branch.oid,
                 &[],
-                &alice.signer,
             )
             .unwrap();
 
@@ -3188,7 +3550,6 @@ mod test {
                 Some(Verdict::Accept),
                 Some("LGTM".to_owned()),
                 vec![],
-                &alice.signer,
             )
             .unwrap();
 
@@ -3201,26 +3562,26 @@ mod test {
         assert_eq!(review.verdict(), Some(Verdict::Accept));
         assert_eq!(review.summary(), "LGTM");
 
-        patch.redact_review(review_id, &alice.signer).unwrap();
+        patch.redact_review(review_id).unwrap();
         patch.reload().unwrap();
 
         let (_, revision) = patch.latest();
         assert_eq!(revision.reviews().count(), 0);
 
         // This is fine, redacting an already-redacted review is a no-op.
-        patch.redact_review(review_id, &alice.signer).unwrap();
+        patch.redact_review(review_id).unwrap();
         // If the review never existed, it's an error.
         patch
-            .redact_review(ReviewId(arbitrary::entry_id()), &alice.signer)
+            .redact_review(ReviewId(arbitrary::entry_id()))
             .unwrap_err();
     }
 
     #[test]
-    fn test_patch_review_revision_redact() {
+    fn patch_review_revision_redact() {
         let alice = test::setup::NodeWithRepo::default();
         let checkout = alice.repo.checkout();
         let branch = checkout.branch_with([("README", b"Hello World!")]);
-        let mut patches = Cache::no_cache(&*alice.repo).unwrap();
+        let mut patches = Cache::no_cache(&*alice.repo, &alice.signer).unwrap();
         let mut patch = patches
             .create(
                 cob::Title::new("My first patch").unwrap(),
@@ -3229,31 +3590,30 @@ mod test {
                 branch.base,
                 branch.oid,
                 &[],
-                &alice.signer,
             )
             .unwrap();
 
         let update = checkout.branch_with([("README", b"Hello Radicle!")]);
         let updated = patch
-            .update("I've made changes.", branch.base, update.oid, &alice.signer)
+            .update("I've made changes.", branch.base, update.oid)
             .unwrap();
 
         // It's fine to redact a review from a redacted revision.
         let review = patch
-            .review(updated, Some(Verdict::Accept), None, vec![], &alice.signer)
+            .review(updated, Some(Verdict::Accept), None, vec![])
             .unwrap();
-        patch.redact(updated, &alice.signer).unwrap();
-        patch.redact_review(review, &alice.signer).unwrap();
+        patch.redact(updated).unwrap();
+        patch.redact_review(review).unwrap();
     }
 
     #[test]
-    fn test_revision_review_merge_redacted() {
+    fn revision_review_merge_redacted() {
         let base = git::Oid::from_str("cb18e95ada2bb38aadd8e6cef0963ce37a87add3").unwrap();
         let oid = git::Oid::from_str("518d5069f94c03427f694bb494ac1cd7d1339380").unwrap();
-        let mut alice = Actor::<MockSigner>::default();
-        let rid = gen::<RepoId>(1);
+        let mut alice = SigningKey::mock(14);
+        let rid = r#gen::<RepoId>(1);
         let doc = RawDoc::new(
-            gen::<Project>(1),
+            r#gen::<Project>(1),
             vec![alice.did()],
             1,
             identity::Visibility::Public,
@@ -3305,13 +3665,13 @@ mod test {
     }
 
     #[test]
-    fn test_revision_edit_redact() {
+    fn revision_edit_redact() {
         let base = arbitrary::oid();
         let oid = arbitrary::oid();
-        let repo = gen::<MockRepository>(1);
+        let repo = r#gen::<MockRepository>(1);
         let time = env::local_time();
-        let alice = MockSigner::default();
-        let bob = MockSigner::default();
+        let alice = SigningKey::mock(38);
+        let bob = SigningKey::mock(39);
         let mut h0: cob::test::HistoryBuilder<Patch> = cob::test::history(
             &[
                 Action::Revision {
@@ -3366,11 +3726,11 @@ mod test {
     }
 
     #[test]
-    fn test_revision_reaction() {
+    fn revision_reaction() {
         let base = git::Oid::from_str("cb18e95ada2bb38aadd8e6cef0963ce37a87add3").unwrap();
         let oid = git::Oid::from_str("518d5069f94c03427f694bb494ac1cd7d1339380").unwrap();
-        let mut alice = Actor::<MockSigner>::default();
-        let repo = gen::<MockRepository>(1);
+        let mut alice = SigningKey::mock(35);
+        let repo = r#gen::<MockRepository>(1);
         let reaction = Reaction::new('👍').expect("failed to create a reaction");
 
         let a1 = alice.op::<Patch>([
@@ -3404,11 +3764,11 @@ mod test {
     }
 
     #[test]
-    fn test_patch_review_edit() {
+    fn patch_review_edit() {
         let alice = test::setup::NodeWithRepo::default();
         let checkout = alice.repo.checkout();
         let branch = checkout.branch_with([("README", b"Hello World!")]);
-        let mut patches = Cache::no_cache(&*alice.repo).unwrap();
+        let mut patches = Cache::no_cache(&*alice.repo, &alice.signer).unwrap();
         let mut patch = patches
             .create(
                 cob::Title::new("My first patch").unwrap(),
@@ -3417,19 +3777,12 @@ mod test {
                 branch.base,
                 branch.oid,
                 &[],
-                &alice.signer,
             )
             .unwrap();
 
         let (rid, _) = patch.latest();
         let review = patch
-            .review(
-                rid,
-                Some(Verdict::Accept),
-                Some("LGTM".to_owned()),
-                vec![],
-                &alice.signer,
-            )
+            .review(rid, Some(Verdict::Accept), Some("LGTM".to_owned()), vec![])
             .unwrap();
         patch
             .review_edit(
@@ -3438,7 +3791,6 @@ mod test {
                 "Whoops!".to_owned(),
                 vec![],
                 vec![],
-                &alice.signer,
             )
             .unwrap(); // Overwrite the comment.
 
@@ -3449,11 +3801,11 @@ mod test {
     }
 
     #[test]
-    fn test_patch_review_duplicate() {
+    fn patch_review_duplicate() {
         let alice = test::setup::NodeWithRepo::default();
         let checkout = alice.repo.checkout();
         let branch = checkout.branch_with([("README", b"Hello World!")]);
-        let mut patches = Cache::no_cache(&*alice.repo).unwrap();
+        let mut patches = Cache::no_cache(&*alice.repo, &alice.signer).unwrap();
         let mut patch = patches
             .create(
                 cob::Title::new("My first patch").unwrap(),
@@ -3462,16 +3814,15 @@ mod test {
                 branch.base,
                 branch.oid,
                 &[],
-                &alice.signer,
             )
             .unwrap();
 
         let (rid, _) = patch.latest();
         patch
-            .review(rid, Some(Verdict::Accept), None, vec![], &alice.signer)
+            .review(rid, Some(Verdict::Accept), None, vec![])
             .unwrap();
         patch
-            .review(rid, Some(Verdict::Reject), None, vec![], &alice.signer)
+            .review(rid, Some(Verdict::Reject), None, vec![])
             .unwrap(); // This review is ignored, since there is already a review by this author.
 
         let (_, revision) = patch.latest();
@@ -3480,11 +3831,11 @@ mod test {
     }
 
     #[test]
-    fn test_patch_review_edit_comment() {
+    fn patch_review_edit_comment() {
         let alice = test::setup::NodeWithRepo::default();
         let checkout = alice.repo.checkout();
         let branch = checkout.branch_with([("README", b"Hello World!")]);
-        let mut patches = Cache::no_cache(&*alice.repo).unwrap();
+        let mut patches = Cache::no_cache(&*alice.repo, &alice.signer).unwrap();
         let mut patch = patches
             .create(
                 cob::Title::new("My first patch").unwrap(),
@@ -3493,16 +3844,15 @@ mod test {
                 branch.base,
                 branch.oid,
                 &[],
-                &alice.signer,
             )
             .unwrap();
 
         let (rid, _) = patch.latest();
         let review = patch
-            .review(rid, Some(Verdict::Accept), None, vec![], &alice.signer)
+            .review(rid, Some(Verdict::Accept), None, vec![])
             .unwrap();
         patch
-            .review_comment(review, "First comment!", None, None, [], &alice.signer)
+            .review_comment(review, "First comment!", None, None, [])
             .unwrap();
 
         let _review = patch
@@ -3512,18 +3862,17 @@ mod test {
                 "".to_string(),
                 vec![],
                 vec![],
-                &alice.signer,
             )
             .unwrap();
         patch
-            .review_comment(review, "Second comment!", None, None, [], &alice.signer)
+            .review_comment(review, "Second comment!", None, None, [])
             .unwrap();
 
         let (_, revision) = patch.latest();
         let review = revision.review_by(alice.signer.public_key()).unwrap();
         assert_eq!(review.verdict(), Some(Verdict::Reject));
         assert_eq!(review.comments().count(), 2);
-        assert_eq!(review.comments().nth(0).unwrap().1.body(), "First comment!");
+        assert_eq!(review.comments().next().unwrap().1.body(), "First comment!");
         assert_eq!(
             review.comments().nth(1).unwrap().1.body(),
             "Second comment!"
@@ -3531,11 +3880,11 @@ mod test {
     }
 
     #[test]
-    fn test_patch_review_comment() {
+    fn patch_review_comment() {
         let alice = test::setup::NodeWithRepo::default();
         let checkout = alice.repo.checkout();
         let branch = checkout.branch_with([("README", b"Hello World!")]);
-        let mut patches = Cache::no_cache(&*alice.repo).unwrap();
+        let mut patches = Cache::no_cache(&*alice.repo, &alice.signer).unwrap();
         let mut patch = patches
             .create(
                 cob::Title::new("My first patch").unwrap(),
@@ -3544,7 +3893,6 @@ mod test {
                 branch.base,
                 branch.oid,
                 &[],
-                &alice.signer,
             )
             .unwrap();
 
@@ -3556,7 +3904,7 @@ mod test {
             new: Some(CodeRange::Lines { range: 5..8 }),
         };
         let review = patch
-            .review(rid, Some(Verdict::Accept), None, vec![], &alice.signer)
+            .review(rid, Some(Verdict::Accept), None, vec![])
             .unwrap();
         patch
             .review_comment(
@@ -3565,7 +3913,6 @@ mod test {
                 Some(location.clone()),
                 None,
                 [],
-                &alice.signer,
             )
             .unwrap();
 
@@ -3578,11 +3925,11 @@ mod test {
     }
 
     #[test]
-    fn test_patch_review_remove_summary() {
+    fn patch_review_remove_summary() {
         let alice = test::setup::NodeWithRepo::default();
         let checkout = alice.repo.checkout();
         let branch = checkout.branch_with([("README", b"Hello World!")]);
-        let mut patches = Cache::no_cache(&*alice.repo).unwrap();
+        let mut patches = Cache::no_cache(&*alice.repo, &alice.signer).unwrap();
         let mut patch = patches
             .create(
                 cob::Title::new("My first patch").unwrap(),
@@ -3591,19 +3938,12 @@ mod test {
                 branch.base,
                 branch.oid,
                 &[],
-                &alice.signer,
             )
             .unwrap();
 
         let (rid, _) = patch.latest();
         let review = patch
-            .review(
-                rid,
-                Some(Verdict::Accept),
-                Some("Nah".to_owned()),
-                vec![],
-                &alice.signer,
-            )
+            .review(rid, Some(Verdict::Accept), Some("Nah".to_owned()), vec![])
             .unwrap();
         patch
             .review_edit(
@@ -3612,7 +3952,6 @@ mod test {
                 "".to_string(),
                 vec![],
                 vec![],
-                &alice.signer,
             )
             .unwrap();
 
@@ -3626,14 +3965,15 @@ mod test {
     }
 
     #[test]
-    fn test_patch_update() {
+    fn patch_update() {
         let alice = test::setup::NodeWithRepo::default();
         let checkout = alice.repo.checkout();
         let branch = checkout.branch_with([("README", b"Hello World!")]);
         let mut patches = {
             let path = alice.tmp.path().join("cobs.db");
             let mut db = cob::cache::Store::open(path).unwrap();
-            let store = cob::patch::Patches::open(&*alice.repo).unwrap();
+            let store =
+                cob::patch::Patches::open(&*alice.repo, WriteAs::new(&alice.signer)).unwrap();
 
             db.migrate(migrate::ignore).unwrap();
             cob::patch::Cache::open(store, db)
@@ -3646,7 +3986,6 @@ mod test {
                 branch.base,
                 branch.oid,
                 &[],
-                &alice.signer,
             )
             .unwrap();
 
@@ -3655,7 +3994,7 @@ mod test {
 
         let update = checkout.branch_with([("README", b"Hello Radicle!")]);
         let _ = patch
-            .update("I've made changes.", branch.base, update.oid, &alice.signer)
+            .update("I've made changes.", branch.base, update.oid)
             .unwrap();
 
         let id = patch.id;
@@ -3664,7 +4003,7 @@ mod test {
         assert_eq!(patch.revisions.len(), 2);
         assert_eq!(patch.revisions().count(), 2);
         assert_eq!(
-            patch.revisions().nth(0).unwrap().1.description(),
+            patch.revisions().next().unwrap().1.description(),
             "Blah blah blah."
         );
         assert_eq!(
@@ -3680,13 +4019,13 @@ mod test {
     }
 
     #[test]
-    fn test_patch_redact() {
+    fn patch_redact() {
         let alice = test::setup::Node::default();
         let repo = alice.project();
         let branch = repo
             .checkout()
             .branch_with([("README.md", b"Hello, World!")]);
-        let mut patches = Cache::no_cache(&*repo).unwrap();
+        let mut patches = Cache::no_cache(&*repo, &alice.signer).unwrap();
         let mut patch = patches
             .create(
                 cob::Title::new("My first patch").unwrap(),
@@ -3695,7 +4034,6 @@ mod test {
                 branch.base,
                 branch.oid,
                 &[],
-                &alice.signer,
             )
             .unwrap();
         let patch_id = patch.id;
@@ -3704,21 +4042,21 @@ mod test {
             .checkout()
             .branch_with([("README.md", b"Hello, Radicle!")]);
         let revision_id = patch
-            .update("I've made changes.", branch.base, update.oid, &alice.signer)
+            .update("I've made changes.", branch.base, update.oid)
             .unwrap();
         assert_eq!(patch.revisions().count(), 2);
 
-        patch.redact(revision_id, &alice.signer).unwrap();
+        patch.redact(revision_id).unwrap();
         assert_eq!(patch.latest().0, RevisionId(*patch_id));
         assert_eq!(patch.revisions().count(), 1);
 
         // The patch's root must always exist.
         assert_eq!(patch.latest(), patch.root());
-        assert!(patch.redact(patch.latest().0, &alice.signer).is_err());
+        assert!(patch.redact(patch.latest().0).is_err());
     }
 
     #[test]
-    fn test_json() {
+    fn json() {
         use serde_json::json;
 
         assert_eq!(

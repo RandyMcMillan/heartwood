@@ -1,18 +1,17 @@
 use std::path::Path;
 use std::str::FromStr;
 
-use crate::crypto::{PublicKey, Verified};
+use crate::crypto::PublicKey;
 use crate::git;
-use crate::identity::doc::Visibility;
 use crate::identity::RepoId;
-use crate::node::device::Device;
+use crate::identity::doc::Visibility;
 use crate::node::Alias;
 use crate::rad;
-use crate::storage::git::transport;
 use crate::storage::git::Storage;
+use crate::storage::git::transport;
 use crate::storage::refs::SignedRefs;
 
-/// The birth of the radicle project, January 1st, 2018.
+/// The birth of the Radicle project, January 1st, 2018.
 pub const RADICLE_EPOCH: i64 = 1514817556;
 
 const USER_NAME: &str = "anonymous";
@@ -30,22 +29,24 @@ pub fn user() -> git::UserInfo {
 }
 
 /// Create a new storage with a project.
-pub fn storage<P, G>(path: P, signer: &Device<G>) -> Result<Storage, rad::InitError>
-where
-    P: AsRef<Path>,
-    G: crypto::signature::Signer<crypto::Signature>,
-{
+pub fn storage(
+    path: impl AsRef<Path>,
+    signer: &impl crypto::Signer,
+) -> Result<Storage, rad::InitError> {
     let path = path.as_ref();
+
+    let key = signer.public_key();
+
     let storage = Storage::open(
         path.join("storage"),
         git::UserInfo {
             alias: Alias::new("Radcliff"),
-            key: *signer.public_key(),
+            key: *key,
         },
     )?;
 
     transport::local::register(storage.clone());
-    transport::remote::mock::register(signer.public_key(), storage.path());
+    transport::remote::mock::register(key, storage.path());
 
     for (name, desc) in [
         ("acme", "Acme's repository"),
@@ -68,23 +69,11 @@ where
 }
 
 /// Create a new repository at the given path, and initialize it into a project.
-pub fn project<P, G>(
-    path: P,
+pub fn project(
+    path: impl AsRef<Path>,
     storage: &Storage,
-    signer: &Device<G>,
-) -> Result<
-    (
-        RepoId,
-        SignedRefs<Verified>,
-        git::raw::Repository,
-        git::raw::Oid,
-    ),
-    rad::InitError,
->
-where
-    P: AsRef<Path>,
-    G: crypto::signature::Signer<crypto::Signature>,
-{
+    signer: &impl crypto::Signer,
+) -> Result<(RepoId, SignedRefs, git::raw::Repository, git::raw::Oid), rad::InitError> {
     transport::local::register(storage.clone());
 
     let (working, head) = repository(path);
@@ -130,6 +119,17 @@ fn repository_with<P: AsRef<Path>>(
         let mut config = repo.config().unwrap();
         config.set_str("user.name", USER_NAME).unwrap();
         config.set_str("user.email", USER_EMAIL).unwrap();
+
+        // In Git 2.48.0, the option `remote.<name>.followRemoteHEAD` was added.
+        // Git versions older than 2.48.0 behave as if this option is set to
+        // `never`.
+        // We set it explicitly here for testing purposes, for consistent output
+        // of commands like `git branch -r` and `git show-ref`.
+        // Once Radicle requires Git 2.48.0 or newer, we can remove this
+        // (and adjust our tests to the new default behavior, creating `HEAD`).
+        config
+            .set_str("remote.rad.followRemoteHEAD", "never")
+            .unwrap();
     }
 
     let sig = git::raw::Signature::new(
@@ -225,7 +225,7 @@ pub fn populate(repo: &git::raw::Repository, scale: usize) -> Vec<git::fmt::Qual
             .to_lowercase();
         let name = git::fmt::refname!("feature")
             .join(git::fmt::RefString::try_from(random.as_str()).unwrap());
-        let signature = git::raw::Signature::now("Radicle", "radicle@radicle.xyz").unwrap();
+        let signature = git::raw::Signature::now("Radicle", "radicle@radicle.dev").unwrap();
 
         rng.fill(&mut buffer);
 
@@ -252,7 +252,7 @@ pub fn populate(repo: &git::raw::Repository, scale: usize) -> Vec<git::fmt::Qual
 }
 
 /// Generate random fixtures.
-pub mod gen {
+pub mod r#gen {
     use super::*;
 
     /// Generate a random string of the given length.

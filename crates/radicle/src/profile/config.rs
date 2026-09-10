@@ -7,9 +7,9 @@ use serde_json as json;
 use thiserror::Error;
 
 use crate::explorer::Explorer;
+use crate::node::Alias;
 use crate::node::config::DefaultSeedingPolicy;
 use crate::node::policy::{Policy, Scope};
-use crate::node::Alias;
 use crate::{cli, node, web};
 
 #[derive(Debug, Error)]
@@ -112,7 +112,9 @@ pub enum InitError {
 
 #[derive(Debug, Error)]
 pub enum LoadError {
-    #[error("failed to open configuration file {path:?}: {err}, perhaps you need to initialise one `rad config init --alias <alias>`")]
+    #[error(
+        "failed to open configuration file {path:?}: {err}, perhaps you need to initialise one `rad config init --alias <alias>`"
+    )]
     File {
         path: PathBuf,
         #[source]
@@ -126,7 +128,7 @@ pub enum LoadError {
     },
 }
 
-/// Local radicle configuration.
+/// Local Radicle configuration.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -139,7 +141,7 @@ pub struct Config {
     #[serde(default)]
     pub preferred_seeds: Vec<node::config::ConnectAddress>,
     /// Web configuration.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "crate::serde_ext::is_default")]
     pub web: web::Config,
     /// CLI configuration.
     #[serde(default)]
@@ -155,7 +157,7 @@ impl Config {
 
         Self {
             public_explorer: Explorer::default(),
-            preferred_seeds: node.network.public_seeds(),
+            preferred_seeds: Vec::default(),
             web: web::Config::default(),
             cli: cli::Config::default(),
             node,
@@ -185,16 +187,18 @@ impl Config {
 
         // Handle deprecated policy configuration.
         // Nb. This will override "seedingPolicy" if set! This code should be removed after 1.0.
-        if let (Some(p), Some(s)) = (cfg.node.extra.get("policy"), cfg.node.extra.get("scope")) {
-            if let (Ok(policy), Ok(scope)) = (
+        if let (Some(p), Some(s)) = (cfg.node.extra.get("policy"), cfg.node.extra.get("scope"))
+            && let (Ok(policy), Ok(scope)) = (
                 json::from_value::<Policy>(p.clone()),
                 json::from_value::<Scope>(s.clone()),
-            ) {
-                log::warn!(target: "radicle", "Overwriting `seedingPolicy` configuration");
-                cfg.node.seeding_policy = match policy {
-                    Policy::Allow => DefaultSeedingPolicy::Allow { scope },
-                    Policy::Block => DefaultSeedingPolicy::Block,
-                }
+            )
+        {
+            log::warn!(target: "radicle", "Overwriting `seedingPolicy` configuration");
+            cfg.node.seeding_policy = match policy {
+                Policy::Allow => DefaultSeedingPolicy::Allow {
+                    scope: node::config::Scope::explicit(scope),
+                },
+                Policy::Block => DefaultSeedingPolicy::Block,
             }
         }
         Ok(cfg)
@@ -202,15 +206,8 @@ impl Config {
 
     /// Write configuration to disk.
     pub fn write(&self, path: &Path) -> Result<(), WriteError> {
-        let value = json::to_value(self).map_err(|err| WriteError::to_json(path, err))?;
-        let tmp = RawConfig(value);
-        let file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(path)
-            .map_err(|err| WriteError::open_file(path, err))?;
-
-        tmp.write_file(path, file)
+        let contents = json::to_vec_pretty(self).map_err(|err| WriteError::to_json(path, err))?;
+        fs::write(path, contents).map_err(|err| WriteError::write_file(path, err))
     }
 
     /// Get the user alias.
@@ -221,9 +218,11 @@ impl Config {
 
 /// Offers utility functions for editing the configuration. Validates on write.
 #[derive(Debug, Clone)]
+#[deprecated]
 pub struct RawConfig(json::Value);
 
 #[derive(Debug, Error)]
+#[allow(deprecated)]
 pub enum ModifyError {
     #[error("the path provided was empty")]
     EmptyPath,
@@ -237,6 +236,7 @@ pub enum ModifyError {
     Upsert { key: String },
 }
 
+#[allow(deprecated)]
 impl RawConfig {
     /// Creates a temporary configuration, by reading a configuration file from disk.
     pub fn from_file(path: &Path) -> Result<Self, WriteError> {
@@ -378,13 +378,11 @@ impl RawConfig {
         let mut current = &mut self.0;
         for key in config_path.iter() {
             current = match current {
-                json::Value::Object(ref mut map) => {
-                    map.entry(key).or_insert_with(|| json::json!({}))
-                }
+                json::Value::Object(map) => map.entry(key).or_insert_with(|| json::json!({})),
                 _ => {
                     return Err(ModifyError::Upsert {
                         key: key.to_owned(),
-                    })
+                    });
                 }
             }
         }
@@ -394,6 +392,7 @@ impl RawConfig {
     }
 }
 
+#[allow(deprecated)]
 impl TryFrom<RawConfig> for Config {
     type Error = json::Error;
 
@@ -404,11 +403,14 @@ impl TryFrom<RawConfig> for Config {
 
 /// A struct that ensures all values are safe for JSON serialization, including handling special
 /// floating point values like `NaN` and `Infinity`. Use the `From<&str>` implementation to create an instance.
+#[deprecated]
+#[allow(deprecated)]
 pub struct ConfigValue(RawConfigValue);
 
 /// This enum represents raw configuration values and should not be used directly.
 /// Use the `ConfigValue` type, which validates values using its `From<&str>` implementation.
 #[derive(Debug, Clone)]
+#[deprecated]
 enum RawConfigValue {
     Integer(i64),
     Float(f64),
@@ -416,6 +418,7 @@ enum RawConfigValue {
     String(String),
 }
 
+#[allow(deprecated)]
 impl From<&str> for ConfigValue {
     /// Guess the type of a Value.
     fn from(value: &str) -> Self {
@@ -436,12 +439,14 @@ impl From<&str> for ConfigValue {
     }
 }
 
+#[allow(deprecated)]
 impl From<String> for ConfigValue {
     fn from(value: String) -> Self {
         value.as_str().into()
     }
 }
 
+#[allow(deprecated)]
 impl From<ConfigValue> for json::Value {
     fn from(value: ConfigValue) -> Self {
         match value {
@@ -459,8 +464,10 @@ impl From<ConfigValue> for json::Value {
 
 /// Configuration attribute path.
 #[derive(Default, Debug, Clone)]
+#[deprecated]
 pub struct ConfigPath(Vec<String>);
 
+#[allow(deprecated)]
 impl ConfigPath {
     fn parent(&self) -> Option<Self> {
         self.0.split_last().map(|(_, tail)| Self(tail.to_vec()))
@@ -475,12 +482,14 @@ impl ConfigPath {
     }
 }
 
+#[allow(deprecated)]
 impl fmt::Display for ConfigPath {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.0.join("."))
     }
 }
 
+#[allow(deprecated)]
 impl From<String> for ConfigPath {
     fn from(value: String) -> Self {
         let parts: Vec<String> = value.split('.').map(|s| s.to_string()).collect();

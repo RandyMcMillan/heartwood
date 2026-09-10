@@ -108,7 +108,7 @@ mod test {
     use super::*;
 
     #[test]
-    fn test_url_parse() {
+    fn url_parse() {
         let node = NodeId::from_str("z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap();
         let repo = RepoId::from_canonical("z2w8RArM3gaBXZxXhQUswE3hhLcss").unwrap();
         let namespace =
@@ -130,9 +130,11 @@ mod test {
 
         assert!(format!("heartwood://{node}").parse::<Url>().is_err());
         assert!(format!("rad://{node}").parse::<Url>().is_err());
-        assert!(format!("heartwood://{node}/{namespace}")
-            .parse::<Url>()
-            .is_err());
+        assert!(
+            format!("heartwood://{node}/{namespace}")
+                .parse::<Url>()
+                .is_err()
+        );
         assert!(
             format!("heartwood://{node}/{}/{namespace}/fnord", repo.canonical())
                 .parse::<Url>()

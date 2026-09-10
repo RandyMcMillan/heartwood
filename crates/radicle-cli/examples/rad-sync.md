@@ -15,9 +15,9 @@ $ rad sync status --sort-by alias
 ╭───────────────────────────────────────────────────╮
 │ Node ID           Alias   ?   SigRefs   Timestamp │
 ├───────────────────────────────────────────────────┤
-│ (you)             alice   !   056b1db   [..]      │
-│ z6Mkt67…v4N1tRk   bob     ✗   99c5497   [..]      │
-│ z6Mkux1…nVhib7Z   eve     ✗   99c5497   [..]      │
+│ (you)             alice   !   1d8285b   [..]      │
+│ z6Mkt67…v4N1tRk   bob     ✗   55be805   [..]      │
+│ z6Mkux1…nVhib7Z   eve     ✗   55be805   [..]      │
 ╰───────────────────────────────────────────────────╯
 ```
 
@@ -37,9 +37,9 @@ $ rad sync status --sort-by alias
 ╭───────────────────────────────────────────────────╮
 │ Node ID           Alias   ?   SigRefs   Timestamp │
 ├───────────────────────────────────────────────────┤
-│ (you)             alice   ✓   056b1db   [..]      │
-│ z6Mkt67…v4N1tRk   bob     ✓   056b1db   [..]      │
-│ z6Mkux1…nVhib7Z   eve     ✓   056b1db   [..]      │
+│ (you)             alice   ✓   1d8285b   [..]      │
+│ z6Mkt67…v4N1tRk   bob     ✓   1d8285b   [..]      │
+│ z6Mkux1…nVhib7Z   eve     ✓   1d8285b   [..]      │
 ╰───────────────────────────────────────────────────╯
 ```
 
@@ -107,7 +107,7 @@ It's also possible to receive an error if a repository is not found anywhere.
 
 ```
 $ rad seed rad:z39mP9rQAaGmERfUMPULfPUi473tY --no-fetch
-✓ Seeding policy updated for rad:z39mP9rQAaGmERfUMPULfPUi473tY with scope 'all'
+✓ Seeding policy updated for rad:z39mP9rQAaGmERfUMPULfPUi473tY with scope 'followed'
 ```
 ``` (fail)
 $ rad sync rad:z39mP9rQAaGmERfUMPULfPUi473tY

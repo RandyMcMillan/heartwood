@@ -1,4 +1,4 @@
-use crate::{cell::Cell, Constraint, Element, Line, Paint, Size};
+use crate::{Constraint, Element, Line, Paint, Size, cell::Cell};
 
 /// Default text wrap width.
 pub const DEFAULT_WRAP: usize = 80;
@@ -30,7 +30,7 @@ impl TextArea {
     }
 
     /// Get the lines of text in this text area.
-    pub fn lines(&self) -> impl Iterator<Item = String> {
+    pub fn lines(&self) -> impl Iterator<Item = String> + use<> {
         let mut lines: Vec<String> = Vec::new();
         let mut fenced = false;
 
@@ -98,7 +98,7 @@ mod test {
     use pretty_assertions::assert_eq;
 
     #[test]
-    fn test_wrapping() {
+    fn wrapping() {
         let t = TextArea::new(
             "Radicle enables users to run their own nodes, \
             ensuring censorship-resistant code collaboration \
@@ -120,7 +120,7 @@ mod test {
     }
 
     #[test]
-    fn test_wrapping_paragraphs() {
+    fn wrapping_paragraphs() {
         let t = TextArea::new(
             "Radicle enables users to run their own nodes, \
             ensuring censorship-resistant code collaboration \
@@ -151,7 +151,7 @@ mod test {
     }
 
     #[test]
-    fn test_wrapping_code_block() {
+    fn wrapping_code_block() {
         let t = TextArea::new(
             "\
 Here's an example:
@@ -179,7 +179,7 @@ Run the above and wait for your project to sync.\
     }
 
     #[test]
-    fn test_wrapping_fenced_block() {
+    fn wrapping_fenced_block() {
         let t = TextArea::new(
             "\
 Here's an example:

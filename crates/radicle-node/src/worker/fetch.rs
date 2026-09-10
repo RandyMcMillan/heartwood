@@ -1,37 +1,32 @@
-use radicle::identity::doc::CanonicalRefsError;
-use radicle::identity::CanonicalRefs;
-use radicle::storage::git::TempRepository;
-pub(crate) use radicle_protocol::worker::fetch::error;
-
 use std::collections::BTreeSet;
 use std::str::FromStr;
 
+use fetch::git::refs::Applied;
+use fetch::{Allowed, BlockList};
 use localtime::LocalTime;
-
+pub(crate) use protocol::worker::fetch::error;
+use protocol::worker::fetch::{FetchResult, UpdatedCanonicalRefs};
 use radicle::cob::TypedId;
+use radicle::cob::store::access::ReadOnly;
 use radicle::crypto::PublicKey;
-use radicle::identity::crefs::GetCanonicalRefs as _;
 use radicle::prelude::NodeId;
 use radicle::prelude::RepoId;
 use radicle::storage::git::Repository;
+use radicle::storage::git::TempRepository;
 use radicle::storage::refs::RefsAt;
 use radicle::storage::{
-    ReadRepository, ReadStorage as _, RefUpdate, RemoteRepository, RepositoryError,
-    WriteRepository as _,
+    ReadRepository, ReadStorage as _, RefUpdate, RemoteRepository, WriteRepository as _,
 };
-use radicle::{cob, git, node, Storage};
-use radicle_fetch::git::refs::Applied;
-use radicle_fetch::{Allowed, BlockList, FetchLimit};
-pub use radicle_protocol::worker::fetch::{FetchResult, UpdatedCanonicalRefs};
+use radicle::{Storage, cob, git, node};
 
 use super::channels::ChannelsFlush;
 
 pub enum Handle {
     Clone {
-        handle: radicle_fetch::Handle<TempRepository, ChannelsFlush>,
+        handle: fetch::Handle<TempRepository, ChannelsFlush>,
     },
     Pull {
-        handle: radicle_fetch::Handle<Repository, ChannelsFlush>,
+        handle: fetch::Handle<Repository, ChannelsFlush>,
         notifications: node::notifications::StoreWriter,
     },
 }
@@ -49,14 +44,14 @@ impl Handle {
         let exists = storage.contains(&rid)?;
         if exists {
             let repo = storage.repository(rid)?;
-            let handle = radicle_fetch::Handle::new(local, repo, follow, blocked, channels)?;
+            let handle = fetch::Handle::new(local, repo, follow, blocked, channels)?;
             Ok(Handle::Pull {
                 handle,
                 notifications,
             })
         } else {
             let repo = storage.temporary_repository(rid)?;
-            let handle = radicle_fetch::Handle::new(local, repo, follow, blocked, channels)?;
+            let handle = fetch::Handle::new(local, repo, follow, blocked, channels)?;
             Ok(Handle::Clone { handle })
         }
     }
@@ -67,20 +62,24 @@ impl Handle {
         storage: &Storage,
         cache: &mut cob::cache::StoreWriter,
         refsdb: &mut D,
-        limit: FetchLimit,
+        config: fetch::Config,
         remote: PublicKey,
         refs_at: Option<Vec<RefsAt>>,
     ) -> Result<FetchResult, error::Fetch> {
         let (result, clone, notifs) = match self {
             Self::Clone { mut handle } => {
                 log::debug!(target: "worker", "{} cloning from {remote}", handle.local());
-                match radicle_fetch::clone(&mut handle, limit, remote) {
+                match fetch::clone(&mut handle, config, remote) {
                     Err(err) => {
                         handle.into_inner().cleanup();
                         return Err(err.into());
                     }
                     Ok(result) => {
-                        handle.into_inner().mv(storage.path_of(&rid))?;
+                        if result.is_success() {
+                            handle.into_inner().mv(storage.path_of(&rid))?;
+                        } else {
+                            handle.into_inner().cleanup();
+                        }
                         (result, true, None)
                     }
                 }
@@ -90,58 +89,47 @@ impl Handle {
                 notifications,
             } => {
                 log::debug!(target: "worker", "{} pulling from {remote}", handle.local());
-                let result = radicle_fetch::pull(&mut handle, limit, remote, refs_at)?;
+                let result = fetch::pull(&mut handle, config, remote, refs_at)?;
                 (result, false, Some(notifications))
             }
         };
 
         for rejected in result.rejected() {
-            log::warn!(target: "worker", "Rejected update for {}", rejected.refname())
+            log::debug!(target: "worker", "Rejected update for {}", rejected.refname())
         }
 
         match result {
-            radicle_fetch::FetchResult::Failed {
+            fetch::FetchResult::Failed {
                 threshold,
                 delegates,
                 validations,
             } => {
                 for fail in validations.iter() {
-                    log::error!(target: "worker", "Validation error: {fail}");
+                    log::warn!(target: "worker", "Validation error: {fail}");
                 }
                 Err(error::Fetch::Validation {
                     threshold,
                     delegates: delegates.into_iter().map(|key| key.to_string()).collect(),
                 })
             }
-            radicle_fetch::FetchResult::Success {
+            fetch::FetchResult::Success {
                 applied,
                 remotes,
                 validations,
             } => {
                 for warn in validations {
-                    log::warn!(target: "worker", "Validation error: {warn}");
+                    log::debug!(target: "worker", "Validation error: {warn}");
                 }
 
                 // N.b. We do not go through handle for this since the cloning handle
                 // points to a repository that is temporary and gets moved by [`mv`].
                 let repo = storage.repository(rid)?;
                 repo.set_identity_head()?;
-                match repo.set_head() {
-                    Ok(head) => {
-                        if head.is_updated() {
-                            log::trace!(target: "worker", "Set HEAD to {}", head.new);
-                        }
-                    }
-                    Err(RepositoryError::Quorum(e)) => {
-                        log::warn!(target: "worker", "Fetch could not set HEAD: {e}")
-                    }
-                    Err(e) => return Err(e.into()),
-                }
 
                 let canonical = match set_canonical_refs(&repo, &applied) {
                     Ok(updates) => updates.unwrap_or_default(),
                     Err(e) => {
-                        log::warn!(target: "worker", "Failed to set canonical references: {e}");
+                        log::warn!(target: "worker", "Failed to set canonical references for {rid}: {e}");
                         UpdatedCanonicalRefs::default()
                     }
                 };
@@ -149,7 +137,7 @@ impl Handle {
                 // Notifications are only posted for pulls, not clones.
                 if let Some(mut store) = notifs {
                     // Only create notifications for repos that we have
-                    // contributed to in some way, otherwise our inbox will
+                    // contributed to in some way; otherwise, our inbox will
                     // be flooded by all the repos we are seeding.
                     if repo.remote(&storage.info().key).is_ok() {
                         notify(&rid, &applied, &mut store)?;
@@ -174,7 +162,7 @@ impl Handle {
 // Post notifications for the given refs.
 fn notify(
     rid: &RepoId,
-    refs: &radicle_fetch::git::refs::Applied<'static>,
+    refs: &fetch::git::refs::Applied<'static>,
     store: &mut node::notifications::StoreWriter,
 ) -> Result<(), error::Fetch> {
     let now = LocalTime::now();
@@ -196,18 +184,18 @@ fn notify(
                 // for sigref verification.
                 continue;
             }
-            if let Some(rest) = r.strip_prefix(git::fmt::refname!("refs/heads/patches")) {
-                if radicle::cob::ObjectId::from_str(rest.as_str()).is_ok() {
-                    // Don't notify about patch branches, since we already get
-                    // notifications about patch updates.
-                    continue;
-                }
+            if let Some(rest) = r.strip_prefix(git::fmt::refname!("refs/heads/patches"))
+                && radicle::cob::ObjectId::from_str(rest.as_str()).is_ok()
+            {
+                // Don't notify about patch branches, since we already get
+                // notifications about patch updates.
+                continue;
             }
         }
         if let RefUpdate::Skipped { .. } = update {
             // Don't notify about skipped refs.
         } else if let Err(e) = store.insert(rid, update, now) {
-            log::error!(
+            log::debug!(
                 target: "worker",
                 "Failed to update notification store for {rid}: {e}"
             );
@@ -227,8 +215,8 @@ where
         let name = r.name();
         let (namespace, qualified) = match radicle::git::parse_ref_namespaced(name) {
             Err(e) => {
-                log::error!(target: "worker", "Git reference is invalid: {name:?}: {e}");
-                log::warn!(target: "worker", "Skipping refs caching for fetch of {repo}");
+                log::debug!(target: "worker", "Git reference is invalid: {name:?}: {e}");
+                log::debug!(target: "worker", "Skipping refs caching for fetch of {repo}");
                 break;
             }
             Ok((n, q)) => (n, q),
@@ -247,8 +235,8 @@ where
         };
 
         if let Err(e) = result {
-            log::error!(target: "worker", "Error updating git refs cache for {name:?}: {e}");
-            log::warn!(target: "worker", "Skipping refs caching for fetch of {repo}");
+            log::debug!(target: "worker", "Failed to update git refs cache for {name:?}: {e}");
+            log::debug!(target: "worker", "Skipping refs caching for fetch of {repo}");
             break;
         }
     }
@@ -268,8 +256,8 @@ where
     C: cob::cache::Update<cob::issue::Issue> + cob::cache::Update<cob::patch::Patch>,
     C: cob::cache::Remove<cob::issue::Issue> + cob::cache::Remove<cob::patch::Patch>,
 {
-    let mut issues = cob::store::Store::<cob::issue::Issue, _>::open(storage)?;
-    let mut patches = cob::store::Store::<cob::patch::Patch, _>::open(storage)?;
+    let mut issues = cob::store::Store::<cob::issue::Issue, _, _>::open(storage, ReadOnly)?;
+    let mut patches = cob::store::Store::<cob::patch::Patch, _, _>::open(storage, ReadOnly)?;
 
     for update in refs {
         match update {
@@ -299,15 +287,15 @@ where
 }
 
 /// Update or remove a cache entry.
-fn update_or_remove<R, C, T>(
-    store: &mut cob::store::Store<T, R>,
+fn update_or_remove<T, Repo, C>(
+    store: &mut cob::store::Store<T, Repo, ReadOnly>,
     cache: &mut C,
     rid: &RepoId,
     tid: TypedId,
 ) -> Result<(), error::Cache>
 where
-    R: cob::Store + ReadRepository,
-    T: cob::Evaluate<R> + cob::store::Cob + cob::store::CobWithType,
+    T: cob::Evaluate<Repo> + cob::store::Cob + cob::store::CobWithType,
+    Repo: cob::Store<Namespace = NodeId> + ReadRepository,
     C: cob::cache::Update<T> + cob::cache::Remove<T>,
 {
     match store.get(&tid.id) {
@@ -326,7 +314,7 @@ where
         }
         Err(e) => {
             // Object was found, but failed to load. Fall-through.
-            log::error!(target: "fetch", "Error loading COB {tid} from storage: {e}");
+            log::debug!(target: "fetch", "Failed to load COB {tid} from storage: {e}");
         }
     }
     // The object has either been removed entirely from the repository,
@@ -346,17 +334,21 @@ fn set_canonical_refs(
     repo: &Repository,
     applied: &Applied,
 ) -> Result<Option<UpdatedCanonicalRefs>, error::Canonical> {
+    const LOG_MESSAGE: &str = "set-canonical-reference from fetch (radicle)";
+
     let identity = repo.identity()?;
-    // TODO(finto): it's unfortunate that we may end up computing the default
-    // branch again after `set_head` is called after the fetch. This is due to
-    // the storage capabilities being leaked to this part of the code base.
-    let rules = identity
-        .canonical_refs_or_default(|| {
-            let rule = identity.doc().default_branch_rule()?;
-            Ok::<_, CanonicalRefsError>(CanonicalRefs::from_iter([rule]))
-        })?
-        .rules()
-        .clone();
+    let crefs = identity.doc().canonical_refs()?;
+
+    for (name, target) in crefs.symbolic().iter() {
+        if let Err(e) = repo.set_symbolic_ref(name, target, LOG_MESSAGE) {
+            log::warn!(
+                target: "worker",
+                "Failed to set canonical symbolic reference '{name}' → '{target}': {e}"
+            );
+        }
+    }
+
+    let rules = crefs.rules().clone();
 
     let mut updated_refs = UpdatedCanonicalRefs::default();
     let refnames = applied
@@ -380,7 +372,7 @@ fn set_canonical_refs(
 
         let canonical = match canonical.find_objects() {
             Err(err) => {
-                log::warn!(target: "worker", "Failed to find objects for canonical computation: {err}");
+                log::warn!(target: "worker", "Failed to find objects for canonical computation of `{name}`: {err}");
                 continue;
             }
             Ok(canonical) => canonical,
@@ -390,7 +382,7 @@ fn set_canonical_refs(
             Err(err) => {
                 log::warn!(
                     target: "worker",
-                    "Failed to calculate canonical reference: {err}",
+                    "Failed to calculate canonical reference `{name}`: {err}",
                 );
                 continue;
             }
@@ -398,12 +390,10 @@ fn set_canonical_refs(
                 refname, object, ..
             }) => {
                 let oid = object.id();
-                if let Err(e) = repo.backend.reference(
-                    refname.clone().as_str(),
-                    oid.into(),
-                    true,
-                    "set-canonical-reference from fetch (radicle)",
-                ) {
+                if let Err(e) =
+                    repo.backend
+                        .reference(refname.clone().as_str(), oid.into(), true, LOG_MESSAGE)
+                {
                     log::warn!(
                         target: "worker",
                         "Failed to set canonical reference {refname}->{oid}: {e}"

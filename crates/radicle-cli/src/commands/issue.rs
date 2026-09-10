@@ -6,18 +6,18 @@ use anyhow::Context as _;
 
 use radicle::cob::common::Label;
 use radicle::cob::issue::{CloseReason, State};
-use radicle::cob::{issue, Title};
+use radicle::cob::store::access::WriteAs;
+use radicle::cob::{Title, issue};
 
+use radicle::Profile;
 use radicle::crypto;
 use radicle::issue::cache::Issues as _;
-use radicle::node::device::Device;
 use radicle::node::NodeId;
 use radicle::prelude::Did;
 use radicle::profile;
 use radicle::storage;
 use radicle::storage::{WriteRepository, WriteStorage};
-use radicle::Profile;
-use radicle::{cob, Node};
+use radicle::{Node, cob};
 
 pub use args::Args;
 use args::{Assigned, Command, CommentAction, StateArg};
@@ -25,20 +25,16 @@ use args::{Assigned, Command, CommentAction, StateArg};
 use crate::git::Rev;
 use crate::node;
 use crate::terminal as term;
-use crate::terminal::args::Error;
+use crate::terminal::Element;
+use crate::terminal::args::{Error, rid_or_cwd};
 use crate::terminal::format::Author;
 use crate::terminal::issue::Format;
-use crate::terminal::Element;
 
-pub(crate) const ABOUT: &str = "Manage issues";
+const ABOUT: &str = "Manage issues";
 
 pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
     let profile = ctx.profile()?;
-    let rid = match args.repo {
-        Some(rid) => rid,
-        None => radicle::rad::cwd().map(|(_, rid)| rid)?,
-    };
-
+    let (_, rid) = rid_or_cwd(args.repo)?;
     let repo = profile.storage.repository_mut(rid)?;
 
     // Fallback to [`Command::List`] if no subcommand is provided.
@@ -48,7 +44,8 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
         .unwrap_or_else(|| Command::List(args.empty.into()));
 
     let announce = !args.no_announce && command.should_announce_for();
-    let mut issues = term::cob::issues_mut(&profile, &repo)?;
+    let signer = profile.signer()?;
+    let mut issues = term::cob::issues_mut(&profile, &repo, &signer)?;
 
     match command {
         Command::Edit {
@@ -56,8 +53,7 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
             title,
             description,
         } => {
-            let signer = term::signer(&profile)?;
-            let issue = edit(&mut issues, &repo, id, title, description, &signer)?;
+            let issue = edit(&mut issues, &repo, id, title, description)?;
             if !args.quiet {
                 term::issue::show(&issue, issue.id(), Format::Header, args.verbose, &profile)?;
             }
@@ -68,7 +64,6 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
             labels,
             assignees,
         } => {
-            let signer = term::signer(&profile)?;
             open(
                 title,
                 description,
@@ -77,7 +72,6 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
                 args.verbose,
                 args.quiet,
                 &mut issues,
-                &signer,
                 &profile,
             )?;
         }
@@ -122,9 +116,8 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
             let id = id.resolve(&repo.backend)?;
             let issue = issues
                 .get(&id)
-                .map_err(|e| Error::WithHint {
-                    err: e.into(),
-                    hint: "reset the cache with `rad issue cache` and try again",
+                .map_err(|e| {
+                    Error::with_hint(e, "reset the cache with `rad issue cache` and try again")
                 })?
                 .context("No issue with the given ID exists")?;
             term::issue::show(&issue, &id, format, args.verbose, &profile)?;
@@ -132,10 +125,9 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
         Command::State { id, target_state } => {
             let to: StateArg = target_state.into();
             let id = id.resolve(&repo.backend)?;
-            let signer = term::signer(&profile)?;
             let mut issue = issues.get_mut(&id)?;
             let state = to.into();
-            issue.lifecycle(state, &signer)?;
+            issue.lifecycle(state)?;
 
             if !args.quiet {
                 let success =
@@ -156,7 +148,6 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
         } => {
             let id = id.resolve(&repo.backend)?;
             if let Ok(mut issue) = issues.get_mut(&id) {
-                let signer = term::signer(&profile)?;
                 let comment_id = match comment_id {
                     Some(cid) => cid.resolve(&repo.backend)?,
                     None => *term::io::comment_select(&issue).map(|(cid, _)| cid)?,
@@ -165,11 +156,10 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
                     Some(reaction) => reaction,
                     None => term::io::reaction_select()?,
                 };
-                issue.react(comment_id, reaction, true, &signer)?;
+                issue.react(comment_id, reaction, true)?;
             }
         }
         Command::Assign { id, add, delete } => {
-            let signer = term::signer(&profile)?;
             let id = id.resolve(&repo.backend)?;
             let Ok(mut issue) = issues.get_mut(&id) else {
                 anyhow::bail!("Issue `{id}` not found");
@@ -180,7 +170,7 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
                 .chain(add.iter())
                 .cloned()
                 .collect::<Vec<_>>();
-            issue.assign(assignees, &signer)?;
+            issue.assign(assignees)?;
         }
         Command::Label { id, add, delete } => {
             let id = id.resolve(&repo.backend)?;
@@ -193,8 +183,7 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
                 .chain(add.iter())
                 .cloned()
                 .collect::<Vec<_>>();
-            let signer = term::signer(&profile)?;
-            issue.label(labels, &signer)?;
+            issue.label(labels)?;
         }
         Command::List(list_args) => {
             list(
@@ -207,8 +196,7 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
         }
         Command::Delete { id } => {
             let id = id.resolve(&repo.backend)?;
-            let signer = term::signer(&profile)?;
-            issues.remove(&id, &signer)?;
+            issues.remove(&id)?;
         }
         Command::Cache { id, storage } => {
             let mode = if storage {
@@ -227,7 +215,7 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
     }
 
     if announce {
-        let mut node = Node::new(profile.socket());
+        let mut node = Node::new(profile.socket_from_env());
         node::announce(
             &repo,
             node::SyncSettings::default(),
@@ -251,7 +239,7 @@ where
     C: issue::cache::Issues,
 {
     if cache.is_empty()? {
-        term::print(term::format::italic("Nothing to show."));
+        term::println(term::format::italic("Nothing to show."));
         return Ok(());
     }
 
@@ -273,16 +261,16 @@ where
                 }
             };
 
-            if let Some(a) = assignee {
-                if !issue.assignees().any(|v| v == &Did::from(a)) {
-                    return None;
-                }
+            if let Some(a) = assignee
+                && !issue.assignees().any(|v| v == &Did::from(a))
+            {
+                return None;
             }
 
-            if let Some(s) = state {
-                if s != issue.state() {
-                    return None;
-                }
+            if let Some(s) = state
+                && s != issue.state()
+            {
+                return None;
             }
 
             Some((id, issue))
@@ -366,21 +354,21 @@ fn mk_issue_row(
     ]
 }
 
-fn open<R, G>(
+fn open(
     title: Option<Title>,
     description: Option<String>,
     labels: Vec<Label>,
     assignees: Vec<Did>,
     verbose: bool,
     quiet: bool,
-    cache: &mut issue::Cache<issue::Issues<'_, R>, cob::cache::StoreWriter>,
-    signer: &Device<G>,
+    cache: &mut issue::Cache<
+        '_,
+        impl WriteRepository + cob::Store<Namespace = NodeId>,
+        WriteAs<'_, impl crypto::Signer>,
+        cob::cache::StoreWriter,
+    >,
     profile: &Profile,
-) -> anyhow::Result<()>
-where
-    R: WriteRepository + cob::Store<Namespace = NodeId>,
-    G: crypto::signature::Signer<crypto::Signature>,
-{
+) -> anyhow::Result<()> {
     let (title, description) = if let (Some(t), Some(d)) = (title.as_ref(), description.as_ref()) {
         (t.to_owned(), d.to_owned())
     } else if let Some((t, d)) = term::issue::get_title_description(title, description)? {
@@ -394,7 +382,6 @@ where
         labels.as_slice(),
         assignees.as_slice(),
         [],
-        signer,
     )?;
 
     if !quiet {
@@ -403,17 +390,16 @@ where
     Ok(())
 }
 
-fn edit<'a, 'g, R, G>(
-    issues: &'g mut issue::Cache<issue::Issues<'a, R>, cob::cache::StoreWriter>,
+fn edit<'a, 'b, 'g, Repo, Signer>(
+    issues: &'g mut issue::Cache<'a, Repo, WriteAs<'b, Signer>, cob::cache::StoreWriter>,
     repo: &storage::git::Repository,
     id: Rev,
     title: Option<Title>,
     description: Option<String>,
-    signer: &Device<G>,
-) -> anyhow::Result<issue::IssueMut<'a, 'g, R, cob::cache::StoreWriter>>
+) -> anyhow::Result<issue::IssueMut<'a, 'b, 'g, Repo, Signer, cob::cache::StoreWriter>>
 where
-    R: WriteRepository + cob::Store<Namespace = NodeId>,
-    G: crypto::signature::Signer<crypto::Signature>,
+    Repo: WriteRepository + cob::Store<Namespace = NodeId>,
+    Signer: crypto::Signer,
 {
     let id = id.resolve(&repo.backend)?;
     let mut issue = issues.get_mut(&id)?;
@@ -422,7 +408,7 @@ where
 
     if title.is_some() || description.is_some() {
         // Editing by command line arguments.
-        issue.transaction("Edit", signer, |tx| {
+        issue.transaction("Edit", |tx| {
             if let Some(t) = title {
                 tx.edit(t)?;
             }
@@ -443,7 +429,7 @@ where
         return Ok(issue);
     };
 
-    issue.transaction("Edit", signer, |tx| {
+    issue.transaction("Edit", |tx| {
         tx.edit(title)?;
         tx.edit_comment(comment_id, description, vec![])?;
 

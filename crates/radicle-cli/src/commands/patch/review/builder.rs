@@ -24,9 +24,8 @@ use radicle::cob::{CodeLocation, CodeRange};
 use radicle::crypto;
 use radicle::git;
 use radicle::git::Oid;
-use radicle::node::device::Device;
 use radicle::prelude::*;
-use radicle::storage::git::{cob::DraftStore, Repository};
+use radicle::storage::git::{Repository, cob::DraftStore};
 use radicle_surf::diff::*;
 use radicle_term::{Element, VStack};
 
@@ -139,6 +138,7 @@ impl FromStr for ReviewAction {
 /// A single review item. Can be a hunk or eg. a file move.
 /// Files are usually split into multiple review items.
 #[derive(Debug)]
+#[allow(clippy::enum_variant_names)]
 pub enum ReviewItem {
     FileAdded {
         path: PathBuf,
@@ -186,7 +186,10 @@ impl ReviewItem {
             Self::FileAdded { hunk, .. } => hunk.as_ref(),
             Self::FileDeleted { hunk, .. } => hunk.as_ref(),
             Self::FileModified { hunk, .. } => hunk.as_ref(),
-            _ => None,
+            Self::FileMoved { .. }
+            | Self::FileCopied { .. }
+            | Self::FileEofChanged { .. }
+            | Self::FileModeChanged { .. } => None,
         }
     }
 
@@ -194,30 +197,28 @@ impl ReviewItem {
         self.hunk().and_then(|h| HunkHeader::try_from(h).ok())
     }
 
+    #[allow(clippy::type_complexity)]
     fn paths(&self) -> (Option<(&Path, Oid)>, Option<(&Path, Oid)>) {
         match self {
-            Self::FileAdded { path, new, .. } => (None, Some((path, Oid::from(*new.oid)))),
-            Self::FileDeleted { path, old, .. } => (Some((path, Oid::from(*old.oid))), None),
+            Self::FileAdded { path, new, .. } => (None, Some((path, new.oid))),
+            Self::FileDeleted { path, old, .. } => (Some((path, old.oid)), None),
             Self::FileMoved { moved } => (
-                Some((&moved.old_path, Oid::from(*moved.old.oid))),
-                Some((&moved.new_path, Oid::from(*moved.new.oid))),
+                Some((&moved.old_path, moved.old.oid)),
+                Some((&moved.new_path, moved.new.oid)),
             ),
             Self::FileCopied { copied } => (
-                Some((&copied.old_path, Oid::from(*copied.old.oid))),
-                Some((&copied.new_path, Oid::from(*copied.new.oid))),
+                Some((&copied.old_path, copied.old.oid)),
+                Some((&copied.new_path, copied.new.oid)),
             ),
-            Self::FileModified { path, old, new, .. } => (
-                Some((path, Oid::from(*old.oid))),
-                Some((path, Oid::from(*new.oid))),
-            ),
-            Self::FileEofChanged { path, old, new, .. } => (
-                Some((path, Oid::from(*old.oid))),
-                Some((path, Oid::from(*new.oid))),
-            ),
-            Self::FileModeChanged { path, old, new, .. } => (
-                Some((path, Oid::from(*old.oid))),
-                Some((path, Oid::from(*new.oid))),
-            ),
+            Self::FileModified { path, old, new, .. } => {
+                (Some((path, old.oid)), Some((path, new.oid)))
+            }
+            Self::FileEofChanged { path, old, new, .. } => {
+                (Some((path, old.oid)), Some((path, new.oid)))
+            }
+            Self::FileModeChanged { path, old, new, .. } => {
+                (Some((path, old.oid)), Some((path, new.oid)))
+            }
         }
     }
 
@@ -277,7 +278,7 @@ impl ReviewItem {
                 EofNewLine::OldMissing => {
                     VStack::default().child(term::Label::new("`\\n` added at end-of-file"))
                 }
-                _ => VStack::default(),
+                EofNewLine::BothMissing | EofNewLine::NoneMissing => VStack::default(),
             },
             Self::FileModeChanged { .. } => VStack::default(),
         }
@@ -609,15 +610,12 @@ impl<'a> ReviewBuilder<'a> {
     }
 
     /// Run the review builder for the given revision.
-    pub fn run<G>(
+    pub fn run(
         self,
         revision: &Revision,
         opts: &mut git::raw::DiffOptions,
-        signer: &Device<G>,
-    ) -> anyhow::Result<()>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
+        signer: &impl crypto::Signer,
+    ) -> anyhow::Result<()> {
         let repo = self.repo.raw();
         let base = repo.find_commit((*revision.base()).into())?;
         let patch_id = self.patch_id;
@@ -645,7 +643,7 @@ impl<'a> ReviewBuilder<'a> {
         };
         let diff = self.diff(&brain.accepted, &tree, repo, opts)?;
         let drafts = DraftStore::new(self.repo, *signer.public_key());
-        let mut patches = cob::patch::Cache::no_cache(&drafts)?;
+        let mut patches = cob::patch::Cache::no_cache(&drafts, signer)?;
         let mut patch = patches.get_mut(&patch_id)?;
         let mut queue = ReviewQueue::from(diff);
 
@@ -665,7 +663,6 @@ impl<'a> ReviewBuilder<'a> {
                 Some(Verdict::Reject),
                 None,
                 vec![],
-                signer,
             )?
         };
 
@@ -675,10 +672,10 @@ impl<'a> ReviewBuilder<'a> {
         let total = queue.len();
 
         while let Some((ix, item)) = queue.next() {
-            if let Some(hunk) = self.hunk {
-                if hunk != ix + 1 {
-                    continue;
-                }
+            if let Some(hunk) = self.hunk
+                && hunk != ix + 1
+            {
+                continue;
             }
             let progress = term::format::secondary(format!("({}/{total})", ix + 1));
             let file = match file.as_mut() {
@@ -716,7 +713,7 @@ impl<'a> ReviewBuilder<'a> {
                         let builder = CommentBuilder::new(revision.head(), path.to_path_buf());
                         let comments = builder.edit(hunk)?;
 
-                        patch.transaction("Review comments", signer, |tx| {
+                        patch.transaction("Review comments", |tx| {
                             for comment in comments {
                                 tx.review_comment(
                                     review,
@@ -967,7 +964,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_review_comments_basic() {
+    fn review_comments_basic() {
         let input = r#"
 > @@ -2559,18 +2560,18 @@ where
 >                  // Only consider onion addresses if configured.
@@ -1084,7 +1081,7 @@ Comment #5.
     }
 
     #[test]
-    fn test_review_comments_multiline() {
+    fn review_comments_multiline() {
         let input = r#"
 > @@ -2559,9 +2560,7 @@ where
 >                  // Only consider onion addresses if configured.
@@ -1179,7 +1176,7 @@ Woof.
     }
 
     #[test]
-    fn test_review_comments_before() {
+    fn review_comments_before() {
         let input = r#"
 This is a top-level comment.
 
@@ -1231,7 +1228,7 @@ This is a top-level comment.
     }
 
     #[test]
-    fn test_review_comments_split_hunk() {
+    fn review_comments_split_hunk() {
         let input = r#"
 > @@ -2559,6 +2560,4 @@ where
 >                  // Only consider onion addresses if configured.

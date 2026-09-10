@@ -2,7 +2,7 @@ mod args;
 
 use std::{thread, time};
 
-use anyhow::{anyhow, Context as _};
+use anyhow::anyhow;
 
 use radicle::git;
 use radicle::git::raw::ErrorExt as _;
@@ -10,9 +10,9 @@ use radicle::prelude::NodeId;
 use radicle::storage::{ReadRepository, ReadStorage};
 
 use crate::terminal as term;
+use crate::terminal::args::rid_or_cwd;
 
 pub use args::Args;
-pub(crate) use args::ABOUT;
 
 pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
     let profile = ctx.profile()?;
@@ -21,15 +21,8 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
         .refstr
         .qualified()
         .ok_or_else(|| anyhow!("reference must be fully-qualified, eg. 'refs/heads/master'"))?;
-    let nid = args.node.unwrap_or(profile.public_key);
-    let rid = match args.repo {
-        Some(rid) => rid,
-        None => {
-            let (_, rid) =
-                radicle::rad::cwd().context("Current directory is not a Radicle repository")?;
-            rid
-        }
-    };
+    let nid = args.node.unwrap_or(*profile.id());
+    let (_, rid) = rid_or_cwd(args.repo)?;
     let repo = storage.repository(rid)?;
     let now = time::SystemTime::now();
     let timeout = args.timeout();
@@ -49,7 +42,7 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
             thread::sleep(interval);
             let oid = reference(&repo, &nid, &qualified)?;
             if oid != initial {
-                term::info!("{}", oid.unwrap_or(git::raw::Oid::zero().into()));
+                term::info!("{}", oid.unwrap_or(git::Oid::ZERO_SHA1));
                 break;
             }
             if now.elapsed()? >= timeout {

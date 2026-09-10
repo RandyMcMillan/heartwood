@@ -6,10 +6,9 @@
 
 use std::collections::BTreeSet;
 
-use crypto::ssh::ExtendedSignature;
 use oid::Oid;
 
-use crate::{change_graph::ChangeGraph, ObjectId, TypeName};
+use crate::{ObjectId, TypeName, change_graph::ChangeGraph};
 
 use super::error;
 
@@ -41,10 +40,11 @@ pub fn changegraph<S>(
 where
     S: crate::object::Storage,
     S: crate::change::Storage<
-        ObjectId = crate::object::Oid,
-        Parent = crate::object::Oid,
-        Signatures = ExtendedSignature,
-    >,
+            ObjectId = crate::object::Oid,
+            Parent = crate::object::Oid,
+            PublicKey = crypto::PublicKey,
+            Signature = crypto::Signature,
+        >,
 {
     let tip_refs = storage
         .objects(typename, oid)

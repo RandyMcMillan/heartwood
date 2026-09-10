@@ -3,44 +3,40 @@ pub mod thread;
 
 use std::fmt::Debug;
 use std::path::PathBuf;
+use std::str::FromStr as _;
+use std::sync::mpsc;
 use std::{fs, io, net};
 
 #[cfg(unix)]
-use std::os::unix::net::UnixListener as Listener;
+use std::os::unix::net::UnixListener;
 #[cfg(windows)]
-use winpipe::WinListener as Listener;
+use uds_windows::UnixListener;
 
-use crossbeam_channel as chan;
-use cyphernet::Ecdh;
+use handle::Handle;
+use localtime::LocalTime;
+use protocol::service;
+use protocol::service::gossip;
 use radicle::cob::migrate;
-use radicle::crypto;
-use radicle::node::device::Device;
-use radicle_fetch::FetchLimit;
+use radicle::crypto::{Signer as _, SigningKey};
+use radicle::node;
+use radicle::node::Event;
+use radicle::node::UserAgent;
+use radicle::node::address;
+use radicle::node::address::Store as _;
+use radicle::node::events::Emitter;
+use radicle::node::notifications;
+use radicle::node::policy::config as policy;
+use radicle::node::{NodeId, routing};
+use radicle::profile::Home;
+use radicle::{Storage, cob, git, storage};
 use radicle_signals::Signal;
 use thiserror::Error;
 
-use radicle::node;
-use radicle::node::address;
-use radicle::node::address::Store as _;
-use radicle::node::notifications;
-use radicle::node::policy::config as policy;
-use radicle::node::Event;
-use radicle::node::UserAgent;
-use radicle::profile::Home;
-use radicle::{cob, git, storage, Storage};
-
 use crate::control;
-use crate::node::{routing, NodeId};
 use crate::reactor;
 use crate::reactor::Reactor;
-use crate::service::gossip;
 use crate::wire::Wire;
 use crate::worker;
-use crate::{service, LocalTime};
-
-pub use handle::Error as HandleError;
-pub use handle::Handle;
-pub use node::events::Emitter;
 
 /// Maximum pending worker tasks allowed.
 pub const MAX_PENDING_TASKS: usize = 1024;
@@ -88,9 +84,6 @@ pub enum Error {
         and restart the node"
     )]
     AlreadyRunning(PathBuf),
-    /// A git version error.
-    #[error("git version error: {0}")]
-    GitVersion(#[from] git::VersionError),
 }
 
 impl From<service::Error> for Error {
@@ -99,12 +92,12 @@ impl From<service::Error> for Error {
     }
 }
 
-/// Wraps a [`Listener`] but tracks its origin.
+/// Wraps a [`UnixListener`] but tracks its origin.
 pub enum ControlSocket {
     /// The listener was created by binding to it.
-    Bound(Listener, PathBuf),
+    Bound(UnixListener, PathBuf),
     /// The listener was received via socket activation.
-    Received(Listener),
+    Received(UnixListener),
 }
 
 /// Holds join handles to the client threads, as well as a client handle.
@@ -117,28 +110,22 @@ pub struct Runtime {
     pub reactor: Reactor,
     pub pool: worker::Pool,
     pub local_addrs: Vec<net::SocketAddr>,
-    pub signals: chan::Receiver<Signal>,
+    pub signals: mpsc::Receiver<Signal>,
 }
 
 impl Runtime {
     /// Initialize the runtime.
     ///
     /// This function spawns threads.
-    pub fn init<G>(
+    pub fn init(
         home: Home,
         config: radicle::node::Config,
+        socket: PathBuf,
         listen: Vec<net::SocketAddr>,
-        signals: chan::Receiver<Signal>,
-        signer: Device<G>,
-    ) -> Result<Runtime, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>
-            + Ecdh<Pk = NodeId>
-            + Clone
-            + Debug
-            + 'static,
-    {
-        let id = *signer.public_key();
+        signals: mpsc::Receiver<Signal>,
+        secret_key: SigningKey,
+    ) -> Result<Runtime, Error> {
+        let id = NodeId::from(*secret_key.public_key());
         let alias = config.alias.clone();
         let network = config.network;
         let rng = fastrand::Rng::new();
@@ -167,7 +154,7 @@ impl Runtime {
             Err(e) => return Err(e.into()),
         }
 
-        log::info!(target: "node", "Default seeding policy set to '{}'", &policy);
+        log::info!(target: "node", "Default seeding policy set to '{}'", policy);
         log::info!(target: "node", "Initializing service ({network:?})..");
 
         let announcement = service::gossip::node(&config, timestamp)
@@ -175,17 +162,14 @@ impl Runtime {
             .expect("Runtime::init: unable to solve proof-of-work puzzle");
 
         log::info!(target: "node", "Opening node database..");
-        let db = home
-            .database_mut()?
-            .journal_mode(node::db::JournalMode::default())?
-            .init(
-                &id,
-                announcement.features,
-                &announcement.alias,
-                &announcement.agent,
-                announcement.timestamp,
-                announcement.addresses.iter(),
-            )?;
+        let db = home.database_mut(config.database)?.init(
+            &id,
+            announcement.features,
+            &announcement.alias,
+            &announcement.agent,
+            announcement.timestamp,
+            announcement.addresses.iter(),
+        )?;
         let mut stores: service::Stores<_> = db.clone().into();
 
         if config.connect.is_empty() && stores.addresses().is_empty()? {
@@ -201,7 +185,8 @@ impl Runtime {
                         radicle::node::Features::SEED,
                         &alias,
                         0,
-                        &UserAgent::default(),
+                        &UserAgent::from_str("/radicle/runtime/bootstrap/")
+                            .expect("valid user agent"),
                         clock.into(),
                         [node::KnownAddress::new(addr, address::Source::Bootstrap)],
                     )?;
@@ -216,15 +201,16 @@ impl Runtime {
             stores,
             storage.clone(),
             policies,
-            signer.clone(),
+            secret_key.clone(),
             rng,
             announcement,
             emitter.clone(),
         );
         service.initialize(clock)?;
 
-        let (worker_send, worker_recv) = chan::bounded::<worker::Task>(MAX_PENDING_TASKS);
-        let mut wire = Wire::new(service, worker_send, signer.clone());
+        let (worker_send, worker_recv) =
+            crossbeam_channel::bounded::<worker::Task>(MAX_PENDING_TASKS);
+        let mut wire = Wire::new(service, worker_send, secret_key.clone());
         let mut local_addrs = Vec::new();
 
         for addr in listen {
@@ -235,11 +221,10 @@ impl Runtime {
             wire.listen(listener);
         }
         let reactor = Reactor::new(wire, thread::name(&id, "service"))?;
-        let handle = Handle::new(home.clone(), reactor.controller(), emitter);
+        let handle = Handle::new(home.clone(), socket.clone(), reactor.controller(), emitter);
 
-        let nid = *signer.public_key();
+        let nid = NodeId::from(*secret_key.public_key());
         let fetch = worker::FetchConfig {
-            limit: FetchLimit::default(),
             local: nid,
             expiry: worker::garbage::Expiry::default(),
         };
@@ -258,7 +243,7 @@ impl Runtime {
                 policies_db: home.node().join(node::POLICIES_DB_FILE),
             },
         )?;
-        let control = Self::bind(home.socket())?;
+        let control = Self::bind(socket)?;
 
         Ok(Runtime {
             id,
@@ -287,23 +272,24 @@ impl Runtime {
             || control::listen(listener, handle)
         });
 
-        #[cfg(unix)]
-        let _signals = thread::spawn(&self.id, "signals", move || loop {
-            use radicle::node::Handle as _;
+        let _signals = thread::spawn(&self.id, "signals", move || {
+            loop {
+                use radicle::node::Handle as _;
 
-            match self.signals.recv() {
-                Ok(Signal::Terminate | Signal::Interrupt) => {
-                    log::info!(target: "node", "Termination signal received; shutting down..");
-                    self.handle.shutdown().ok();
-                    break;
-                }
-                Ok(Signal::Hangup) => {
-                    log::debug!(target: "node", "Hangup signal (SIGHUP) received; ignoring..");
-                }
-                Ok(Signal::WindowChanged) => {}
-                Err(e) => {
-                    log::warn!(target: "node", "Signal notifications channel error: {e}");
-                    break;
+                match self.signals.recv() {
+                    Ok(Signal::Terminate | Signal::Interrupt) => {
+                        log::info!(target: "node", "Termination signal received; shutting down..");
+                        self.handle.shutdown().ok();
+                        break;
+                    }
+                    Ok(Signal::Hangup) => {
+                        log::debug!(target: "node", "Hangup signal (SIGHUP) received; ignoring..");
+                    }
+                    Ok(Signal::WindowChanged) => {}
+                    Err(e) => {
+                        log::warn!(target: "node", "Signal notifications channel error: {e}");
+                        break;
+                    }
                 }
             }
         });
@@ -322,9 +308,10 @@ impl Runtime {
         Ok(())
     }
 
-    #[cfg(all(feature = "systemd", target_os = "linux"))]
-    fn receive_listener() -> Option<Listener> {
-        let fd = match radicle_systemd::listen::fd("control") {
+    #[cfg(all(feature = "socket2", feature = "systemd", target_os = "linux"))]
+    fn receive_listener() -> Option<UnixListener> {
+        // SAFETY: When `fd` is called, no other threads are spawned (yet).
+        let fd = match unsafe { radicle_systemd::listen::fd("control") } {
             Ok(Some(fd)) => fd,
             Ok(None) => return None,
             Err(err) => {
@@ -348,11 +335,11 @@ impl Runtime {
             return None;
         }
 
-        Some(Listener::from(socket))
+        Some(UnixListener::from(socket))
     }
 
     fn bind(path: PathBuf) -> Result<ControlSocket, Error> {
-        #[cfg(all(feature = "systemd", target_os = "linux"))]
+        #[cfg(all(feature = "socket2", feature = "systemd", target_os = "linux"))]
         {
             if let Some(listener) = Self::receive_listener() {
                 log::info!(target: "node", "Received control socket.");
@@ -360,8 +347,8 @@ impl Runtime {
             }
         }
 
-        log::info!(target: "node", "Binding control socket {}..", &path.display());
-        match Listener::bind(&path) {
+        log::info!(target: "node", "Binding control socket {}..", path.display());
+        match UnixListener::bind(&path) {
             Ok(sock) => Ok(ControlSocket::Bound(sock, path)),
             Err(err) if err.kind() == io::ErrorKind::AddrInUse => Err(Error::AlreadyRunning(path)),
             Err(err) => Err(err.into()),

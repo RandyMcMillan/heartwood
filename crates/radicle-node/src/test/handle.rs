@@ -5,23 +5,22 @@ use std::time;
 
 use radicle::crypto::PublicKey;
 use radicle::git::Oid;
-use radicle::storage::refs::RefsAt;
-
-use crate::identity::RepoId;
-use crate::node::{Alias, Config, ConnectOptions, ConnectResult, Event, FetchResult, Seeds};
-use crate::runtime::HandleError;
-use radicle::node::policy;
+use radicle::identity::RepoId;
 use radicle::node::NodeId;
+use radicle::node::policy;
+use radicle::node::{Alias, Config, ConnectOptions, ConnectResult, Event, FetchResult, Seeds};
+use radicle::storage::refs::{self, RefsAt};
 
 #[derive(Default, Clone)]
 pub struct Handle {
     pub updates: Arc<Mutex<Vec<(RepoId, PublicKey)>>>,
     pub seeding: Arc<Mutex<HashSet<RepoId>>>,
     pub following: Arc<Mutex<HashSet<NodeId>>>,
+    pub blocked: Arc<Mutex<HashSet<NodeId>>>,
 }
 
 impl radicle::node::Handle for Handle {
-    type Error = HandleError;
+    type Error = crate::runtime::handle::Error;
     type Sessions = Vec<radicle::node::Session>;
     type Events = Vec<Self::Event>;
     type Event = Result<Event, Self::Error>;
@@ -68,6 +67,7 @@ impl radicle::node::Handle for Handle {
         _id: RepoId,
         _from: NodeId,
         _timeout: time::Duration,
+        _signed_references_minimum_feature_level: Option<refs::FeatureLevel>,
     ) -> Result<FetchResult, Self::Error> {
         Ok(FetchResult::Success {
             updated: vec![],
@@ -85,6 +85,7 @@ impl radicle::node::Handle for Handle {
     }
 
     fn follow(&mut self, id: NodeId, _alias: Option<Alias>) -> Result<bool, Self::Error> {
+        self.blocked.lock().unwrap().remove(&id);
         Ok(self.following.lock().unwrap().insert(id))
     }
 
@@ -93,7 +94,14 @@ impl radicle::node::Handle for Handle {
     }
 
     fn unfollow(&mut self, id: NodeId) -> Result<bool, Self::Error> {
-        Ok(self.following.lock().unwrap().remove(&id))
+        let f = self.following.lock().unwrap().remove(&id);
+        let b = self.blocked.lock().unwrap().remove(&id);
+        Ok(f || b)
+    }
+
+    fn block(&mut self, id: NodeId) -> Result<bool, Self::Error> {
+        self.following.lock().unwrap().remove(&id);
+        Ok(self.blocked.lock().unwrap().insert(id))
     }
 
     fn announce_refs_for(
@@ -108,7 +116,7 @@ impl radicle::node::Handle for Handle {
 
         Ok(RefsAt {
             remote: self.nid()?,
-            at: Oid::sha1_zero(),
+            at: Oid::ZERO_SHA1,
         })
     }
 

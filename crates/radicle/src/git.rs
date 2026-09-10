@@ -6,15 +6,13 @@ use std::path::Path;
 use std::process::Command;
 use std::str::FromStr;
 
-pub use radicle_oid::{str::ParseOidError, Oid};
+pub use radicle_oid::{Oid, str::ParseOidError};
 
 pub extern crate radicle_git_ref_format as fmt;
 
-use crate::collections::RandomMap;
 use crate::crypto::PublicKey;
 use crate::node::Alias;
 use crate::rad;
-use crate::storage::refs::Refs;
 use crate::storage::RemoteId;
 
 pub use crate::storage::git::transport::local::Url;
@@ -25,26 +23,6 @@ pub type BranchName = crate::git::fmt::RefString;
 
 /// Default port of the `git` transport protocol.
 pub const PROTOCOL_PORT: u16 = 9418;
-/// Minimum required git version.
-pub const VERSION_REQUIRED: Version = Version {
-    major: 2,
-    minor: 31,
-    patch: 0,
-};
-
-/// A parsed git version.
-#[derive(PartialEq, Eq, Debug, PartialOrd, Ord)]
-pub struct Version {
-    pub major: u8,
-    pub minor: u8,
-    pub patch: u8,
-}
-
-impl std::fmt::Display for Version {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
-    }
-}
 
 /// Verbosity level for Git commands.
 #[derive(Default, Clone, Copy)]
@@ -91,65 +69,9 @@ impl From<i8> for Verbosity {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum VersionError {
-    #[error("malformed git version string")]
-    Malformed,
-    #[error("malformed git version string: {0}")]
-    ParseInt(#[from] std::num::ParseIntError),
-    #[error("malformed git version string: {0}")]
-    Utf8(#[from] std::string::FromUtf8Error),
-    #[error("error retrieving git version: {0}")]
-    Io(#[from] io::Error),
-    #[error("error retrieving git version: {0}")]
-    Other(String),
-}
-
-impl std::str::FromStr for Version {
-    type Err = VersionError;
-
-    fn from_str(input: &str) -> Result<Self, Self::Err> {
-        let rest = input
-            .strip_prefix("git version ")
-            .ok_or(VersionError::Malformed)?;
-        let rest = rest.split(' ').next().ok_or(VersionError::Malformed)?;
-        let rest = rest.trim_end();
-
-        let mut parts = rest.split('.');
-        let major = parts.next().ok_or(VersionError::Malformed)?.parse()?;
-        let minor = parts.next().ok_or(VersionError::Malformed)?.parse()?;
-
-        let patch = match parts.next() {
-            None => 0,
-            Some(patch) => patch.parse()?,
-        };
-
-        Ok(Self {
-            major,
-            minor,
-            patch,
-        })
-    }
-}
-
-/// Get the system's git version.
-pub fn version() -> Result<Version, VersionError> {
-    let output = Command::new("git").arg("version").output()?;
-
-    if output.status.success() {
-        let output = String::from_utf8(output.stdout)?;
-        let version = output.parse()?;
-
-        return Ok(version);
-    }
-    Err(VersionError::Other(
-        String::from_utf8_lossy(&output.stderr).to_string(),
-    ))
-}
-
-#[derive(thiserror::Error, Debug)]
 pub enum RefError {
-    #[error("ref name is not valid UTF-8")]
-    InvalidName,
+    #[error("ref name is not valid: {source}")]
+    InvalidName { source: raw::Error },
     #[error("unexpected unqualified ref: {0}")]
     Unqualified(fmt::RefString),
     #[error("invalid ref format: {0}")]
@@ -186,7 +108,9 @@ pub mod refs {
 
     /// Try to get a qualified reference from a generic reference.
     pub fn qualified_from<'a>(r: &'a raw::Reference) -> Result<(Qualified<'a>, Oid), RefError> {
-        let name = r.name().ok_or(RefError::InvalidName)?;
+        let name = r
+            .name()
+            .map_err(|source| RefError::InvalidName { source })?;
         let refstr = RefStr::try_from_str(name)?;
         let target = r.resolve()?.target().ok_or(RefError::NoTarget)?;
         let qualified = Qualified::from_refstr(refstr)
@@ -241,6 +165,14 @@ pub mod refs {
             Qualified::from_components(component!("rad"), component!("sigrefs"), None)
         });
 
+        /// A reference to the parent commit.
+        ///
+        /// `refs/rad/sigrefs-parent`
+        ///
+        pub static SIGREFS_PARENT: LazyLock<Qualified> = LazyLock::new(|| {
+            Qualified::from_components(component!("rad"), component!("sigrefs-parent"), None)
+        });
+
         /// The set of special references used in the Heartwood protocol.
         #[derive(Clone, Copy, Debug)]
         pub enum Special {
@@ -279,6 +211,7 @@ pub mod refs {
         ///
         /// `refs/namespaces/<remote>/refs/heads/<branch>`
         ///
+        #[deprecated(note = "Use `Qualified::with_namespace` instead.")]
         pub fn branch_of<'a>(remote: &RemoteId, branch: &RefStr) -> Namespaced<'a> {
             Qualified::from(lit::refs_heads(branch)).with_namespace(remote.into())
         }
@@ -449,30 +382,6 @@ pub mod refs {
     }
 }
 
-/// List remote refs of a project, given the remote URL.
-pub fn remote_refs(url: &Url) -> Result<RandomMap<RemoteId, Refs>, ListRefsError> {
-    let url = url.to_string();
-    let mut remotes = RandomMap::default();
-    let mut remote = raw::Remote::create_detached(url)?;
-
-    remote.connect(raw::Direction::Fetch)?;
-
-    let refs = remote.list()?;
-    for r in refs {
-        // Skip the `HEAD` reference, as it is untrusted.
-        if r.name() == "HEAD" {
-            continue;
-        }
-        // Nb. skip refs that don't have a public key namespace.
-        if let (Some(id), refname) = parse_ref::<PublicKey>(r.name())? {
-            let entry = remotes.entry(id).or_insert_with(Refs::default);
-            entry.insert(refname.into(), r.oid().into());
-        }
-    }
-
-    Ok(remotes)
-}
-
 /// Parse a [`fmt::Qualified`] reference string while expecting the reference
 /// to start with `refs/namespaces`. If the namespace is not present, then an
 /// error will be returned.
@@ -612,7 +521,7 @@ pub fn write_tree<'r>(
     Ok(tree)
 }
 
-/// Configure a radicle repository.
+/// Configure a Radicle repository.
 ///
 /// * Sets `push.default = upstream`.
 pub fn configure_repository(repo: &raw::Repository) -> Result<(), raw::Error> {
@@ -622,7 +531,7 @@ pub fn configure_repository(repo: &raw::Repository) -> Result<(), raw::Error> {
     Ok(())
 }
 
-/// Configure a repository's radicle remote.
+/// Configure a repository's Radicle remote.
 ///
 /// The entry for this remote will be:
 /// ```text
@@ -723,39 +632,30 @@ pub fn set_upstream(
     let branch_remote = format!("branch.{branch}.remote");
     let branch_merge = format!("branch.{branch}.merge");
 
-    config.remove_multivar(&branch_remote, ".*").or_else(|e| {
-        if e.is_not_found() {
-            Ok(())
-        } else {
-            Err(e)
-        }
-    })?;
-    config.remove_multivar(&branch_merge, ".*").or_else(|e| {
-        if e.is_not_found() {
-            Ok(())
-        } else {
-            Err(e)
-        }
-    })?;
+    config
+        .remove_multivar(&branch_remote, ".*")
+        .or_else(|e| if e.is_not_found() { Ok(()) } else { Err(e) })?;
+    config
+        .remove_multivar(&branch_merge, ".*")
+        .or_else(|e| if e.is_not_found() { Ok(()) } else { Err(e) })?;
     config.set_multivar(&branch_remote, ".*", remote)?;
     config.set_multivar(&branch_merge, ".*", merge)?;
 
     Ok(())
 }
 
-pub fn init_default_branch(repo: &raw::Repository) -> Result<Option<String>, raw::Error> {
+pub fn init_default_branch(repo: &raw::Repository) -> Result<String, raw::Error> {
     let config = repo.config().and_then(|mut c| c.snapshot())?;
     let default_branch = config.get_str("init.defaultbranch")?;
     let branch = repo.find_branch(default_branch, raw::BranchType::Local)?;
-    Ok(branch.into_reference().shorthand().map(ToOwned::to_owned))
+    Ok(branch.into_reference().shorthand()?.to_owned())
 }
 
 pub fn head_refname(repo: &raw::Repository) -> Result<Option<String>, raw::Error> {
     let head = repo.head()?;
-    match head.shorthand() {
-        Some("HEAD") => Ok(None),
-        Some(refname) => Ok(Some(refname.to_owned())),
-        None => Ok(None),
+    match head.shorthand()? {
+        "HEAD" => Ok(None),
+        refname => Ok(Some(refname.to_owned())),
     }
 }
 
@@ -772,6 +672,12 @@ where
 {
     let mut cmd = Command::new("git");
 
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(
+        &mut cmd,
+        radicle_windows::process::creation_flags::CREATE_NO_WINDOW.0,
+    );
+
     if let Some(working) = working {
         cmd.arg("-C").arg(dunce::canonicalize(working)?);
     }
@@ -786,7 +692,7 @@ pub mod process {
 
     use crate::storage::ReadRepository;
 
-    use super::{run, Oid, Verbosity};
+    use super::{Oid, Verbosity, run};
 
     /// Perform a local fetch, from storage using `git fetch-pack`.
     ///
@@ -869,69 +775,5 @@ impl UserInfo {
     /// `<alias>@<public key>`.
     pub fn email(&self) -> String {
         format!("{}@{}", self.alias, self.key)
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    use std::str::FromStr;
-
-    #[test]
-    fn test_version_ord() {
-        assert!(
-            Version {
-                major: 2,
-                minor: 34,
-                patch: 1
-            } > Version {
-                major: 2,
-                minor: 34,
-                patch: 0
-            }
-        );
-        assert!(
-            Version {
-                major: 2,
-                minor: 24,
-                patch: 12
-            } < Version {
-                major: 2,
-                minor: 34,
-                patch: 0
-            }
-        );
-    }
-
-    #[test]
-    fn test_version_from_str() {
-        assert_eq!(
-            Version::from_str("git version 2.34.1\n").ok(),
-            Some(Version {
-                major: 2,
-                minor: 34,
-                patch: 1
-            })
-        );
-
-        assert_eq!(
-            Version::from_str("git version 2.34.1 (macOS)").ok(),
-            Some(Version {
-                major: 2,
-                minor: 34,
-                patch: 1
-            })
-        );
-
-        assert_eq!(
-            Version::from_str("git version 2.34").ok(),
-            Some(Version {
-                major: 2,
-                minor: 34,
-                patch: 0
-            })
-        );
-
-        assert!(Version::from_str("2.34").is_err());
     }
 }

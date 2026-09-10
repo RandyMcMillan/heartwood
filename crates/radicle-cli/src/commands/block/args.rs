@@ -2,7 +2,7 @@ use clap::Parser;
 
 use crate::terminal::args::BlockTarget;
 
-pub(crate) const ABOUT: &str = "Block repositories or nodes from being seeded or followed";
+const ABOUT: &str = "Block repositories or nodes from being seeded or followed";
 
 #[derive(Parser, Debug)]
 #[command(about = ABOUT, disable_version_flag = true)]
@@ -16,8 +16,8 @@ pub struct Args {
 
 #[cfg(test)]
 mod test {
-    use clap::error::ErrorKind;
     use clap::Parser;
+    use clap::error::ErrorKind;
 
     use super::Args;
 

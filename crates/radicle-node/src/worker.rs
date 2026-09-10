@@ -1,5 +1,5 @@
 #![allow(clippy::too_many_arguments)]
-mod channels;
+pub(crate) mod channels;
 mod upload_pack;
 
 pub mod fetch;
@@ -7,8 +7,10 @@ pub mod garbage;
 
 use std::path::PathBuf;
 
+use channels::Channels;
 use crossbeam_channel as chan;
-
+use protocol::wire::StreamId;
+use protocol::worker::{AuthorizationError, FetchError, FetchRequest, FetchResult, UploadError};
 use radicle::identity::RepoId;
 use radicle::node::notifications;
 use radicle::node::policy::config as policy;
@@ -16,17 +18,9 @@ use radicle::node::policy::config::SeedingPolicy;
 use radicle::prelude::NodeId;
 use radicle::storage::refs::RefsAt;
 use radicle::storage::{ReadRepository, ReadStorage};
-use radicle::{cob, crypto, Storage};
-use radicle_fetch::FetchLimit;
+use radicle::{Storage, cob, crypto};
 
-pub use radicle_protocol::worker::{
-    AuthorizationError, FetchError, FetchRequest, FetchResult, UploadError,
-};
-
-use crate::runtime::{thread, Handle};
-use crate::wire::StreamId;
-
-pub use channels::{ChannelEvent, Channels, ChannelsConfig};
+use crate::runtime::{handle::Handle, thread};
 
 /// Worker pool configuration.
 pub struct Config {
@@ -60,12 +54,9 @@ pub struct TaskResult {
 
 #[derive(Debug, Clone)]
 pub struct FetchConfig {
-    /// Data limits when fetching from a remote.
-    pub limit: FetchLimit,
     /// Public key of the local peer.
     pub local: crypto::PublicKey,
-    /// Configuration for `git gc` garbage collection. Defaults to `1
-    /// hour ago`.
+    /// Configuration for `git gc` garbage collection.
     pub expiry: garbage::Expiry,
 }
 
@@ -131,9 +122,10 @@ impl Worker {
                 rid,
                 remote,
                 refs_at,
+                config,
             } => {
                 log::debug!(target: "worker", "Worker processing outgoing fetch for {rid}");
-                let result = self.fetch(rid, remote, refs_at, channels, notifs);
+                let result = self.fetch(rid, remote, refs_at, config, channels, notifs);
                 FetchResult::Initiator { rid, result }
             }
             FetchRequest::Responder { remote, emitter } => {
@@ -141,15 +133,51 @@ impl Worker {
 
                 let timeout = channels.timeout();
                 let (mut stream_r, stream_w) = channels.split();
-                let header = match upload_pack::pktline::git_request(&mut stream_r) {
-                    Ok(header) => header,
-                    Err(e) => {
+
+                let mut iter = gix_packetline::blocking_io::StreamingPeekableIter::new(
+                    &mut stream_r,
+                    &[gix_packetline::PacketLineRef::Flush],
+                    false, /* packet tracing */
+                );
+
+                let header = match iter.read_line() {
+                    None => {
+                        return FetchResult::Responder {
+                            rid: None,
+                            result: Err(UploadError::PacketLine(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "unexpected end of stream while reading upload-pack header",
+                            ))),
+                        };
+                    }
+                    Some(Err(e)) => {
                         return FetchResult::Responder {
                             rid: None,
                             result: Err(UploadError::PacketLine(e)),
-                        }
+                        };
                     }
+                    Some(Ok(Err(e))) => {
+                        return FetchResult::Responder {
+                            rid: None,
+                            result: Err(UploadError::PacketLine(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("invalid upload-pack header: {e}"),
+                            ))),
+                        };
+                    }
+                    Some(Ok(Ok(header))) => header,
                 };
+
+                let Some(header) = upload_pack::GitRequest::from_packetline(header) else {
+                    return FetchResult::Responder {
+                        rid: None,
+                        result: Err(UploadError::PacketLine(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "failed to parse upload-pack header",
+                        ))),
+                    };
+                };
+
                 log::debug!(target: "worker", "Spawning upload-pack process for {} on stream {stream}..", header.repo);
 
                 if let Err(e) = self.is_authorized(remote, header.repo) {
@@ -203,18 +231,15 @@ impl Worker {
         rid: RepoId,
         remote: NodeId,
         refs_at: Option<Vec<RefsAt>>,
+        fetch_config: ::fetch::Config,
         channels: channels::ChannelsFlush,
         notifs: notifications::StoreWriter,
-    ) -> Result<fetch::FetchResult, FetchError> {
-        let FetchConfig {
-            limit,
-            local,
-            expiry,
-        } = &self.fetch_config;
+    ) -> Result<protocol::worker::fetch::FetchResult, FetchError> {
+        let FetchConfig { local, expiry } = &self.fetch_config;
         // N.b. if the `rid` is blocked this will return an error, so
         // we won't continue with any further set up of the fetch.
-        let allowed = radicle_fetch::Allowed::from_config(rid, &self.policies)?;
-        let blocked = radicle_fetch::BlockList::from_config(&self.policies)?;
+        let allowed = ::fetch::Allowed::from_config(rid, &self.policies)?;
+        let blocked = ::fetch::BlockList::from_config(&self.policies)?;
 
         let mut cache = self.cache.clone();
         let handle = fetch::Handle::new(
@@ -231,16 +256,16 @@ impl Worker {
             &self.storage,
             &mut cache,
             &mut self.db,
-            *limit,
+            fetch_config,
             remote,
             refs_at,
         )?;
 
-        if let Err(e) = garbage::collect(&self.storage, rid, *expiry) {
+        if let Err(e) = garbage::collect(&self.storage, &rid, expiry) {
             // N.b. ensure that `git gc` works in debug mode.
             debug_assert!(false, "`git gc` failed: {e}");
 
-            log::warn!(target: "worker", "Failed to run `git gc`: {e}");
+            log::debug!(target: "worker", "Failed to run `git gc`: {e}");
         }
         Ok(result)
     }
@@ -248,7 +273,7 @@ impl Worker {
 
 /// A pool of workers. One thread is allocated for each worker.
 pub struct Pool {
-    pool: Vec<thread::JoinHandle<Result<(), chan::RecvError>>>,
+    pool: Vec<std::thread::JoinHandle<Result<(), chan::RecvError>>>,
 }
 
 impl Pool {
@@ -287,7 +312,7 @@ impl Pool {
     /// Run the worker pool.
     ///
     /// Blocks until all worker threads have exited.
-    pub fn run(self) -> thread::Result<()> {
+    pub fn run(self) -> std::thread::Result<()> {
         for (i, worker) in self.pool.into_iter().enumerate() {
             if let Err(err) = worker.join()? {
                 log::trace!(target: "pool", "Worker {i} exited: {err}");

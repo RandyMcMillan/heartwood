@@ -1,13 +1,17 @@
 use std::{collections::HashSet, thread, time};
 
+use radicle::cob;
 use radicle::cob::Title;
+use radicle::cob::store::access::{ReadOnly, WriteAs};
+use radicle::crypto::{Signer as _, SigningKey};
+use radicle::git::fmt::Component;
+use radicle::identity::doc::GetPayload as _;
 use test_log::test;
 
 use radicle::git::raw::ErrorExt as _;
-use radicle::node::device::Device;
-use radicle::node::policy::Scope;
 use radicle::node::Event;
-use radicle::node::{Alias, ConnectResult, FetchResult, Handle as _, DEFAULT_TIMEOUT};
+use radicle::node::policy::Scope;
+use radicle::node::{Alias, ConnectResult, DEFAULT_TIMEOUT, FetchResult, Handle as _};
 use radicle::storage::{
     ReadRepository, ReadStorage, RefUpdate, RemoteRepository, SignRepository, ValidateRepository,
     WriteRepository, WriteStorage,
@@ -16,11 +20,11 @@ use radicle::test::fixtures;
 use radicle::{assert_matches, rad};
 use radicle::{git, issue};
 
-use crate::node::config::Limits;
-use crate::node::{Config, ConnectOptions};
-use crate::service;
-use crate::storage::git::transport;
-use crate::test::node::{converge, Node};
+use crate::test::node::{Node, NodeHandle, converge};
+use protocol::service;
+use radicle::node::config::Limits;
+use radicle::node::{Config, ConnectOptions};
+use radicle::storage::git::transport;
 
 mod config {
     use super::*;
@@ -50,11 +54,11 @@ mod config {
 //
 //     alice -- bob
 //
-fn test_inventory_sync_basic() {
+fn inventory_sync_basic() {
     let tmp = tempfile::tempdir().unwrap();
 
-    let mut alice = Node::init(tmp.path(), config::relay("alice"));
-    let mut bob = Node::init(tmp.path(), config::relay("bob"));
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let mut bob = Node::init(tmp.path(), config::relay("bob"), 37);
 
     alice.project("alice", "");
     bob.project("bob", "");
@@ -72,12 +76,12 @@ fn test_inventory_sync_basic() {
 //
 //     alice -- bob -- eve
 //
-fn test_inventory_sync_bridge() {
+fn inventory_sync_bridge() {
     let tmp = tempfile::tempdir().unwrap();
 
-    let mut alice = Node::init(tmp.path(), config::relay("alice"));
-    let mut bob = Node::init(tmp.path(), config::relay("bob"));
-    let mut eve = Node::init(tmp.path(), config::relay("eve"));
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let mut bob = Node::init(tmp.path(), config::relay("bob"), 37);
+    let mut eve = Node::init(tmp.path(), config::relay("eve"), 42);
 
     alice.project("alice", "");
     bob.project("bob", "");
@@ -100,13 +104,13 @@ fn test_inventory_sync_bridge() {
 //       |       |
 //     carol -- eve
 //
-fn test_inventory_sync_ring() {
+fn inventory_sync_ring() {
     let tmp = tempfile::tempdir().unwrap();
 
-    let mut alice = Node::init(tmp.path(), config::relay("alice"));
-    let mut bob = Node::init(tmp.path(), config::relay("bob"));
-    let mut eve = Node::init(tmp.path(), config::relay("eve"));
-    let mut carol = Node::init(tmp.path(), Config::test(Alias::new("carol")));
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let mut bob = Node::init(tmp.path(), config::relay("bob"), 37);
+    let mut eve = Node::init(tmp.path(), config::relay("eve"), 42);
+    let mut carol = Node::init(tmp.path(), Config::test(Alias::new("carol")), 73);
 
     alice.project("alice", "");
     bob.project("bob", "");
@@ -135,14 +139,14 @@ fn test_inventory_sync_ring() {
 //              |
 //            carol
 //
-fn test_inventory_sync_star() {
+fn inventory_sync_star() {
     let tmp = tempfile::tempdir().unwrap();
 
-    let mut alice = Node::init(tmp.path(), config::relay("alice"));
-    let mut bob = Node::init(tmp.path(), config::relay("bob"));
-    let mut eve = Node::init(tmp.path(), config::relay("eve"));
-    let mut carol = Node::init(tmp.path(), Config::test(Alias::new("carol")));
-    let mut dave = Node::init(tmp.path(), Config::test(Alias::new("dave")));
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let mut bob = Node::init(tmp.path(), config::relay("bob"), 37);
+    let mut eve = Node::init(tmp.path(), config::relay("eve"), 42);
+    let mut carol = Node::init(tmp.path(), Config::test(Alias::new("carol")), 73);
+    let mut dave = Node::init(tmp.path(), Config::test(Alias::new("dave")), 91);
 
     alice.project("alice", "");
     bob.project("bob", "");
@@ -166,10 +170,119 @@ fn test_inventory_sync_star() {
 }
 
 #[test]
-fn test_replication() {
+fn public_to_private_to_public_replay() {
+    use radicle::identity::Identity;
+    use radicle::identity::Visibility;
+
     let tmp = tempfile::tempdir().unwrap();
-    let alice = Node::init(tmp.path(), config::relay("alice"));
-    let mut bob = Node::init(tmp.path(), config::relay("bob"));
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let bob = SigningKey::mock(99);
+
+    assert!(alice.id.to_human() > bob.public_key().to_human());
+
+    let rid = alice.project("acme", "");
+    let repo = alice.storage.repository(rid).unwrap();
+    let public_root = repo.identity_root().unwrap();
+
+    assert_eq!(
+        Identity::load(&repo).unwrap().doc().visibility(),
+        &Visibility::Public
+    );
+
+    let mut identity = Identity::load_mut(&repo, &alice.secret_key).unwrap();
+    let private_doc = repo
+        .identity_doc()
+        .unwrap()
+        .doc
+        .with_edits(|doc| {
+            doc.visibility = Visibility::private([]);
+        })
+        .unwrap();
+    let private_rev = identity
+        .update(Title::new("Private").unwrap(), "", &private_doc)
+        .unwrap();
+    repo.set_identity_head_to(private_rev).unwrap();
+
+    assert_eq!(
+        Identity::load(&repo).unwrap().doc().visibility(),
+        &Visibility::private([])
+    );
+
+    let remote = *bob.public_key();
+    let id_ref = format!("refs/namespaces/{}/refs/rad/id", remote);
+    let root_ref = format!("refs/namespaces/{}/refs/rad/root", remote);
+
+    let public_commit = repo.raw().find_commit(public_root.into()).unwrap();
+    let header = public_commit.raw_header().unwrap_or_default();
+
+    let tree = public_commit.tree().unwrap();
+    let mut signature = String::new();
+    let mut found = false;
+    for line in header.lines().skip(1) {
+        if !found {
+            if line.starts_with("gpgsig ") {
+                found = true;
+                signature.push_str(line.trim_start_matches("gpgsig "));
+                signature.push('\n');
+            }
+            continue;
+        }
+
+        if line.starts_with(' ') {
+            signature.push_str(line.trim_start_matches(' '));
+            signature.push('\n');
+        } else {
+            break;
+        }
+    }
+    assert!(found, "public identity root must include outer gpgsig");
+
+    let time = git::raw::Time::new(1700000000, 0);
+    let author = git::raw::Signature::new("Bob", "bob@example.invalid", &time).unwrap();
+    let wrapper_buffer = repo
+        .raw()
+        .commit_create_buffer(
+            &author.clone(),
+            &author,
+            "Rewrapped historical identity root",
+            &tree,
+            &[],
+        )
+        .unwrap();
+    let wrapper_content = std::str::from_utf8(&wrapper_buffer).unwrap();
+    let wrapper = repo
+        .raw()
+        .commit_signed(wrapper_content, &signature, None)
+        .unwrap();
+    let cob_ref = format!(
+        "refs/namespaces/{}/refs/cobs/{}/{}",
+        remote,
+        *radicle::cob::identity::TYPENAME,
+        wrapper
+    );
+
+    repo.raw().reference(&cob_ref, wrapper, true, "").unwrap();
+
+    repo.raw().reference(&id_ref, wrapper, true, "").unwrap();
+
+    repo.raw().reference(&root_ref, wrapper, true, "").unwrap();
+
+    repo.sign_refs(&bob).unwrap();
+
+    // Recompute and set the identity head, just like `rad id cache` would do.
+    repo.set_identity_head().unwrap();
+
+    assert_eq!(
+        Identity::load(&repo).unwrap().doc().visibility(),
+        &Visibility::private([])
+    );
+}
+
+#[test]
+fn replication() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let mut bob = Node::init(tmp.path(), config::relay("bob"), 37);
     let acme = bob.project("acme", "");
 
     let mut alice = alice.spawn();
@@ -187,7 +300,10 @@ fn test_replication() {
     let seeds = alice.handle.seeds_for(acme, None).unwrap();
     assert!(seeds.is_connected(&bob.id));
 
-    let result = alice.handle.fetch(acme, bob.id, DEFAULT_TIMEOUT).unwrap();
+    let result = alice
+        .handle
+        .fetch(acme, bob.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(result.is_success());
 
     let updated = match result {
@@ -239,10 +355,10 @@ fn test_replication() {
 }
 
 #[test]
-fn test_replication_ref_in_sigrefs() {
+fn replication_ref_in_sigrefs() {
     let tmp = tempfile::tempdir().unwrap();
-    let alice = Node::init(tmp.path(), config::relay("alice"));
-    let mut bob = Node::init(tmp.path(), config::relay("bob"));
+    let alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let mut bob = Node::init(tmp.path(), config::relay("bob"), 37);
 
     let acme = bob.project("acme", "");
     // Delete one of the signed refs.
@@ -255,36 +371,46 @@ fn test_replication_ref_in_sigrefs() {
         .unwrap();
 
     let mut alice = alice.spawn();
+
+    // At this point, bob will migrate sigrefs, because there only is a
+    // root commit in his `refs/heads/sigrefs`.
     let bob = bob.spawn();
 
     alice.connect(&bob);
     converge([&alice, &bob]);
 
     alice.handle.seed(acme, Scope::All).unwrap();
-    let result = alice.handle.fetch(acme, bob.id, DEFAULT_TIMEOUT).unwrap();
+    let result = alice
+        .handle
+        .fetch(acme, bob.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
 
     assert_matches!(result, FetchResult::Success { .. });
 
-    // alice still sees bob's master branch since it was in his
-    // sigrefs.
+    // Before automatic migration of sigrefs was introduced,
+    // alice would still see bob's master branch at this point and we
+    // would assert `.is_ok()`.
+    // With automatic migration, refs are signed as bob's node starts
+    // up, which is after he removes his ref locally, thus we now
+    // assert `.is_err()`.
     assert!(
         alice
             .storage
             .repository(acme)
             .unwrap()
             .reference(&bob.id, &git::fmt::qualified!("refs/heads/master"))
-            .is_ok(),
+            .is_err(),
         "refs/namespaces/{}/refs/heads/master does not exist",
         bob.id
     );
 }
 
 #[test]
-fn test_replication_invalid() {
+fn replication_invalid() {
     let tmp = tempfile::tempdir().unwrap();
-    let alice = Node::init(tmp.path(), config::relay("alice"));
-    let mut bob = Node::init(tmp.path(), config::relay("bob"));
-    let carol = Device::mock();
+    let alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let mut bob = Node::init(tmp.path(), config::relay("bob"), 37);
+    let carol = SigningKey::mock(8);
     let acme = bob.project("acme", "");
     let repo = bob.storage.repository_mut(acme).unwrap();
     let (_, head) = repo.head().unwrap();
@@ -293,7 +419,8 @@ fn test_replication_invalid() {
     // Create some unsigned refs for Carol in Bob's storage.
     repo.raw()
         .reference(
-            &git::fmt::qualified!("refs/heads/carol").with_namespace(carol.public_key().into()),
+            &git::fmt::qualified!("refs/heads/carol")
+                .with_namespace(Component::from(carol.public_key())),
             head.into(),
             true,
             &String::default(),
@@ -316,7 +443,10 @@ fn test_replication_invalid() {
 
     alice.handle.follow(*carol.public_key(), None).unwrap();
     alice.handle.seed(acme, Scope::Followed).unwrap();
-    let result = alice.handle.fetch(acme, bob.id, DEFAULT_TIMEOUT).unwrap();
+    let result = alice
+        .handle
+        .fetch(acme, bob.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
 
     // Fetch is successful despite not fetching Carol's refs, since she isn't a delegate.
     assert!(result.is_success());
@@ -331,10 +461,10 @@ fn test_replication_invalid() {
 }
 
 #[test]
-fn test_migrated_clone() {
+fn migrated_clone() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut alice = Node::init(tmp.path(), config::relay("alice"));
-    let bob = Node::init(tmp.path(), config::relay("bob"));
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let bob = Node::init(tmp.path(), config::relay("bob"), 37);
     let acme = alice.project("acme", "");
 
     let mut alice = alice.spawn();
@@ -346,7 +476,10 @@ fn test_migrated_clone() {
     let updated = bob.handle.seed(acme, Scope::All).unwrap();
     assert!(updated);
 
-    let result = bob.handle.fetch(acme, alice.id, DEFAULT_TIMEOUT).unwrap();
+    let result = bob
+        .handle
+        .fetch(acme, alice.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(result.is_success());
 
     log::debug!(target: "test", "Fetch complete with {}", alice.id);
@@ -357,7 +490,10 @@ fn test_migrated_clone() {
         std::fs::remove_dir_all(path).unwrap();
     }
     assert!(!alice.storage.contains(&acme).unwrap());
-    let result = alice.handle.fetch(acme, bob.id, DEFAULT_TIMEOUT).unwrap();
+    let result = alice
+        .handle
+        .fetch(acme, bob.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(result.is_success());
 
     let alice_repo = alice.storage.repository(acme).unwrap();
@@ -382,10 +518,10 @@ fn test_migrated_clone() {
 }
 
 #[test]
-fn test_dont_fetch_owned_refs() {
+fn dont_fetch_owned_refs() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut alice = Node::init(tmp.path(), config::relay("alice"));
-    let bob = Node::init(tmp.path(), config::relay("bob"));
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let bob = Node::init(tmp.path(), config::relay("bob"), 37);
     let acme = alice.project("acme", "");
 
     let mut alice = alice.spawn();
@@ -396,26 +532,32 @@ fn test_dont_fetch_owned_refs() {
 
     assert!(bob.handle.seed(acme, Scope::Followed).unwrap());
 
-    let result = bob.handle.fetch(acme, alice.id, DEFAULT_TIMEOUT).unwrap();
+    let result = bob
+        .handle
+        .fetch(acme, alice.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(result.is_success());
 
     log::debug!(target: "test", "Fetch complete with {}", bob.id);
 
     alice.issue(acme, Title::new("Don't fetch self").unwrap(), "Use ^");
-    let result = alice.handle.fetch(acme, bob.id, DEFAULT_TIMEOUT).unwrap();
+    let result = alice
+        .handle
+        .fetch(acme, bob.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(result.is_success())
 }
 
 #[test]
-fn test_fetch_followed_remotes() {
+fn fetch_followed_remotes() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut alice = Node::init(tmp.path(), config::relay("alice"));
-    let bob = Node::init(tmp.path(), config::relay("bob"));
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let bob = Node::init(tmp.path(), config::relay("bob"), 37);
     let acme = alice.project("acme", "");
     let mut signers = Vec::with_capacity(5);
     {
-        for _ in 0..5 {
-            let signer = Device::mock();
+        for i in 0..5 {
+            let signer = SigningKey::mock(i);
             rad::fork_remote(acme, &alice.id, &signer, &alice.storage).unwrap();
             signers.push(signer);
         }
@@ -442,7 +584,10 @@ fn test_fetch_followed_remotes() {
         assert!(bob.handle.follow(*nid, None).unwrap());
     }
 
-    let result = bob.handle.fetch(acme, alice.id, DEFAULT_TIMEOUT).unwrap();
+    let result = bob
+        .handle
+        .fetch(acme, alice.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(result.is_success());
 
     log::debug!(target: "test", "Fetch complete with {}", bob.id);
@@ -454,30 +599,34 @@ fn test_fetch_followed_remotes() {
         .collect::<Result<HashSet<_>, _>>()
         .unwrap();
 
-    assert!(bob_remotes.len() == followed.len() + 1);
+    assert_eq!(bob_remotes.len(), followed.len() + 1);
     assert!(bob_remotes.is_superset(&followed));
     assert!(bob_remotes.contains(&alice.id));
 }
 
 #[test]
-fn test_missing_remote() {
+fn missing_remote() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut alice = Node::init(tmp.path(), config::relay("alice"));
-    let bob = Node::init(tmp.path(), config::relay("bob"));
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let bob = Node::init(tmp.path(), config::relay("bob"), 37);
     let acme = alice.project("acme", "");
 
     let mut alice = alice.spawn();
     let mut bob = bob.spawn();
-    let carol = Device::mock();
+    let carol = SigningKey::mock(98);
 
     alice.connect(&bob);
     converge([&alice, &bob]);
 
     assert!(bob.handle.seed(acme, Scope::Followed).unwrap());
     assert!(bob.handle.follow(*carol.public_key(), None).unwrap());
-    let result = bob.handle.fetch(acme, alice.id, DEFAULT_TIMEOUT).unwrap();
+    let result = bob
+        .handle
+        .fetch(acme, alice.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(result.is_success());
     log::debug!(target: "test", "Fetch complete with {}", bob.id);
+
     rad::fork_remote(acme, &alice.id, &carol, &bob.storage).unwrap();
 
     alice.issue(
@@ -485,16 +634,19 @@ fn test_missing_remote() {
         Title::new("Missing Remote").unwrap(),
         "Fixing the missing remote issue",
     );
-    let result = bob.handle.fetch(acme, alice.id, DEFAULT_TIMEOUT).unwrap();
+    let result = bob
+        .handle
+        .fetch(acme, alice.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(result.is_success());
     log::debug!(target: "test", "Fetch complete with {}", bob.id);
 }
 
 #[test]
-fn test_fetch_preserve_owned_refs() {
+fn fetch_preserve_owned_refs() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut alice = Node::init(tmp.path(), config::relay("alice"));
-    let bob = Node::init(tmp.path(), config::relay("bob"));
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let bob = Node::init(tmp.path(), config::relay("bob"), 37);
     let acme = alice.project("acme", "");
     let mut alice = alice.spawn();
     let mut bob = bob.spawn();
@@ -505,7 +657,10 @@ fn test_fetch_preserve_owned_refs() {
     assert!(bob.handle.seed(acme, Scope::Followed).unwrap());
     assert!(bob.handle.follow(alice.id, None).unwrap());
 
-    let result = bob.handle.fetch(acme, alice.id, DEFAULT_TIMEOUT).unwrap();
+    let result = bob
+        .handle
+        .fetch(acme, alice.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(result.is_success());
 
     log::debug!(target: "test", "Fetch complete with {}", bob.id);
@@ -520,7 +675,10 @@ fn test_fetch_preserve_owned_refs() {
         .unwrap();
 
     // Fetch shouldn't prune any of our own refs.
-    let result = alice.handle.fetch(acme, bob.id, DEFAULT_TIMEOUT).unwrap();
+    let result = alice
+        .handle
+        .fetch(acme, bob.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     let (updated, _) = result.success().unwrap();
     assert_eq!(updated, vec![]);
 
@@ -535,10 +693,10 @@ fn test_fetch_preserve_owned_refs() {
 }
 
 #[test]
-fn test_clone() {
+fn clone() {
     let tmp = tempfile::tempdir().unwrap();
-    let alice = Node::init(tmp.path(), config::relay("alice"));
-    let mut bob = Node::init(tmp.path(), config::relay("bob"));
+    let alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let mut bob = Node::init(tmp.path(), config::relay("bob"), 37);
     let acme = bob.project("acme", "");
 
     let mut alice = alice.spawn();
@@ -553,7 +711,10 @@ fn test_clone() {
     let seeds = alice.handle.seeds_for(acme, None).unwrap();
     assert!(seeds.is_connected(&bob.id));
 
-    let result = alice.handle.fetch(acme, bob.id, DEFAULT_TIMEOUT).unwrap();
+    let result = alice
+        .handle
+        .fetch(acme, bob.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(result.is_success());
 
     rad::fork(acme, &alice.signer, &alice.storage).unwrap();
@@ -583,19 +744,104 @@ fn test_clone() {
     assert_eq!(canonical, oid);
 
     // Make sure that bob has refs/rad/id set
-    assert!(bob
-        .storage
-        .repository(acme)
-        .unwrap()
-        .identity_head()
-        .is_ok());
+    assert!(
+        bob.storage
+            .repository(acme)
+            .unwrap()
+            .identity_head()
+            .is_ok()
+    );
 }
 
 #[test]
-fn test_fetch_up_to_date() {
+fn clone_without_founder_namespace() {
+    use radicle::identity::Identity;
+
     let tmp = tempfile::tempdir().unwrap();
-    let alice = Node::init(tmp.path(), config::relay("alice"));
-    let mut bob = Node::init(tmp.path(), config::relay("bob"));
+    let mut amy = Node::init(tmp.path(), config::relay("amy"), 13);
+    let bob = Node::init(tmp.path(), config::relay("bob"), 37);
+    let eve = Node::init(tmp.path(), config::relay("eve"), 42);
+    let rid = amy.project("acme", "");
+
+    // Amy hands over the repository to Bob, making him the sole delegate.
+    let doc = {
+        let repo = amy.storage.repository(rid).unwrap();
+        let mut identity = Identity::load_mut(&repo, &amy.secret_key).unwrap();
+        let doc = identity
+            .doc()
+            .clone()
+            .with_edits(|doc| {
+                doc.delegate(bob.id.into());
+                assert!(doc.rescind(&amy.id.into()).unwrap());
+            })
+            .unwrap();
+        assert_eq!(doc.delegates().len(), 1);
+        let revision = identity
+            .update(Title::new("Hand over to Bob").unwrap(), "", &doc)
+            .unwrap();
+        repo.set_identity_head_to(revision).unwrap();
+
+        doc
+    };
+
+    let amy = amy.spawn();
+    let mut bob = bob.spawn();
+    bob.connect(&amy);
+    bob.handle.seed(rid, Scope::All).unwrap();
+
+    assert_matches!(
+        bob.handle
+            .fetch(rid, amy.id, DEFAULT_TIMEOUT, None)
+            .unwrap(),
+        FetchResult::Success { .. }
+    );
+
+    // Have Bob fork Amy's namespace, so that the default branch remains
+    // well defined.
+    rad::fork_remote(rid, &amy.id, &bob.signer, &bob.storage).unwrap();
+
+    bob.disconnect(&amy);
+
+    let founder = amy.id;
+    drop(amy);
+
+    let repo = bob.storage.repository(rid).unwrap();
+    let identity = Identity::load(&repo).unwrap();
+
+    assert!(!identity.doc().is_delegate(&founder.into()));
+    assert_eq!(identity.doc().delegates().len(), 1);
+    assert!(identity.doc().is_delegate(&bob.id.into()));
+
+    // Bob still has the founder's namespace.
+    assert!(
+        repo.reference_oid(&founder, &git::refs::storage::IDENTITY_ROOT)
+            .is_ok()
+    );
+
+    // Eve has no cached refs/rad/id. Fetching with followed scope must also
+    // include the founder, Amy, even though she is no longer a delegate.
+    let mut eve = eve.spawn();
+    eve.connect(&bob);
+
+    assert!(!eve.storage.contains(&rid).unwrap());
+    eve.handle.seed(rid, Scope::Followed).unwrap();
+
+    assert!(
+        eve.handle
+            .fetch(rid, bob.id, DEFAULT_TIMEOUT, None)
+            .unwrap()
+            .is_success()
+    );
+
+    let cloned = eve.storage.repository(rid).unwrap();
+    assert_eq!(cloned.identity_doc().unwrap().doc, doc);
+}
+
+#[test]
+fn fetch_up_to_date() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let mut bob = Node::init(tmp.path(), config::relay("bob"), 37);
     let acme = bob.project("acme", "");
 
     let mut alice = alice.spawn();
@@ -607,11 +853,17 @@ fn test_fetch_up_to_date() {
     transport::local::register(alice.storage.clone());
 
     let _ = alice.handle.seed(acme, Scope::All).unwrap();
-    let result = alice.handle.fetch(acme, bob.id, DEFAULT_TIMEOUT).unwrap();
+    let result = alice
+        .handle
+        .fetch(acme, bob.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(result.is_success());
 
     // Fetch again! This time, everything's up to date.
-    let result = alice.handle.fetch(acme, bob.id, DEFAULT_TIMEOUT).unwrap();
+    let result = alice
+        .handle
+        .fetch(acme, bob.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert_matches!(
         result.success(),
         Some((updates, _fetched)) if updates.iter().all(|update| matches!(update, RefUpdate::Skipped { .. }))
@@ -619,10 +871,10 @@ fn test_fetch_up_to_date() {
 }
 
 #[test]
-fn test_fetch_unseeded() {
+fn fetch_unseeded() {
     let tmp = tempfile::tempdir().unwrap();
-    let alice = Node::init(tmp.path(), config::relay("alice"));
-    let mut bob = Node::init(tmp.path(), config::relay("bob"));
+    let alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let mut bob = Node::init(tmp.path(), config::relay("bob"), 37);
     let acme = bob.project("acme", "");
 
     let mut alice = alice.spawn();
@@ -634,23 +886,29 @@ fn test_fetch_unseeded() {
     transport::local::register(alice.storage.clone());
 
     let _ = alice.handle.seed(acme, Scope::All).unwrap();
-    let result = alice.handle.fetch(acme, bob.id, DEFAULT_TIMEOUT).unwrap();
+    let result = alice
+        .handle
+        .fetch(acme, bob.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(result.is_success());
 
     // Bob stops seeding the repository
     assert!(bob.handle.unseed(acme).unwrap());
 
     // Alice attempts to fetch but is unauthorized
-    let result = alice.handle.fetch(acme, bob.id, DEFAULT_TIMEOUT).unwrap();
+    let result = alice
+        .handle
+        .fetch(acme, bob.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert_matches!(result, FetchResult::Failed { .. });
 }
 
 #[test]
-fn test_large_fetch() {
+fn large_fetch() {
     let tmp = tempfile::tempdir().unwrap();
     let scale = config::scale();
-    let mut alice = Node::init(tmp.path(), config::relay("alice"));
-    let bob = Node::init(tmp.path(), config::relay("bob"));
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let bob = Node::init(tmp.path(), config::relay("bob"), 37);
 
     let (repo, _) = fixtures::repository(tmp.path());
     fixtures::populate(&repo, scale.max(3));
@@ -674,18 +932,20 @@ fn test_large_fetch() {
         .unwrap();
 
     let doc = bob.storage.repository(rid).unwrap().identity_doc().unwrap();
-    let proj = doc.project().unwrap();
+    let proj = doc.project().unwrap().unwrap();
 
     assert_eq!(proj.name(), "acme");
 }
 
 #[test]
-fn test_concurrent_fetches() {
+fn concurrent_fetches() {
     let tmp = tempfile::tempdir().unwrap();
     let scale = config::scale();
     let repos = scale.max(4);
     let limits = Limits {
-        // Have one fetch be queued.
+        // By setting fetch concurrency to one less than the total number of repos,
+        // we guarantee that at least one fetch will be queued while the others
+        // are in progress.
         fetch_concurrency: (repos - 1).into(),
         ..Limits::default()
     };
@@ -698,6 +958,7 @@ fn test_concurrent_fetches() {
             relay: radicle::node::config::Relay::Always,
             ..config::relay("alice")
         },
+        13,
     );
     let mut bob = Node::init(
         tmp.path(),
@@ -706,6 +967,7 @@ fn test_concurrent_fetches() {
             relay: radicle::node::config::Relay::Always,
             ..config::relay("bob")
         },
+        37,
     );
 
     for i in 0..repos {
@@ -726,6 +988,10 @@ fn test_concurrent_fetches() {
         bob_repos.insert(rid);
     }
 
+    // Clone repositories list for assertions so we don't assert over an empty set.
+    let all_alice_repos = alice_repos.clone();
+    let all_bob_repos = bob_repos.clone();
+
     let mut alice = alice.spawn();
     let mut bob = bob.spawn();
 
@@ -742,7 +1008,10 @@ fn test_concurrent_fetches() {
 
     while !bob_repos.is_empty() {
         match alice_events.recv().unwrap() {
+            // We're looking for a `RefsFetched` event, which signals a completed fetch.
+            // We also ensure that `updated` is not empty, meaning data was actually received.
             Event::RefsFetched { rid, updated, .. } if !updated.is_empty() => {
+                // Once a repo is fetched, remove it from our tracking set.
                 bob_repos.remove(&rid);
                 log::debug!(target: "test", "{} fetched {rid} ({} left)",alice.id, bob_repos.len());
             }
@@ -753,6 +1022,7 @@ fn test_concurrent_fetches() {
     while !alice_repos.is_empty() {
         match bob_events.recv().unwrap() {
             Event::RefsFetched { rid, updated, .. } if !updated.is_empty() => {
+                // Once a repo is fetched, remove it from our tracking set.
                 alice_repos.remove(&rid);
                 log::debug!(target: "test", "{} fetched {rid} ({} left)", bob.id, alice_repos.len());
             }
@@ -760,35 +1030,39 @@ fn test_concurrent_fetches() {
         }
     }
 
-    for rid in &bob_repos {
+    // Positively assert empty sets, not necessary but proves test was previously broken.
+    assert!(bob_repos.is_empty());
+    assert!(alice_repos.is_empty());
+
+    for rid in &all_bob_repos {
         let doc = alice
             .storage
             .repository(*rid)
             .unwrap()
             .identity_doc()
             .unwrap();
-        let proj = doc.project().unwrap();
+        let proj = doc.project().unwrap().unwrap();
 
         assert!(proj.name().starts_with("bob"));
     }
-    for rid in &alice_repos {
+    for rid in &all_alice_repos {
         let doc = bob
             .storage
             .repository(*rid)
             .unwrap()
             .identity_doc()
             .unwrap();
-        let proj = doc.project().unwrap();
+        let proj = doc.project().unwrap().unwrap();
 
         assert!(proj.name().starts_with("alice"));
     }
 }
 
 #[test]
-fn test_connection_crossing() {
+fn connection_crossing() {
     let tmp = tempfile::tempdir().unwrap();
-    let alice = Node::init(tmp.path(), config::relay("alice"));
-    let bob = Node::init(tmp.path(), config::relay("bob"));
+    let alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let bob = Node::init(tmp.path(), config::relay("bob"), 37);
 
     let alice = alice.spawn();
     let bob = bob.spawn();
@@ -796,10 +1070,14 @@ fn test_connection_crossing() {
 
     log::debug!(target: "test", "Preferred peer is {preferred}");
 
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let b1 = barrier.clone();
+    let b2 = barrier.clone();
     let t1 = thread::spawn({
         let mut alice = alice.handle.clone();
 
         move || {
+            b1.wait();
             alice
                 .connect(bob.id, bob.addr.into(), ConnectOptions::default())
                 .unwrap()
@@ -808,6 +1086,7 @@ fn test_connection_crossing() {
     let t2 = thread::spawn({
         let mut bob = bob.handle.clone();
         move || {
+            b2.wait();
             bob.connect(alice.id, alice.addr.into(), ConnectOptions::default())
                 .unwrap()
         }
@@ -824,43 +1103,54 @@ fn test_connection_crossing() {
         assert_matches!(r2, ConnectResult::Connected);
     }
 
-    thread::sleep(time::Duration::from_secs(1));
+    let mut iterations = 0;
+    let (alice_s, bob_s, s1, s2) = loop {
+        let alice_s = alice.handle.sessions().unwrap();
+        let bob_s = bob.handle.sessions().unwrap();
 
-    let alice_s = alice.handle.sessions().unwrap();
-    let bob_s = bob.handle.sessions().unwrap();
+        let s1 = alice_s.iter().find(|s| s.nid == bob.id).cloned();
+        let s2 = bob_s.iter().find(|s| s.nid == alice.id).cloned();
 
-    // Both sessions are established.
-    let s1 = alice_s.iter().find(|s| s.nid == bob.id).unwrap();
-    let s2 = bob_s.iter().find(|s| s.nid == alice.id).unwrap();
+        if let (Some(s1), Some(s2)) = (s1, s2) {
+            // Wait until both sessions are fully connected
+            if s1.state.is_connected() && s2.state.is_connected() {
+                break (alice_s, bob_s, s1, s2);
+            }
+        }
+        iterations += 1;
+        if iterations >= 100 {
+            panic!("Timeout waiting for sessions to connect");
+        }
+        thread::sleep(time::Duration::from_millis(50));
+    };
 
-    log::debug!(target: "test", "{:?}", alice.handle.sessions());
-    log::debug!(target: "test", "{:?}", bob.handle.sessions());
-
-    if preferred == alice.id {
-        assert_eq!(s1.link, radicle::node::Link::Outbound);
-        assert_eq!(s2.link, radicle::node::Link::Inbound);
-    } else {
-        assert_eq!(s1.link, radicle::node::Link::Inbound);
-        assert_eq!(s2.link, radicle::node::Link::Outbound);
-    }
+    // We assert that they have opposite link directions.
+    // In a true simultaneous crossing, the preferred peer wins the Outbound link.
+    // However, due to OS thread scheduling and reactor event ordering, one peer
+    // might fully establish the connection before the other even processes the dial command.
+    // In all valid cases (crossing or sequential), exactly one is Outbound and one is Inbound.
+    assert_ne!(
+        s1.link, s2.link,
+        "One must be Inbound and the other Outbound"
+    );
     assert_eq!(alice_s.len(), 1);
     assert_eq!(bob_s.len(), 1);
 }
 
 #[test]
-/// Alice is going to try to fetch outdated refs of Bob, from Eve. This is a non-fastfoward fetch
+/// Alice is going to try to fetch outdated refs of Bob, from Eve. This is a non-fast-forward fetch
 /// on the sigrefs branch.
-fn test_non_fastforward_sigrefs() {
+fn non_fast_forward_sigrefs() {
     let tmp = tempfile::tempdir().unwrap();
 
-    let alice = Node::init(tmp.path(), config::relay("alice"));
-    let mut bob = Node::init(tmp.path(), config::relay("bob"));
-    let eve = Node::init(tmp.path(), config::relay("eve"));
+    let alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let mut bob = Node::init(tmp.path(), config::relay("bob"), 37);
+    let eve = Node::init(tmp.path(), config::relay("eve"), 42);
 
     let rid = bob.project("acme", "");
 
     let mut alice = alice.spawn();
-    let bob = bob.spawn();
+    let mut bob = bob.spawn();
     let mut eve = eve.spawn();
 
     alice.handle.seed(rid, Scope::All).unwrap();
@@ -872,10 +1162,15 @@ fn test_non_fastforward_sigrefs() {
 
     converge([&alice, &bob, &eve]);
 
-    // Eve fetches the inital project from Bob.
-    eve.handle.fetch(rid, bob.id, DEFAULT_TIMEOUT).unwrap();
+    // Eve fetches the initial project from Bob.
+    eve.handle
+        .fetch(rid, bob.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     // Alice fetches it too.
-    let old_bob = alice.handle.fetch(rid, bob.id, DEFAULT_TIMEOUT).unwrap();
+    let old_bob = alice
+        .handle
+        .fetch(rid, bob.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     let bob_sigrefs = bob
         .storage
         .repository(rid)
@@ -917,7 +1212,10 @@ fn test_non_fastforward_sigrefs() {
         "Updated sigrefs are harshing my vibes",
     );
     // Alice fetches from Bob.
-    let new_bob = alice.handle.fetch(rid, bob.id, DEFAULT_TIMEOUT).unwrap();
+    let new_bob = alice
+        .handle
+        .fetch(rid, bob.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     let bob_sigrefs = bob
         .storage
         .repository(rid)
@@ -949,19 +1247,19 @@ fn test_non_fastforward_sigrefs() {
     }
 
     assert_matches!(
-        alice.handle.fetch(rid, eve.id, DEFAULT_TIMEOUT).unwrap(),
+        alice.handle.fetch(rid, eve.id, DEFAULT_TIMEOUT, None).unwrap(),
         FetchResult::Success { updated, .. }
         if updated.iter().all(|u| u.is_skipped())
     );
 }
 
 #[test]
-fn test_outdated_sigrefs() {
+fn outdated_sigrefs() {
     let tmp = tempfile::tempdir().unwrap();
 
-    let mut alice = Node::init(tmp.path(), config::relay("alice"));
-    let bob = Node::init(tmp.path(), config::relay("bob"));
-    let eve = Node::init(tmp.path(), config::relay("eve"));
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let bob = Node::init(tmp.path(), config::relay("bob"), 37);
+    let eve = Node::init(tmp.path(), config::relay("eve"), 42);
 
     let rid = alice.project("acme", "");
 
@@ -976,11 +1274,15 @@ fn test_outdated_sigrefs() {
     eve.connect(&alice);
     converge([&alice, &bob, &eve]);
 
-    bob.handle.fetch(rid, alice.id, DEFAULT_TIMEOUT).unwrap();
+    bob.handle
+        .fetch(rid, alice.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(bob.storage.contains(&rid).unwrap());
     rad::fork(rid, &bob.signer, &bob.storage).unwrap();
 
-    eve.handle.fetch(rid, alice.id, DEFAULT_TIMEOUT).unwrap();
+    eve.handle
+        .fetch(rid, alice.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(eve.storage.contains(&rid).unwrap());
     rad::fork(rid, &eve.signer, &eve.storage).unwrap();
 
@@ -988,13 +1290,18 @@ fn test_outdated_sigrefs() {
         .handle
         .follow(eve.id, Some(Alias::new("eve")))
         .unwrap();
-    alice.handle.fetch(rid, eve.id, DEFAULT_TIMEOUT).unwrap();
+    alice
+        .handle
+        .fetch(rid, eve.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     let repo = alice.storage.repository(rid).unwrap();
     assert!(repo.remote(&eve.id).is_ok());
 
     log::debug!(target: "test", "Bob fetches from Eve..");
     assert_matches!(
-        bob.handle.fetch(rid, eve.id, DEFAULT_TIMEOUT).unwrap(),
+        bob.handle
+            .fetch(rid, eve.id, DEFAULT_TIMEOUT, None)
+            .unwrap(),
         FetchResult::Success { .. }
     );
     let repo = bob.storage.repository(rid).unwrap();
@@ -1015,11 +1322,14 @@ fn test_outdated_sigrefs() {
     // Get the current state of eve's refs in alice's storage
     log::debug!(target: "test", "Alice fetches from Eve..");
     assert_matches!(
-        alice.handle.fetch(rid, eve.id, DEFAULT_TIMEOUT).unwrap(),
+        alice
+            .handle
+            .fetch(rid, eve.id, DEFAULT_TIMEOUT, None)
+            .unwrap(),
         FetchResult::Success { .. }
     );
     let repo = alice.storage.repository(rid).unwrap();
-    let issues = issue::Issues::open(&repo).unwrap();
+    let issues = issue::Issues::open(&repo, WriteAs::new(&alice.signer)).unwrap();
     assert!(
         issues.get(&issue_id).unwrap().is_some(),
         "Alice did not fetch issue {issue_id}"
@@ -1036,7 +1346,10 @@ fn test_outdated_sigrefs() {
         .follow(bob.id, Some(Alias::new("bob")))
         .unwrap();
     assert_matches!(
-        alice.handle.fetch(rid, bob.id, DEFAULT_TIMEOUT).unwrap(),
+        alice
+            .handle
+            .fetch(rid, bob.id, DEFAULT_TIMEOUT, None)
+            .unwrap(),
         FetchResult::Success { .. }
     );
 
@@ -1050,12 +1363,12 @@ fn test_outdated_sigrefs() {
 }
 
 #[test]
-fn test_outdated_delegate_sigrefs() {
+fn outdated_delegate_sigrefs() {
     let tmp = tempfile::tempdir().unwrap();
 
-    let mut alice = Node::init(tmp.path(), config::relay("alice"));
-    let bob = Node::init(tmp.path(), config::relay("bob"));
-    let eve = Node::init(tmp.path(), config::relay("eve"));
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let bob = Node::init(tmp.path(), config::relay("bob"), 37);
+    let eve = Node::init(tmp.path(), config::relay("eve"), 42);
 
     let rid = alice.project("acme", "");
 
@@ -1070,11 +1383,15 @@ fn test_outdated_delegate_sigrefs() {
     eve.connect(&alice);
     converge([&alice, &bob, &eve]);
 
-    bob.handle.fetch(rid, alice.id, DEFAULT_TIMEOUT).unwrap();
+    bob.handle
+        .fetch(rid, alice.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(bob.storage.contains(&rid).unwrap());
     rad::fork(rid, &bob.signer, &bob.storage).unwrap();
 
-    eve.handle.fetch(rid, alice.id, DEFAULT_TIMEOUT).unwrap();
+    eve.handle
+        .fetch(rid, alice.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(eve.storage.contains(&rid).unwrap());
     rad::fork(rid, &eve.signer, &eve.storage).unwrap();
 
@@ -1082,13 +1399,18 @@ fn test_outdated_delegate_sigrefs() {
         .handle
         .follow(eve.id, Some(Alias::new("eve")))
         .unwrap();
-    alice.handle.fetch(rid, eve.id, DEFAULT_TIMEOUT).unwrap();
+    alice
+        .handle
+        .fetch(rid, eve.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     let repo = alice.storage.repository(rid).unwrap();
     assert!(repo.remote(&eve.id).is_ok());
 
     log::debug!(target: "test", "Bob fetches from Eve..");
     assert_matches!(
-        bob.handle.fetch(rid, eve.id, DEFAULT_TIMEOUT).unwrap(),
+        bob.handle
+            .fetch(rid, eve.id, DEFAULT_TIMEOUT, None)
+            .unwrap(),
         FetchResult::Success { .. }
     );
     let repo = bob.storage.repository(rid).unwrap();
@@ -1109,7 +1431,9 @@ fn test_outdated_delegate_sigrefs() {
     // Get the current state of eve's refs in alice's storage
     log::debug!(target: "test", "Alice fetches from Eve..");
     assert_matches!(
-        eve.handle.fetch(rid, alice.id, DEFAULT_TIMEOUT).unwrap(),
+        eve.handle
+            .fetch(rid, alice.id, DEFAULT_TIMEOUT, None)
+            .unwrap(),
         FetchResult::Success { .. }
     );
     let repo = eve.storage.repository(rid).unwrap();
@@ -1122,7 +1446,9 @@ fn test_outdated_delegate_sigrefs() {
 
     eve.handle.follow(bob.id, Some(Alias::new("bob"))).unwrap();
     assert_matches!(
-        eve.handle.fetch(rid, bob.id, DEFAULT_TIMEOUT).unwrap(),
+        eve.handle
+            .fetch(rid, bob.id, DEFAULT_TIMEOUT, None)
+            .unwrap(),
         FetchResult::Success { .. }
     );
 
@@ -1139,8 +1465,8 @@ fn test_outdated_delegate_sigrefs() {
 fn missing_default_branch() {
     let tmp = tempfile::tempdir().unwrap();
 
-    let mut alice = Node::init(tmp.path(), config::relay("alice"));
-    let bob = Node::init(tmp.path(), config::relay("bob"));
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let bob = Node::init(tmp.path(), config::relay("bob"), 37);
 
     let rid = alice.project("acme", "");
 
@@ -1152,7 +1478,9 @@ fn missing_default_branch() {
     alice.connect(&bob);
     converge([&alice, &bob]);
 
-    bob.handle.fetch(rid, alice.id, DEFAULT_TIMEOUT).unwrap();
+    bob.handle
+        .fetch(rid, alice.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(bob.storage.contains(&rid).unwrap());
 
     // Fetching from still works despite not having
@@ -1162,7 +1490,10 @@ fn missing_default_branch() {
         Title::new("Hello, Acme").unwrap(),
         "Popping in to say hello",
     );
-    alice.handle.fetch(rid, bob.id, DEFAULT_TIMEOUT).unwrap();
+    alice
+        .handle
+        .fetch(rid, bob.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
 
     {
         let repo = bob.storage.repository(rid).unwrap();
@@ -1184,7 +1515,9 @@ fn missing_default_branch() {
 
     // Fetching from her will still succeed.
     assert_matches!(
-        bob.handle.fetch(rid, alice.id, DEFAULT_TIMEOUT).unwrap(),
+        bob.handle
+            .fetch(rid, alice.id, DEFAULT_TIMEOUT, None)
+            .unwrap(),
         FetchResult::Success { .. }
     );
     let repo = bob.storage.repository(rid).unwrap();
@@ -1198,9 +1531,9 @@ fn missing_delegate_default_branch() {
     use radicle::storage::git::Repository;
     let tmp = tempfile::tempdir().unwrap();
 
-    let mut alice = Node::init(tmp.path(), config::relay("alice"));
-    let bob = Node::init(tmp.path(), config::relay("bob"));
-    let seed = Node::init(tmp.path(), config::relay("seed"));
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let bob = Node::init(tmp.path(), config::relay("bob"), 37);
+    let seed = Node::init(tmp.path(), config::relay("seed"), 7);
 
     let rid = alice.project("acme", "");
 
@@ -1217,7 +1550,9 @@ fn missing_delegate_default_branch() {
     converge([&seed]);
     bob.connect(&seed);
 
-    bob.handle.fetch(rid, seed.id, DEFAULT_TIMEOUT).unwrap();
+    bob.handle
+        .fetch(rid, seed.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     bob_events
         .wait(
             |e| {
@@ -1228,12 +1563,14 @@ fn missing_delegate_default_branch() {
         .unwrap();
     assert!(bob.storage.contains(&rid).unwrap());
 
+    let bob_key = *bob.signer.public_key();
+
     // Helper to assert that Bob's default branch is not in storage
     let assert_bobs_default_is_missing = |repo: &Repository| {
         let doc = repo.identity_doc().unwrap();
-        let project = doc.project().unwrap();
+        let project = doc.project().unwrap().unwrap();
         let default_branch = repo.reference(
-            bob.signer.public_key(),
+            &bob_key,
             &radicle::git::refs::branch(project.default_branch()),
         );
         assert!(matches!(
@@ -1245,7 +1582,7 @@ fn missing_delegate_default_branch() {
     // Add Bob as a delegate to the identity document
     {
         let repo = alice.storage.repository(rid).unwrap();
-        let mut identity = Identity::load_mut(&repo).unwrap();
+        let mut identity = Identity::load_mut(&repo, &alice.signer).unwrap();
         let doc = repo
             .identity_doc()
             .unwrap()
@@ -1255,13 +1592,13 @@ fn missing_delegate_default_branch() {
             })
             .unwrap();
         let rev = identity
-            .update(Title::new("Add Bob").unwrap(), "", &doc, &alice.signer)
+            .update(Title::new("Add Bob").unwrap(), "", &doc)
             .unwrap();
         repo.set_identity_head_to(rev).unwrap();
 
         let new = repo.identity_doc().unwrap().doc;
         assert!(
-            new.is_delegate(&bob.signer.public_key().into()),
+            new.is_delegate(&bob_key.into()),
             "Bob must be a delegate after the update"
         );
     }
@@ -1289,7 +1626,9 @@ fn missing_delegate_default_branch() {
     // a) Bob's default branch is still missing
     // b) Bob's issue is there
     assert_matches!(
-        seed.handle.fetch(rid, bob.id, DEFAULT_TIMEOUT).unwrap(),
+        seed.handle
+            .fetch(rid, bob.id, DEFAULT_TIMEOUT, None)
+            .unwrap(),
         FetchResult::Success { .. }
     );
     {
@@ -1300,7 +1639,10 @@ fn missing_delegate_default_branch() {
 
     // Do the same for Alice
     assert_matches!(
-        alice.handle.fetch(rid, seed.id, DEFAULT_TIMEOUT).unwrap(),
+        alice
+            .handle
+            .fetch(rid, seed.id, DEFAULT_TIMEOUT, None)
+            .unwrap(),
         FetchResult::Success { .. }
     );
     {
@@ -1311,18 +1653,20 @@ fn missing_delegate_default_branch() {
 
     // Check that Bob can still fetch from the seed
     assert_matches!(
-        bob.handle.fetch(rid, seed.id, DEFAULT_TIMEOUT).unwrap(),
+        bob.handle
+            .fetch(rid, seed.id, DEFAULT_TIMEOUT, None)
+            .unwrap(),
         FetchResult::Success { .. }
     );
 }
 
 #[test]
-fn test_background_foreground_fetch() {
+fn background_foreground_fetch() {
     let tmp = tempfile::tempdir().unwrap();
 
-    let mut alice = Node::init(tmp.path(), config::relay("alice"));
-    let bob = Node::init(tmp.path(), config::relay("bob"));
-    let eve = Node::init(tmp.path(), config::relay("eve"));
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let bob = Node::init(tmp.path(), config::relay("bob"), 37);
+    let eve = Node::init(tmp.path(), config::relay("eve"), 42);
 
     let rid = alice.project("acme", "");
 
@@ -1337,11 +1681,15 @@ fn test_background_foreground_fetch() {
     alice.connect(&eve);
     converge([&alice, &bob, &eve]);
 
-    bob.handle.fetch(rid, alice.id, DEFAULT_TIMEOUT).unwrap();
+    bob.handle
+        .fetch(rid, alice.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(bob.storage.contains(&rid).unwrap());
     rad::fork(rid, &bob.signer, &bob.storage).unwrap();
 
-    eve.handle.fetch(rid, alice.id, DEFAULT_TIMEOUT).unwrap();
+    eve.handle
+        .fetch(rid, alice.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(eve.storage.contains(&rid).unwrap());
     rad::fork(rid, &eve.signer, &eve.storage).unwrap();
 
@@ -1350,7 +1698,10 @@ fn test_background_foreground_fetch() {
         .handle
         .follow(eve.id, Some(Alias::new("eve")))
         .unwrap();
-    alice.handle.fetch(rid, eve.id, DEFAULT_TIMEOUT).unwrap();
+    alice
+        .handle
+        .fetch(rid, eve.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     let repo = alice.storage.repository(rid).unwrap();
     assert!(repo.remote(&eve.id).is_ok());
     let repo = alice.storage.repository(rid).unwrap();
@@ -1391,7 +1742,10 @@ fn test_background_foreground_fetch() {
     // interfere
     log::debug!(target: "test", "Alice fetches from Eve..");
     assert_matches!(
-        alice.handle.fetch(rid, eve.id, DEFAULT_TIMEOUT).unwrap(),
+        alice
+            .handle
+            .fetch(rid, eve.id, DEFAULT_TIMEOUT, None)
+            .unwrap(),
         FetchResult::Success { .. }
     );
     let repo = alice.storage.repository(rid).unwrap();
@@ -1404,12 +1758,12 @@ fn test_background_foreground_fetch() {
 #[test]
 /// Alice is offline while Bob pushes some changes to the repo. When Alice reconnects,
 /// she is made aware of the changes via the `subscribe` message, and fetches from the seed.
-fn test_catchup_on_refs_announcements() {
+fn catchup_on_refs_announcements() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut alice = Node::init(tmp.path(), config::relay("alice"));
-    let bob = Node::init(tmp.path(), config::relay("bob"));
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let bob = Node::init(tmp.path(), config::relay("bob"), 37);
     let bob_id = bob.id;
-    let seed = Node::init(tmp.path(), config::relay("seed"));
+    let seed = Node::init(tmp.path(), config::relay("seed"), 7);
     let acme = alice.project("acme", "");
 
     let mut alice = alice.spawn();
@@ -1440,11 +1794,11 @@ fn test_catchup_on_refs_announcements() {
 }
 
 #[test]
-fn test_multiple_offline_inits() {
+fn multiple_offline_inits() {
     let tmp = tempfile::tempdir().unwrap();
 
-    let mut alice = Node::init(tmp.path(), config::relay("alice"));
-    let bob = Node::init(tmp.path(), config::relay("bob"));
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let bob = Node::init(tmp.path(), config::relay("bob"), 37);
 
     let acme = alice.project("acme", "");
     let radcliffe = alice.project("radcliffe", "");
@@ -1466,9 +1820,9 @@ fn test_multiple_offline_inits() {
 }
 
 #[test]
-fn test_channel_reader_limit() {
+fn channel_reader_limit() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut alice = Node::init(tmp.path(), config::relay("alice"));
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
     let limits = radicle::node::config::Limits {
         fetch_pack_receive: radicle::node::config::FetchPackSizeLimit::bytes(1000),
         ..radicle::node::config::Limits::default()
@@ -1479,6 +1833,7 @@ fn test_channel_reader_limit() {
             limits,
             ..config::relay("bob")
         },
+        37,
     );
     let acme = alice.project("acme", "");
 
@@ -1491,7 +1846,10 @@ fn test_channel_reader_limit() {
     let updated = bob.handle.seed(acme, Scope::All).unwrap();
     assert!(updated);
 
-    let result = bob.handle.fetch(acme, alice.id, DEFAULT_TIMEOUT).unwrap();
+    let result = bob
+        .handle
+        .fetch(acme, alice.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(!result.is_success());
 
     let FetchResult::Failed { reason } = result else {
@@ -1507,11 +1865,11 @@ fn test_channel_reader_limit() {
 }
 
 #[test]
-fn test_fetch_emits_canonical_ref_update() {
+fn fetch_emits_canonical_ref_update() {
     let tmp = tempfile::tempdir().unwrap();
     let scale = config::scale();
-    let mut alice = Node::init(tmp.path(), config::relay("alice"));
-    let bob = Node::init(tmp.path(), config::relay("bob"));
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let bob = Node::init(tmp.path(), config::relay("bob"), 37);
 
     let (repo, _) = fixtures::repository(tmp.path());
     fixtures::populate(&repo, scale.max(3));
@@ -1525,20 +1883,348 @@ fn test_fetch_emits_canonical_ref_update() {
     bob.handle.seed(rid, Scope::All).unwrap();
     alice.connect(&bob);
 
-    let result = bob.handle.fetch(rid, alice.id, DEFAULT_TIMEOUT).unwrap();
+    let result = bob
+        .handle
+        .fetch(rid, alice.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
     assert!(result.is_success());
+
+    // Drain all the events including initial `CanonicalRefUpdated`
+    // from fetch
+    while bob_events.try_recv().is_ok() {}
 
     let default_branch: git::fmt::Qualified = {
         let repo = alice.storage.repository(rid).unwrap();
-        let proj = repo.project().unwrap();
+        let proj = repo.identity_doc().unwrap().project().unwrap().unwrap();
         git::fmt::lit::refs_heads(proj.default_branch()).into()
     };
+
     alice.commit_to(rid, &default_branch);
+
+    alice.handle.announce_refs_for(rid, [alice.id]).unwrap();
 
     bob_events
         .wait(
             |e| {
                 matches!(e, Event::CanonicalRefUpdated { refname, .. } if *refname == default_branch)
+                    .then_some(())
+            },
+            time::Duration::from_secs(9 * scale as u64),
+        )
+        .unwrap();
+}
+
+#[test]
+fn non_fast_forward_identity_doc() {
+    use radicle::identity::Identity;
+
+    let tmp = tempfile::tempdir().unwrap();
+
+    let mut alice = Node::init(tmp.path(), Config::test(Alias::new("alice")), 13);
+    let bob = Node::init(tmp.path(), Config::test(Alias::new("bob")), 37);
+    let eve = Node::init(tmp.path(), Config::test(Alias::new("eve")), 42);
+    let alice_laptop = Node::init(tmp.path(), Config::test(Alias::new("alice-laptop")), 113);
+
+    let rid = alice.project("acme", "");
+
+    let mut alice = alice.spawn();
+    let mut alice_laptop = alice_laptop.spawn();
+    let mut bob = bob.spawn();
+    let bob_events = bob.handle.events();
+    let mut eve = eve.spawn();
+
+    let has_issue = |node: &NodeHandle, issue: &cob::ObjectId| -> bool {
+        let repo = node.storage.repository(rid).unwrap();
+        repo.contains(**issue).unwrap()
+    };
+
+    alice.connect(&alice_laptop);
+    alice.connect(&bob);
+    alice.connect(&eve);
+    eve.connect(&bob);
+    eve.connect(&alice_laptop);
+
+    // Due to permissive relaying, we need to lock down the scope for the RID.
+    //
+    // See: [`radicle-protocol::service::Service::relay()`] and
+    //      [`radicle-protocol::service::Service::relay_announcement()`]
+    alice.handle.seed(rid, Scope::Followed).unwrap();
+
+    // Bob and Eve have the same state for the repository
+    bob.handle.seed(rid, Scope::Followed).unwrap();
+    bob.handle
+        .fetch(rid, alice.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
+
+    alice_laptop.handle.seed(rid, Scope::All).unwrap();
+    alice_laptop
+        .handle
+        .fetch(rid, alice.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
+
+    // Alice pushes new references to her laptop
+    let issue = alice_laptop.issue(
+        rid,
+        "Feature #1".parse().unwrap(),
+        "Implementing new feature",
+    );
+
+    // Eve will fetch these references since her scope is "all"
+    eve.handle.seed(rid, Scope::All).unwrap();
+    eve.handle
+        .fetch(rid, alice_laptop.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
+    assert!(has_issue(&eve, &issue));
+
+    bob_events
+        .wait(
+            |e| matches!(e, Event::RefsAnnounced { nid, .. } if *nid == eve.id).then_some(()),
+            DEFAULT_TIMEOUT,
+        )
+        .unwrap();
+
+    // Alice updates the identity of the document to include her laptop
+    let (prev, next) = {
+        let repo = alice.storage.repository(rid).unwrap();
+        let mut identity = Identity::load_mut(&repo, &alice.signer).unwrap();
+        let prev = identity.current;
+        let doc = repo
+            .identity_doc()
+            .unwrap()
+            .doc
+            .with_edits(|raw| raw.delegate(alice_laptop.id.into()))
+            .unwrap();
+        let rev = identity
+            .update(Title::new("Add Laptop").unwrap(), "", &doc)
+            .unwrap();
+        repo.set_identity_head_to(rev).unwrap();
+        (prev, rev)
+    };
+
+    assert!(!has_issue(&alice, &issue));
+
+    // Bob fetches from Alice and we see the identity document was updated.
+    //
+    // Bob does not have the issue because Alice does not have the updates from
+    // Alice's Laptop.
+    let result = bob
+        .handle
+        .fetch(rid, alice.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
+    assert!(matches!(result, FetchResult::Success { .. }));
+    assert!(!has_issue(&bob, &issue));
+    let repo = bob.storage.repository(rid).unwrap();
+    let identity = Identity::load_mut(&repo, &bob.signer).unwrap();
+    assert_eq!(identity.current, next);
+    assert_eq!(identity.parent, Some(prev));
+
+    // Bob fetches from Eve, the identity document should remain the same, but
+    // since Bob now knows that Alice's Laptop is a delegate, the issue should
+    // be fetched.
+    bob.handle
+        .fetch(rid, eve.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
+    assert!(matches!(result, FetchResult::Success { .. }));
+    assert!(has_issue(&bob, &issue));
+    let repo = bob.storage.repository(rid).unwrap();
+    let identity = Identity::load_mut(&repo, &bob.signer).unwrap();
+    assert_eq!(identity.current, next);
+    assert_eq!(identity.parent, Some(prev));
+}
+
+#[test]
+fn block_active_connection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let bob = Node::init(tmp.path(), config::relay("bob"), 37);
+
+    let mut alice = alice.spawn();
+    let bob = bob.spawn();
+
+    alice.connect(&bob);
+    converge([&alice, &bob]);
+
+    let events = alice.handle.events();
+    assert!(alice.handle.block(bob.id).unwrap());
+
+    events
+        .wait(
+            |e| matches!(e, Event::PeerDisconnected { nid, .. } if *nid == bob.id).then_some(()),
+            DEFAULT_TIMEOUT,
+        )
+        .unwrap();
+
+    let sessions = alice.handle.sessions().unwrap();
+    assert!(sessions.iter().all(|s| s.nid != bob.id));
+}
+
+#[test]
+fn block_prevents_connection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let bob = Node::init(tmp.path(), config::relay("bob"), 37);
+
+    let mut alice = alice.spawn();
+    let mut bob = bob.spawn();
+
+    assert!(alice.handle.block(bob.id).unwrap());
+
+    let result = alice
+        .handle
+        .connect(bob.id, bob.addr.into(), ConnectOptions::default())
+        .unwrap();
+
+    assert_matches!(result, ConnectResult::Disconnected { .. });
+
+    let events = alice.handle.events();
+    bob.connect(&alice);
+
+    // Alice receives Bob's inbound connection, but disconnects from him.
+    events
+        .wait(
+            |e| matches!(e, Event::PeerDisconnected { nid, .. } if *nid == bob.id).then_some(()),
+            time::Duration::from_secs(10),
+        )
+        .unwrap();
+
+    let sessions = alice.handle.sessions().unwrap();
+    assert!(sessions.iter().all(|s| s.nid != bob.id));
+}
+
+#[test]
+fn block_prevents_fetch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let mut bob = Node::init(tmp.path(), config::relay("bob"), 37);
+    let rid = bob.project("acme", "");
+
+    let mut alice = alice.spawn();
+    let bob = bob.spawn();
+
+    assert!(alice.handle.block(bob.id).unwrap());
+
+    let result = alice
+        .handle
+        .fetch(rid, bob.id, time::Duration::from_secs(5), None)
+        .unwrap();
+
+    assert_matches!(result, FetchResult::Failed { .. });
+}
+
+#[test]
+fn fetch_does_not_contain_rad_sigrefs_parent() {
+    use radicle::storage::refs::SIGREFS_PARENT;
+
+    let tmp = tempfile::tempdir().unwrap();
+
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let bob = Node::init(tmp.path(), config::relay("bob"), 37);
+
+    let rid = alice.project("acme", "");
+
+    let mut alice = alice.spawn();
+    let mut bob = bob.spawn();
+
+    bob.handle.seed(rid, Scope::All).unwrap();
+    alice.connect(&bob);
+    converge([&alice, &bob]);
+
+    bob.handle
+        .fetch(rid, alice.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
+    assert!(bob.storage.contains(&rid).unwrap());
+    rad::fork(rid, &bob.signer, &bob.storage).unwrap();
+
+    let issue_id = alice.issue(
+        rid,
+        Title::new("No rad/sigrefs-parent").unwrap(),
+        "sigrefs are harshing my vibes",
+    );
+    let repo = alice.storage.repository(rid).unwrap();
+    let alice_signed_refs = repo.remote(&alice.id).unwrap().refs;
+
+    log::debug!(target: "test", "Bob fetches from Alice..");
+    assert_matches!(
+        bob.handle
+            .fetch(rid, alice.id, DEFAULT_TIMEOUT, None)
+            .unwrap(),
+        FetchResult::Success { .. }
+    );
+    let repo = bob.storage.repository(rid).unwrap();
+    let issues = issue::Issues::open(&repo, ReadOnly).unwrap();
+    assert!(
+        issues.get(&issue_id).unwrap().is_some(),
+        "Bob did not fetch issue {issue_id}"
+    );
+
+    let repo = bob.storage.repository(rid).unwrap();
+    let alice_remote = repo.remote(&alice.id).unwrap();
+
+    assert_eq!(alice_signed_refs.refs(), alice_remote.refs());
+    assert!(alice_remote.refs().get(&SIGREFS_PARENT).is_none());
+}
+
+#[test]
+fn fetch_emits_canonical_ref_update_partial_glob() {
+    let tmp = tempfile::tempdir().unwrap();
+    let scale = config::scale();
+    let mut alice = Node::init(tmp.path(), config::relay("alice"), 13);
+    let bob = Node::init(tmp.path(), config::relay("bob"), 37);
+
+    let (repo, _) = fixtures::repository(tmp.path());
+    let rid = alice.project_from("acme", "", &repo);
+
+    let mut alice = alice.spawn();
+    let mut bob = bob.spawn();
+    let bob_events = bob.handle.events();
+
+    {
+        let repo = alice.storage.repository(rid).unwrap();
+        let mut identity = radicle::identity::Identity::load_mut(&repo, &alice.signer).unwrap();
+        let doc = repo
+            .identity_doc()
+            .unwrap()
+            .doc
+            .with_edits(|raw| {
+                let crefs = serde_json::json!({
+                    "rules": {
+                        "refs/heads/main*": {
+                            "threshold": 1,
+                            "allow": "delegates"
+                        }
+                    }
+                });
+
+                raw.payload.insert(
+                    radicle::identity::doc::PayloadId::canonical_refs().clone(),
+                    radicle::identity::doc::Payload::from(crefs),
+                );
+            })
+            .unwrap();
+
+        let rev = identity
+            .update(Title::new("Add main* rule").unwrap(), "", &doc)
+            .unwrap();
+        repo.set_identity_head_to(rev).unwrap();
+    }
+
+    bob.handle.seed(rid, Scope::All).unwrap();
+    alice.connect(&bob);
+
+    let result = bob
+        .handle
+        .fetch(rid, alice.id, DEFAULT_TIMEOUT, None)
+        .unwrap();
+    assert!(result.is_success());
+
+    let target_branch: git::fmt::Qualified = git::fmt::qualified!("refs/heads/main-2026q2");
+    alice.commit_to(rid, &target_branch);
+    alice.handle.announce_refs_for(rid, [alice.id]).unwrap();
+
+    bob_events
+        .wait(
+            |e| {
+                matches!(e, Event::CanonicalRefUpdated { refname, .. } if *refname == target_branch)
                     .then_some(())
             },
             time::Duration::from_secs(9 * scale as u64),

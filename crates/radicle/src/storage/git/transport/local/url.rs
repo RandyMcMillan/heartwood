@@ -31,7 +31,7 @@ pub enum UrlError {
 /// A git local transport URL.
 ///
 /// * Used to content-address a repository, eg. when sharing projects.
-/// * Used as a remore url in a git working copy.
+/// * Used as a remote url in a git working copy.
 ///
 /// `rad://<repo>[/<namespace>]`
 ///
@@ -106,7 +106,7 @@ mod test {
     use super::*;
 
     #[test]
-    fn test_url_parse() {
+    fn url_parse() {
         let repo = RepoId::from_canonical("z2w8RArM3gaBXZxXhQUswE3hhLcss").unwrap();
         let namespace =
             Namespace::from_str("z6Mkifeb5NPS6j7JP72kEQEeuqMTpCAVcHsJi1C86jGTzHRi").unwrap();
@@ -123,20 +123,26 @@ mod test {
         assert_eq!(url.repo, repo);
         assert_eq!(url.namespace, Some(namespace));
 
-        assert!(format!("heartwood://{}", repo.canonical())
-            .parse::<Url>()
-            .is_err());
-        assert!(format!("git://{}", repo.canonical())
-            .parse::<Url>()
-            .is_err());
+        assert!(
+            format!("heartwood://{}", repo.canonical())
+                .parse::<Url>()
+                .is_err()
+        );
+        assert!(
+            format!("git://{}", repo.canonical())
+                .parse::<Url>()
+                .is_err()
+        );
         assert!(format!("rad://{namespace}").parse::<Url>().is_err());
-        assert!(format!("rad://{}/{namespace}/fnord", repo.canonical())
-            .parse::<Url>()
-            .is_err());
+        assert!(
+            format!("rad://{}/{namespace}/fnord", repo.canonical())
+                .parse::<Url>()
+                .is_err()
+        );
     }
 
     #[test]
-    fn test_url_to_string() {
+    fn url_to_string() {
         let repo = RepoId::from_canonical("z2w8RArM3gaBXZxXhQUswE3hhLcss").unwrap();
         let namespace =
             Namespace::from_str("z6Mkifeb5NPS6j7JP72kEQEeuqMTpCAVcHsJi1C86jGTzHRi").unwrap();

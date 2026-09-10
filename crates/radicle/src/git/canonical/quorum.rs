@@ -156,7 +156,7 @@ impl CommitQuorum {
     ///
     /// A [`MergeBase`] should be calculated for each, and these should be
     /// recorded using [`CommitQuorum::found_merge_bases`].
-    pub fn next_candidate(&mut self) -> Option<impl Iterator<Item = (Oid, Oid)>> {
+    pub fn next_candidate(&mut self) -> Option<impl Iterator<Item = (Oid, Oid)> + use<>> {
         self.voting.next_candidate()
     }
 
@@ -239,7 +239,7 @@ pub enum CommitQuorumFailure {
 #[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod test {
-    use crate::git::{canonical::MergeBase, Oid};
+    use crate::git::{Oid, canonical::MergeBase};
 
     use super::MergeBases;
 
@@ -269,7 +269,7 @@ mod test {
     }
 
     #[test]
-    fn test_merge_bases() {
+    fn merge_bases() {
         let c0 = commit("f2de534b5e81d7c6e2dcaf58c3dd91573c0a0354");
         let c1 = commit("bfb1a513e420eade90b0e6be64117b861b16ecb5");
         let c2 = commit("8fc5160702365f231c77732a8fa162379e54f57a");

@@ -1,9 +1,10 @@
 # Builds release binaries for Radicle.
-ARG RUST_VERSION="1.85"
-ARG ALPINE_VERSION="3.20"
 
-FROM rust:${RUST_VERSION}-alpine${ALPINE_VERSION} as builder
-LABEL maintainer="Radicle Team <team@radicle.xyz>"
+ARG RUST_VERSION
+ARG ALPINE_VERSION="3.24"
+
+FROM docker.io/rust:${RUST_VERSION}-alpine${ALPINE_VERSION} as builder
+LABEL maintainer="Radicle Team <team@radicle.dev>"
 WORKDIR /src
 COPY . .
 
@@ -16,11 +17,18 @@ ARG GIT_HEAD
 # Copy cargo configuration we're going to use to specify compiler options.
 RUN mkdir -p .cargo && cp build/config.toml .cargo/config.toml
 # Install dependencies.
-RUN apk update && apk add --no-cache git musl-dev xz asciidoctor zig
+RUN apk update && apk add --no-cache \
+    asciidoctor \
+    git \
+    musl-dev \
+    xz \
+    zig=0.16.0-r1
+
 # Build man pages and strip metadata. Removes all comments, since they include
 # non-reproducible information, such as version numbers.
 RUN asciidoctor --doctype manpage --backend manpage --destination-dir . *.1.adoc && \
     find . -maxdepth 1 -type f -name '*.1' -exec sed -i '/^.\\\"/d' '{}' \;
+
 # Add cargo targets.
 RUN rustup target add \
     x86_64-unknown-linux-musl \
@@ -32,8 +40,7 @@ RUN rustup target add \
 # We use Zig as the linker to perform the compilation from a Linux host.
 # Zig is not yet available on Debian, so we download the official binary.
 # Compilation is done via `cargo-zigbuild` which is a wrapper around `zig`.
-RUN cargo install --locked cargo-zigbuild@0.20.0
-
+RUN cargo install --locked cargo-zigbuild@0.23.4
 
 # Parts of the macOS SDK are required to build Radicle, we make these available
 # here. So far only `CoreFoundation` and `Security` frameworks are needed.
@@ -53,7 +60,7 @@ RUN cargo zigbuild --locked --release \
 
 # Now copy the files to a new image without all the intermediary artifacts to
 # save some space.
-FROM alpine:3.20 as packager
+FROM docker.io/alpine:${ALPINE_VERSION} as packager
 
 ARG RADICLE_VERSION
 ARG SOURCE_DATE_EPOCH

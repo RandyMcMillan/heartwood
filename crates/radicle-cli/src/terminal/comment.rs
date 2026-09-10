@@ -1,5 +1,5 @@
-use radicle::cob::thread::{Comment, CommentId};
 use radicle::Profile;
+use radicle::cob::thread::{Comment, CommentId};
 
 use crate::terminal as term;
 use crate::terminal::format::Author;
@@ -11,7 +11,7 @@ pub fn header<T>(
     profile: &Profile,
 ) -> term::hstack::HStack<'static> {
     let author = comment.author();
-    let author = Author::new(&author, profile, false);
+    let author = Author::new(author, profile, false);
     let (alias, nid) = author.labels();
 
     term::hstack::HStack::default()

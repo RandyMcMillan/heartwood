@@ -51,6 +51,7 @@ $ rad id update --title "Add canonical reference rules" --payload xyz.radicle.cr
 ╭────────────────────────────────────────────────────────────────────────╮
 │ Title    Add canonical reference rules                                 │
 │ Revision c3349f07bfe6a82bbeb2989d2de4a918408f9831                      │
+│ Parent   0656c217f917c3e06234771e9ecae53aba5e173e                      │
 │ Blob     85fa09e2de93b825d5231778dbb34143004a4bca                      │
 │ Author   did:key:z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi      │
 │ State    accepted                                                      │
@@ -118,7 +119,7 @@ From rad://z42hL2jL4XNk6K8oHQaSWfMgCL7ji
  * [new tag]         v1.0-hotfix -> v1.0-hotfix
 ```
 
-Since Alice crated a lightweight tag, resolving the reference on Bob's end yields an object of type 'commit'.
+Since Alice created a lightweight tag, resolving the reference on Bob's end yields an object of type 'commit'.
 
 ``` ~bob
 $ git cat-file -t v1.0-hotfix

@@ -1,20 +1,17 @@
-#![allow(clippy::or_fun_call)]
 mod args;
 
 use std::str::FromStr;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 
-use radicle::crypto::ssh;
-use radicle::crypto::ssh::Passphrase;
+use radicle::crypto;
 use radicle::node::Alias;
 use radicle::profile::env;
-use radicle::{profile, Profile};
+use radicle::{Profile, profile};
 
 use crate::terminal as term;
 
 pub use args::Args;
-pub(crate) use args::ABOUT;
 
 pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
     match ctx.profile() {
@@ -24,13 +21,13 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
 }
 
 pub fn init(args: Args) -> anyhow::Result<()> {
-    term::headline("Initializing your radicle 👾 identity");
+    term::headline("Initializing your Radicle 👾 identity");
 
-    if let Ok(version) = radicle::git::version() {
-        if version < radicle::git::VERSION_REQUIRED {
+    if let Ok(version) = crate::git::version() {
+        if version < crate::git::VERSION_REQUIRED {
             term::warning(format!(
                 "Your Git version is unsupported, please upgrade to {} or later",
-                radicle::git::VERSION_REQUIRED,
+                crate::git::VERSION_REQUIRED,
             ));
             term::blank();
         }
@@ -57,19 +54,30 @@ pub fn init(args: Args) -> anyhow::Result<()> {
         term::passphrase_confirm("Enter a passphrase:", env::RAD_PASSPHRASE)?
     };
     let passphrase = passphrase.filter(|passphrase| !passphrase.trim().is_empty());
-    let spinner = term::spinner("Creating your Ed25519 keypair...");
-    let profile = Profile::init(home, alias, passphrase.clone(), env::seed())?;
+    let spinner = term::spinner("Creating your Ed25519 keypair…");
+    let profile = Profile::init(
+        home,
+        alias,
+        passphrase.clone(),
+        env::seed().unwrap_or_else(|| {
+            use radicle::crypto::Seed;
+
+            let mut seed = [0; Seed::BYTES];
+            getrandom::fill(&mut seed).expect("failed get random bytes from the operating system");
+            Seed::new(seed)
+        }),
+    )?;
     let mut agent = true;
     spinner.finish();
 
     if let Some(passphrase) = passphrase {
-        match ssh::agent::Agent::connect() {
+        match crypto::ssh::agent::Agent::connect() {
             Ok(mut agent) => {
-                let mut spinner = term::spinner("Adding your radicle key to ssh-agent...");
+                let mut spinner = term::spinner("Adding your Radicle key to ssh-agent…");
                 if register(&mut agent, &profile, passphrase).is_ok() {
                     spinner.finish();
                 } else {
-                    spinner.message("Could not register radicle key in ssh-agent.");
+                    spinner.message("Could not register Radicle key in ssh-agent.");
                     spinner.warn();
                 }
             }
@@ -124,9 +132,9 @@ pub fn authenticate(args: Args, profile: &Profile) -> anyhow::Result<()> {
 
     // If our key is encrypted, we try to authenticate with SSH Agent and
     // register it; only if it is running.
-    match ssh::agent::Agent::connect() {
+    match crypto::ssh::agent::Agent::connect() {
         Ok(mut agent) => {
-            if agent.request_identities()?.contains(&profile.public_key) {
+            if agent.request_identities()?.contains(profile.id()) {
                 term::success!("Radicle key already in ssh-agent");
                 return Ok(());
             }
@@ -155,15 +163,15 @@ pub fn authenticate(args: Args, profile: &Profile) -> anyhow::Result<()> {
 
     // Try RAD_PASSPHRASE fallback.
     if let Some(passphrase) = profile::env::passphrase() {
-        ssh::keystore::MemorySigner::load(&profile.keystore, Some(passphrase))
+        crypto::SigningKey::load(&profile.keystore, Some(passphrase))
             .map_err(|_| anyhow!("`{}` is invalid", env::RAD_PASSPHRASE))?;
         return Ok(());
     }
 
-    term::print(term::format::dim(
+    term::println(term::format::dim(
         "Nothing to do, ssh-agent is not running.",
     ));
-    term::print(term::format::dim(
+    term::println(term::format::dim(
         "You will be prompted for a passphrase when necessary.",
     ));
 
@@ -172,12 +180,13 @@ pub fn authenticate(args: Args, profile: &Profile) -> anyhow::Result<()> {
 
 /// Register key with ssh-agent.
 pub fn register(
-    agent: &mut ssh::agent::Agent,
+    agent: &mut crypto::ssh::agent::Agent,
     profile: &Profile,
-    passphrase: Passphrase,
+    passphrase: crypto::ssh::Passphrase,
 ) -> anyhow::Result<()> {
-    let secret = profile
-        .keystore
+    let keystore = &profile.keystore;
+    let secret_key_path = keystore.secret_key_path();
+    let secret = keystore
         .secret_key(Some(passphrase))
         .map_err(|e| {
             if e.is_crypto_err() {
@@ -186,9 +195,12 @@ pub fn register(
                 e.into()
             }
         })?
-        .ok_or_else(|| anyhow!("Key not found in {:?}", profile.keystore.secret_key_path()))?;
+        .ok_or_else(|| anyhow!("Key not found in '{}'", secret_key_path.display()))?;
 
-    agent.register(&secret)?;
+    agent.register(
+        &secret,
+        format!("Radicle key loaded from '{}'.", secret_key_path.display()),
+    )?;
 
     Ok(())
 }

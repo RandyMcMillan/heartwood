@@ -1,18 +1,22 @@
-use radicle::cob::thread;
-use radicle::storage::WriteRepository;
 use radicle::Profile;
+use radicle::cob::store::access::WriteAs;
+use radicle::cob::thread;
+use radicle::crypto;
+use radicle::storage::WriteRepository;
 use radicle::{cob, git, issue, storage};
 
 use crate::git::Rev;
 use crate::terminal as term;
-use crate::terminal::patch::Message;
 use crate::terminal::Element as _;
+use crate::terminal::patch::Message;
 
 pub(super) fn comment(
     profile: &Profile,
     repo: &storage::git::Repository,
     issues: &mut issue::Cache<
-        issue::Issues<'_, storage::git::Repository>,
+        '_,
+        storage::git::Repository,
+        WriteAs<'_, impl crypto::Signer>,
         cob::cache::Store<cob::cache::Write>,
     >,
     id: Rev,
@@ -23,14 +27,14 @@ pub(super) fn comment(
     let reply_to = reply_to
         .map(|rev| rev.resolve::<git::Oid>(repo.raw()))
         .transpose()?;
-    let signer = term::signer(profile)?;
     let issue_id = id.resolve::<cob::ObjectId>(&repo.backend)?;
     let mut issue = issues.get_mut(&issue_id)?;
     let (root_comment_id, _) = issue.root();
     let body = prompt_comment(message, issue.thread(), reply_to, None)?;
-    let comment_id = issue.comment(body, reply_to.unwrap_or(*root_comment_id), vec![], &signer)?;
+
+    let comment_id = issue.comment(body, reply_to.unwrap_or(*root_comment_id), vec![])?;
     if quiet {
-        term::print(comment_id);
+        term::println(comment_id);
     } else {
         let comment = issue.thread().comment(&comment_id).unwrap();
         term::comment::widget(&comment_id, comment, profile).print();
@@ -42,7 +46,9 @@ pub(super) fn edit(
     profile: &Profile,
     repo: &storage::git::Repository,
     issues: &mut issue::Cache<
-        issue::Issues<'_, storage::git::Repository>,
+        '_,
+        storage::git::Repository,
+        WriteAs<'_, impl crypto::Signer>,
         cob::cache::Store<cob::cache::Write>,
     >,
     id: Rev,
@@ -50,7 +56,6 @@ pub(super) fn edit(
     comment_id: Rev,
     quiet: bool,
 ) -> Result<(), anyhow::Error> {
-    let signer = term::signer(profile)?;
     let issue_id = id.resolve::<cob::ObjectId>(&repo.backend)?;
     let comment_id = comment_id.resolve(&repo.backend)?;
     let mut issue = issues.get_mut(&issue_id)?;
@@ -64,9 +69,9 @@ pub(super) fn edit(
         comment.reply_to(),
         Some(comment.body()),
     )?;
-    issue.edit_comment(comment_id, body, vec![], &signer)?;
+    issue.edit_comment(comment_id, body, vec![])?;
     if quiet {
-        term::print(comment_id);
+        term::println(comment_id);
     } else {
         let comment = issue.thread().comment(&comment_id).unwrap();
         term::comment::widget(&comment_id, comment, profile).print();

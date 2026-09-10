@@ -4,12 +4,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use crypto::PublicKey;
+
+use crate::crypto::ExtendedSignature;
 pub use crate::git;
 use crate::git::fmt;
 
-use crate::crypto::Verified;
 use crate::identity::doc::{Doc, DocAt, DocError, RawDoc, RepoId};
-use crate::node::device::Device;
 use crate::node::NodeId;
 
 pub use crate::storage::*;
@@ -22,7 +23,7 @@ pub struct MockStorage {
     pub info: crate::git::UserInfo,
 
     /// All refs keyed by RID.
-    /// Each value is a map of refs keyed by node Id (public key).
+    /// Each value is a map of refs keyed by node ID (public key).
     pub repos: HashMap<RepoId, MockRepository>,
 }
 
@@ -88,7 +89,7 @@ impl ReadStorage for MockStorage {
         self.repos
             .get(&rid)
             .ok_or_else(|| {
-                RepositoryError::Storage(Error::Io(io::Error::from(io::ErrorKind::NotFound)))
+                RepositoryError::from(Error::Io(io::Error::from(io::ErrorKind::NotFound)))
             })
             .cloned()
     }
@@ -99,9 +100,9 @@ impl ReadStorage for MockStorage {
             .iter()
             .map(|(rid, r)| RepositoryInfo {
                 rid: *rid,
-                head: r.head().unwrap().1,
+                head: Some(r.head().unwrap().1),
                 doc: r.doc.clone().into(),
-                refs: None,
+                refs: SignedRefsInfo::None,
                 synced_at: None,
             })
             .collect())
@@ -114,7 +115,7 @@ impl WriteStorage for MockStorage {
     fn repository_mut(&self, rid: RepoId) -> Result<Self::RepositoryMut, RepositoryError> {
         self.repos
             .get(&rid)
-            .ok_or(RepositoryError::Storage(Error::Io(io::Error::from(
+            .ok_or(RepositoryError::from(Error::Io(io::Error::from(
                 io::ErrorKind::NotFound,
             ))))
             .cloned()
@@ -133,7 +134,7 @@ impl WriteStorage for MockStorage {
 pub struct MockRepository {
     pub id: RepoId,
     pub doc: DocAt,
-    pub remotes: HashMap<NodeId, refs::SignedRefsAt>,
+    pub remotes: HashMap<NodeId, refs::SignedRefs>,
 }
 
 impl MockRepository {
@@ -152,28 +153,43 @@ impl MockRepository {
     }
 }
 
+impl self::refs::sigrefs::git::reference::Reader for MockRepository {
+    fn find_reference(
+        &self,
+        reference: &git::fmt::Namespaced,
+    ) -> Result<Option<Oid>, refs::sigrefs::git::reference::error::FindReference> {
+        use refs::sigrefs::git::reference::error::FindReference;
+        let ns = reference.namespace();
+
+        let remote: PublicKey = ns.as_str().parse().map_err(FindReference::other)?;
+        let reference = reference.strip_namespace();
+
+        match self.remotes.get(&remote) {
+            None => Ok(None),
+            Some(refs) => {
+                if reference == *refs::SIGREFS_BRANCH {
+                    Ok(Some(refs.at))
+                } else {
+                    Ok(refs.get(&reference))
+                }
+            }
+        }
+    }
+}
+
 impl RemoteRepository for MockRepository {
-    fn remote(&self, id: &RemoteId) -> Result<Remote<Verified>, refs::Error> {
+    fn remote(&self, id: &RemoteId) -> Result<Remote, refs::Error> {
         self.remotes
             .get(id)
-            .map(|refs| Remote {
-                refs: refs.sigrefs.clone(),
-            })
+            .map(|refs| Remote { refs: refs.clone() })
             .ok_or(refs::Error::InvalidRef)
     }
 
-    fn remotes(&self) -> Result<Remotes<Verified>, refs::Error> {
+    fn remotes(&self) -> Result<Remotes, refs::Error> {
         Ok(self
             .remotes
             .iter()
-            .map(|(id, refs)| {
-                (
-                    *id,
-                    Remote {
-                        refs: refs.sigrefs.clone(),
-                    },
-                )
-            })
+            .map(|(id, refs)| (*id, Remote { refs: refs.clone() }))
             .collect())
     }
 
@@ -182,7 +198,7 @@ impl RemoteRepository for MockRepository {
             .remotes
             .values()
             .map(|s| refs::RefsAt {
-                remote: s.id,
+                remote: s.id(),
                 at: s.at,
             })
             .collect())
@@ -190,7 +206,7 @@ impl RemoteRepository for MockRepository {
 }
 
 impl ValidateRepository for MockRepository {
-    fn validate_remote(&self, _remote: &Remote<Verified>) -> Result<Validations, Error> {
+    fn validate_remote(&self, _remote: &Remote) -> Result<Validations, Error> {
         Ok(Validations::default())
     }
 }
@@ -232,7 +248,7 @@ impl ReadRepository for MockRepository {
         Ok(self
             .remotes
             .values()
-            .any(|sigrefs| sigrefs.at == oid || sigrefs.refs.values().any(|oid_| *oid_ == oid)))
+            .any(|sigrefs| sigrefs.at == oid || sigrefs.values().any(|oid_| *oid_ == oid)))
     }
 
     fn is_ancestor_of(&self, _ancestor: Oid, _head: Oid) -> Result<bool, crate::git::raw::Error> {
@@ -276,7 +292,7 @@ impl ReadRepository for MockRepository {
         if reference == &*refs::SIGREFS_BRANCH {
             Ok(refs.at)
         } else {
-            refs.sigrefs.get(reference).ok_or_else(not_found)
+            refs.get(reference).ok_or_else(not_found)
         }
     }
 
@@ -311,10 +327,6 @@ impl ReadRepository for MockRepository {
         Ok(self.doc.commit)
     }
 
-    fn identity_root_of(&self, _remote: &RemoteId) -> Result<Oid, RepositoryError> {
-        Ok(self.doc.commit)
-    }
-
     fn canonical_identity_head(&self) -> Result<Oid, RepositoryError> {
         Ok(self.doc.commit)
     }
@@ -329,7 +341,20 @@ impl WriteRepository for MockRepository {
         todo!()
     }
 
-    fn set_head(&self) -> Result<SetHead, RepositoryError> {
+    fn set_symbolic_ref<Name, Target>(
+        &self,
+        _name: &Name,
+        _target: &Target,
+        _message: &str,
+    ) -> Result<(), RepositoryError>
+    where
+        Name: AsRef<fmt::RefStr>,
+        Target: AsRef<fmt::RefStr>,
+    {
+        todo!()
+    }
+
+    fn set_default_branch_to_canonical_head(&self) -> Result<SetHead, RepositoryError> {
         todo!()
     }
 
@@ -351,10 +376,17 @@ impl WriteRepository for MockRepository {
 }
 
 impl SignRepository for MockRepository {
-    fn sign_refs<G: crypto::signature::Signer<crypto::Signature>>(
+    fn sign_refs(
         &self,
-        _signer: &Device<G>,
-    ) -> Result<crate::storage::refs::SignedRefs<Verified>, RepositoryError> {
+        _signer: &impl crypto::Signer,
+    ) -> Result<crate::storage::refs::SignedRefs, RepositoryError> {
+        todo!()
+    }
+
+    fn force_sign_refs(
+        &self,
+        _signer: &impl crypto::Signer,
+    ) -> Result<refs::SignedRefs, RepositoryError> {
         todo!()
     }
 }
@@ -412,21 +444,24 @@ impl radicle_cob::change::Storage for MockRepository {
     type LoadError = radicle_cob::git::change::error::Load;
     type ObjectId = Oid;
     type Parent = Oid;
-    type Signatures = radicle_cob::signatures::ExtendedSignature;
 
-    fn store<G>(
+    type PublicKey = crypto::PublicKey;
+    type Signature = crypto::Signature;
+
+    fn store(
         &self,
         _resource: Option<Self::Parent>,
         _related: Vec<Self::Parent>,
-        _signer: &G,
+        _signer: &impl crypto::Signer,
         _template: radicle_cob::change::Template<Self::ObjectId>,
     ) -> Result<
-        radicle_cob::change::store::Entry<Self::Parent, Self::ObjectId, Self::Signatures>,
+        radicle_cob::change::store::Entry<
+            Self::Parent,
+            Self::ObjectId,
+            ExtendedSignature<Self::PublicKey, Self::Signature>,
+        >,
         Self::StoreError,
-    >
-    where
-        G: radicle_crypto::signature::Signer<Self::Signatures>,
-    {
+    > {
         todo!()
     }
 
@@ -434,7 +469,11 @@ impl radicle_cob::change::Storage for MockRepository {
         &self,
         _id: Self::ObjectId,
     ) -> Result<
-        radicle_cob::change::store::Entry<Self::Parent, Self::ObjectId, Self::Signatures>,
+        radicle_cob::change::store::Entry<
+            Self::Parent,
+            Self::ObjectId,
+            ExtendedSignature<Self::PublicKey, Self::Signature>,
+        >,
         Self::LoadError,
     > {
         todo!()

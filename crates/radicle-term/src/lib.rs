@@ -1,3 +1,8 @@
+// Prevent use of `println!` and `print!` which panic on broken pipes.
+// Use `crate::io::println` or `term::io::print` instead.
+// See: https://github.com/rust-lang/rust/issues/62569
+#![deny(clippy::print_stdout)]
+
 pub mod ansi;
 pub mod cell;
 pub mod colors;
@@ -16,16 +21,16 @@ use std::fmt;
 use std::io::IsTerminal;
 
 pub use ansi::Color;
-pub use ansi::{paint, Filled, Paint, Style, TerminalFile};
+pub use ansi::{Filled, Paint, Style, TerminalFile, paint};
 pub use editor::Editor;
 pub use element::{Constraint, Element, Line, Size};
 pub use hstack::HStack;
 pub use inquire::ui::Styled;
 pub use io::*;
-pub use label::{label, Label};
-pub use spinner::{spinner, spinner_to, Spinner};
+pub use label::{Label, label};
+pub use spinner::{Spinner, spinner, spinner_to};
 pub use table::{Table, TableOptions};
-pub use textarea::{textarea, TextArea};
+pub use textarea::{TextArea, textarea};
 pub use vstack::{VStack, VStackOptions};
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Default)]
@@ -49,11 +54,7 @@ impl Interactive {
     }
 
     pub fn confirm(&self, prompt: impl fmt::Display) -> bool {
-        if self.yes() {
-            confirm(prompt)
-        } else {
-            true
-        }
+        if self.yes() { confirm(prompt) } else { true }
     }
 }
 
@@ -68,11 +69,7 @@ impl From<Interactive> for bool {
 
 impl From<bool> for Interactive {
     fn from(b: bool) -> Self {
-        if b {
-            Interactive::Yes
-        } else {
-            Interactive::No
-        }
+        if b { Interactive::Yes } else { Interactive::No }
     }
 }
 

@@ -1,14 +1,17 @@
-#![allow(clippy::collapsible_else_if)]
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync;
-use std::{env, ffi, fs, io, mem};
+use std::{env, fs, io, mem};
 
 use snapbox::cmd::{Command, OutputAssert};
-use snapbox::{Assert, Substitutions};
+use snapbox::{Assert, Redactions};
 use thiserror::Error;
+
+const CARGO_TARGET_DIR_DIRNAME: &str = "target";
+
+const CARGO_PROFILE: &str = "debug";
 
 /// Used to ensure the build task is only run once.
 static BUILD: sync::Once = sync::Once::new();
@@ -26,7 +29,7 @@ pub enum Error {
     #[error("i/o: {0}")]
     Io(#[from] io::Error),
     #[error("snapbox: {0}")]
-    Snapbox(#[from] snapbox::Error),
+    Snapbox(#[from] snapbox::assert::Error),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -65,6 +68,8 @@ pub struct Assertion {
     expected: String,
     /// Expected exit status.
     exit: ExitStatus,
+    /// Line number in the test file where this assertion is defined.
+    line: usize,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Clone)]
@@ -163,9 +168,7 @@ pub struct TestFormula {
     /// Tests to run.
     tests: Vec<Test>,
     /// Output substitutions.
-    subs: Substitutions,
-    /// Binaries path.
-    bins: Vec<PathBuf>,
+    subs: Redactions,
 }
 
 impl TestFormula {
@@ -175,40 +178,19 @@ impl TestFormula {
             env: HashMap::new(),
             homes: HashMap::new(),
             tests: Vec::new(),
-            subs: Substitutions::new(),
-            bins: env::var("PATH")
-                .map(|env_path| {
-                    let mut bins: Vec<PathBuf> = env_path.split(':').map(PathBuf::from).collect();
-                    // Add current working directory to `$PATH`,
-                    // this makes it more convenient to execute scripts during testing.
-                    bins.push(cwd);
-                    bins
-                })
-                .unwrap_or_default(),
+            subs: Redactions::new(),
         }
     }
 
     pub fn build(&mut self, binaries: &[(&str, &str)]) -> &mut Self {
-        let manifest = env::var("CARGO_MANIFEST_DIR").expect(
-            "TestFormula::build: cannot build binaries: variable `CARGO_MANIFEST_DIR` is not set",
-        );
-        let profile = if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "release"
-        };
-        let target_dir = env::var("CARGO_TARGET_DIR").unwrap_or("target".to_string());
-        let manifest = Path::new(manifest.as_str());
-        let bins = manifest.join(&target_dir).join(profile);
-
-        // Add the target dir to the beginning of the list we will use as `PATH`.
-        self.bins.insert(0, bins);
-
-        // We don't need to re-build everytime the `build` function is called. Once is enough.
+        // We don't need to re-build every time the `build` function is called. Once is enough.
         BUILD.call_once(|| {
             use escargot::format::Message;
-            use radicle::logger::env_level;
-            use radicle::logger::test::Logger;
+            use radicle_log::env_level;
+            use radicle_log::test::Logger;
+            use radicle_term::Paint;
+
+            Paint::force(true);
 
             let level = env_level().unwrap_or(log::Level::Debug);
             let logger = Box::new(Logger::new(level));
@@ -222,18 +204,18 @@ impl TestFormula {
                 let results = escargot::CargoBuild::new()
                     .package(package)
                     .bin(binary)
-                    .manifest_path(manifest.join("Cargo.toml"))
-                    .target_dir(&target_dir)
+                    .manifest_path(cargo_manifest_dir().join("Cargo.toml"))
+                    .target_dir(cargo_target_dir())
                     .exec()
                     .unwrap();
 
                 for result in results {
                     match result {
                         Ok(msg) => {
-                            if let Ok(Message::CompilerArtifact(a)) = msg.decode() {
-                                if let Some(e) = a.executable {
-                                    log::debug!(target: "test", "Built {}", e.display());
-                                }
+                            if let Ok(Message::CompilerArtifact(a)) = msg.decode()
+                                && let Some(e) = a.executable
+                            {
+                                log::debug!(target: "test", "Built {}", e.display());
                             }
                         }
                         Err(e) => {
@@ -298,7 +280,7 @@ impl TestFormula {
         let mut fenced = false; // Whether we're inside a fenced code block.
         let mut file: Option<(PathBuf, String)> = None; // Path and content of file created by this test block.
 
-        for line in r.lines() {
+        for (row, line) in r.lines().enumerate() {
             let line = line?;
 
             if line.starts_with("```") {
@@ -347,7 +329,13 @@ impl TestFormula {
                     content.push('\n');
                 } else if let Some(line) = line.strip_prefix('$') {
                     let line = line.trim();
+
+                    #[cfg(unix)]
                     let parts = shlex::split(line).ok_or(Error::Parse)?;
+
+                    #[cfg(windows)]
+                    let parts = winsplit::split(line);
+
                     let (cmd, args) = parts.split_first().ok_or(Error::Parse)?;
 
                     test.assertions.push(Assertion {
@@ -360,6 +348,7 @@ impl TestFormula {
                         } else {
                             ExitStatus::Success
                         },
+                        line: row + 1,
                     });
                 } else if let Some(a) = test.assertions.last_mut() {
                     a.expected.push_str(line.as_str());
@@ -380,7 +369,7 @@ impl TestFormula {
         value: &'static str,
         other: impl Into<Cow<'static, str>>,
     ) -> Result<&mut Self, Error> {
-        self.subs.insert(value, other)?;
+        self.subs.insert(value, other.into())?;
         Ok(self)
     }
 
@@ -410,11 +399,12 @@ impl TestFormula {
     }
 
     pub fn run(&mut self) -> Result<bool, io::Error> {
-        let assert = Assert::new().substitutions(self.subs.clone());
+        let assert = Assert::new()
+            .normalize_paths(false)
+            .redact_with(self.subs.clone());
         let mut runner = TestRunner::new(self);
 
         fs::create_dir_all(&self.cwd)?;
-        log::debug!(target: "test", "Using PATH {:?}", self.bins);
 
         // For each code block.
         for test in &self.tests {
@@ -422,21 +412,15 @@ impl TestFormula {
 
             // For each command.
             for (i, assertion) in test.assertions.iter().enumerate() {
-                // Expand environment variables.
-                let mut args = assertion.args.clone();
-                for arg in &mut args {
-                    for (k, v) in run.envs() {
-                        *arg = arg.replace(format!("${k}").as_str(), &v);
-                    }
-                }
-                let path = assertion
+                let location = assertion
                     .path
                     .file_name()
                     .map(|f| f.to_string_lossy().to_string())
+                    .map(|f| f.strip_suffix(".md").unwrap_or(&f).to_owned())
+                    .map(|f| f + ":" + assertion.line.to_string().as_str())
                     .unwrap_or(String::from("<none>"));
-                let cmd = if assertion.command == "rad" {
-                    snapbox::cmd::cargo_bin("rad")
-                } else if assertion.command == "cd" {
+
+                if assertion.command == "cd" {
                     let arg = assertion.args.first().unwrap();
                     let dir: PathBuf = arg.into();
                     let dir = run.path().join(dir);
@@ -444,7 +428,7 @@ impl TestFormula {
                     // TODO: Add support for `..` and `/`
                     // TODO: Error if more than one args are given.
 
-                    log::debug!(target: "test", "{path}: Running `cd {}`..", dir.display());
+                    log::debug!(target: "test", "{location}: `cd {}`..", dir.display());
 
                     if !dir.exists() {
                         return Err(io::Error::new(
@@ -455,13 +439,18 @@ impl TestFormula {
                     run.cd(dir);
 
                     continue;
-                } else {
-                    PathBuf::from(&assertion.command)
-                };
-                log::debug!(target: "test", "{path}: Running `{}` with {:?} in `{}`..", cmd.display(), assertion.args, run.path().display());
+                }
+
+                // Expand environment variables.
+                let mut args = assertion.args.clone();
+                for arg in &mut args {
+                    for (k, v) in run.envs() {
+                        *arg = arg.replace(format!("${k}").as_str(), &v);
+                    }
+                }
 
                 if !run.path().exists() {
-                    log::warn!(target: "test", "{path}: Directory {} does not exist. Creating..", run.path().display());
+                    log::warn!(target: "test", "{location}: Directory {} does not exist. Creating..", run.path().display());
                     fs::create_dir_all(run.path())?;
                 }
 
@@ -475,32 +464,44 @@ impl TestFormula {
                     vec![]
                 };
 
-                let bins = self
-                    .bins
-                    .iter()
-                    .map(|p| p.as_os_str())
-                    .collect::<Vec<_>>()
-                    .join(ffi::OsStr::new(":"));
-                let result = Command::new(cmd.clone())
+                let bins = std::env::join_paths(bins(self.cwd.clone())).unwrap();
+
+                let command = Command::new(assertion.command.clone())
                     .env_clear()
                     .env("PATH", &bins)
                     .env("RUST_BACKTRACE", "1")
                     .envs(jj_envs)
                     .envs(run.envs())
                     .current_dir(run.path())
-                    .args(args)
-                    .with_assert(assert.clone())
-                    .output();
+                    .args(args.clone())
+                    .with_assert(assert.clone());
 
-                match result {
+                log::debug!(target: "test", "{location}: `{} {}` @ {}", assertion.command, args.join(" "), run.path().display());
+                log::trace!(target: "test", "{location}: {}", run.envs().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join(", "));
+                log::logger().flush();
+
+                // Even though it would be possible to use `Command::assert` to directly obtain
+                // `OutputAssert`, we use `Command::output` to be able to handle `io::ErrorKind::NotFound`
+                // separately and provide a more helpful error message in that case.
+                match command.output() {
                     Ok(output) => {
                         let assert = OutputAssert::new(output).with_assert(assert.clone());
                         let expected = Self::map_spaced_brackets(&assertion.expected);
 
+                        let expected = {
+                            #[cfg(windows)]
+                            const EXE: &str = ".exe";
+
+                            #[cfg(unix)]
+                            const EXE: &str = "";
+
+                            expected.replace("[EXE]", EXE)
+                        };
+
                         let matches = if test.stderr {
-                            assert.stderr_matches(&expected)
+                            assert.stderr_eq(&expected)
                         } else {
-                            assert.stdout_matches(&expected)
+                            assert.stdout_eq(&expected)
                         };
                         match assertion.exit {
                             ExitStatus::Success => {
@@ -513,11 +514,11 @@ impl TestFormula {
                     }
                     Err(err) => {
                         if err.kind() == io::ErrorKind::NotFound {
-                            log::error!(target: "test", "{path}: Command `{}` does not exist..", cmd.display());
+                            log::error!(target: "test", "{location}: Command `{}` does not exist..", assertion.command);
                         }
                         return Err(io::Error::new(
                             err.kind(),
-                            format!("{path}: {err}: `{}`", cmd.display()),
+                            format!("{location}: {err}: `{}`", assertion.command),
                         ));
                     }
                 }
@@ -528,6 +529,46 @@ impl TestFormula {
     }
 }
 
+fn cargo_manifest_dir() -> PathBuf {
+    env::var("CARGO_MANIFEST_DIR").map(PathBuf::from).unwrap()
+}
+
+fn cargo_target_dir() -> PathBuf {
+    env::var("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or(cargo_manifest_dir().join(CARGO_TARGET_DIR_DIRNAME))
+}
+
+/// Get the list of binary paths to use as `$PATH` for the tests,
+/// starting with the current working directory.
+fn bins(cwd: PathBuf) -> Vec<PathBuf> {
+    let mut bins: Vec<PathBuf> = Vec::new();
+
+    // Add current working directory to `$PATH`,
+    // this makes it more convenient to execute scripts during testing.
+    bins.push(cwd);
+
+    bins.push(cargo_target_dir().join(CARGO_PROFILE));
+
+    // Add the "real" `$PATH`.
+    if let Ok(path) = env::var("PATH") {
+        bins.extend(env::split_paths(&path));
+    }
+
+    #[cfg(windows)]
+    {
+        // Radicle CLI tests rely on various Unix coreutils
+        // (such as `ls` and `touch`) being available.
+        // On Windows, it is very likely that we can find them in the
+        // following location.
+        // Note that adding this path to the end of `$PATH` causes
+        // no harm, even if the directory does not exist.
+        bins.push(PathBuf::from(r#"C:\Program Files\Git\usr\bin"#));
+    }
+
+    bins
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,7 +576,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
-    fn test_parse() {
+    fn parse() {
         let input = r#"
 Let's try to track @dave and @sean:
 ``` RAD_HINT=true
@@ -568,22 +609,14 @@ $ rad sync
             homes: HashMap::new(),
             cwd: cwd.clone(),
             env: HashMap::new(),
-            subs: Substitutions::new(),
-            bins: {
-                let mut bins: Vec<_> = env::var("PATH")
-                    .unwrap_or_default()
-                    .split(':')
-                    .map(PathBuf::from)
-                    .collect();
-                bins.push(cwd);
-                bins
-            },
+            subs: Redactions::new(),
             tests: vec![
                 Test {
                     context: vec![String::from("Let's try to track @dave and @sean:")],
                     home: None,
                     assertions: vec![
                         Assertion {
+                            line: 3,
                             path: path.clone(),
                             command: String::from("rad"),
                             args: vec![String::from("track"), String::from("@dave")],
@@ -593,6 +626,7 @@ $ rad sync
                             exit: ExitStatus::Success,
                         },
                         Assertion {
+                            line: 7,
                             path: path.clone(),
                             command: String::from("rad"),
                             args: vec![String::from("track"), String::from("@sean")],
@@ -612,6 +646,7 @@ $ rad sync
                     context: vec![String::from("Super, now let's move on to the next step.")],
                     home: Some("alice".to_owned()),
                     assertions: vec![Assertion {
+                        line: 13,
                         path: path.clone(),
                         command: String::from("rad"),
                         args: vec![String::from("sync")],
@@ -629,7 +664,7 @@ $ rad sync
     }
 
     #[test]
-    fn test_run() {
+    fn run() {
         let input = r#"
 Running a simple command such as `head`:
 ```
@@ -653,7 +688,7 @@ name = "radicle-cli-test"
     }
 
     #[test]
-    fn test_example_spaced_brackets() {
+    fn example_spaced_brackets() {
         let input = r#"
 Running a simple command such as `head`:
 ```

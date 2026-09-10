@@ -1,33 +1,31 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 use std::ops::RangeBounds;
 use std::str::FromStr;
 use std::{iter, net};
 
-use crypto::test::signer::MockSigner;
-use crypto::{PublicKey, Unverified};
-use cyphernet::addr::tor::OnionAddrV3;
-use cyphernet::EcPk;
+use crypto::PublicKey;
+#[cfg(feature = "i2p")]
+use cyphernet::addr::i2p::I2pAddr;
+#[cfg(feature = "tor")]
+use cyphernet::{EcPk, addr::tor::OnionAddrV3};
 use qcheck::Arbitrary;
 
-use crate::collections::RandomMap;
 use crate::identity::doc::Visibility;
 use crate::identity::project::ProjectName;
 use crate::identity::{
+    Did,
     doc::{Doc, DocAt, RawDoc, RepoId},
     project::Project,
-    Did,
 };
 use crate::node::address::{AddressType, Source};
 use crate::node::{Address, Alias, KnownAddress, Timestamp, UserAgent};
 use crate::storage;
-use crate::storage::refs::{Refs, RefsAt, SignedRefs};
 use crate::test::storage::{MockRepository, MockStorage};
 use crate::{cob, git};
 
 pub fn oid() -> storage::Oid {
-    let oid_bytes: [u8; 20] = gen(1);
-    storage::Oid::from_sha1(oid_bytes)
+    r#gen(1)
 }
 
 pub fn entry_id() -> cob::EntryId {
@@ -67,10 +65,18 @@ pub fn vec<T: Eq + Arbitrary>(size: usize) -> Vec<T> {
     vec
 }
 
+fn vec_distinct<T: Eq + Hash + Arbitrary>(range: impl RangeBounds<usize>) -> Vec<T> {
+    set(range).into_iter().collect::<Vec<_>>()
+}
+
+pub fn array_distinct<const N: usize, T: std::fmt::Debug + Eq + Hash + Arbitrary>() -> [T; N] {
+    vec_distinct(N..=N).try_into().unwrap()
+}
+
 pub fn nonempty_storage(size: usize) -> MockStorage {
-    let mut storage = gen::<MockStorage>(size);
+    let mut storage = r#gen::<MockStorage>(size);
     for _ in 0..size {
-        let doc = gen::<DocAt>(1);
+        let doc = r#gen::<DocAt>(1);
         let id = RepoId::from(doc.blob);
         storage.repos.insert(
             id,
@@ -89,33 +95,32 @@ pub fn nonempty_storage(size: usize) -> MockStorage {
 pub fn alphanumeric(size: usize) -> String {
     let mut s = String::with_capacity(size);
     for _ in 0..size {
-        let choice = gen::<u8>(size).clamp(0, 3);
+        let choice = r#gen::<u8>(size).clamp(0, 3);
         let c = match choice {
             // Generate A-Z
-            0 => gen::<u8>(size).clamp(0x41, 0x5A),
+            0 => r#gen::<u8>(size).clamp(0x41, 0x5A),
             // Generate a-z
-            1 => gen::<u8>(size).clamp(0x61, 0x7A),
+            1 => r#gen::<u8>(size).clamp(0x61, 0x7A),
             // Generate 0-9
-            _ => gen::<u8>(size).clamp(0x30, 0x39),
+            _ => r#gen::<u8>(size).clamp(0x30, 0x39),
         };
         s.push(char::from(c));
     }
     s
 }
 
-pub fn gen<T: Arbitrary>(size: usize) -> T {
-    let mut gen = qcheck::Gen::new(size);
+pub fn r#gen<T: Arbitrary>(size: usize) -> T {
+    let mut r#gen = qcheck::Gen::new(size);
 
-    T::arbitrary(&mut gen)
+    T::arbitrary(&mut r#gen)
 }
 
-impl Arbitrary for storage::Remotes<crypto::Unverified> {
-    fn arbitrary(g: &mut qcheck::Gen) -> Self {
-        let remotes: RandomMap<storage::RemoteId, storage::Remote<crypto::Unverified>> =
-            Arbitrary::arbitrary(g);
-
-        storage::Remotes::new(remotes)
-    }
+pub fn with_gen<T, F>(size: usize, f: F) -> T
+where
+    F: FnOnce(&mut qcheck::Gen) -> T,
+{
+    let mut r#gen = qcheck::Gen::new(size);
+    f(&mut r#gen)
 }
 
 impl Arbitrary for Did {
@@ -169,11 +174,8 @@ impl Arbitrary for RawDoc {
 
 impl Arbitrary for Doc {
     fn arbitrary(g: &mut qcheck::Gen) -> Self {
-        let mut rng = fastrand::Rng::with_seed(u64::arbitrary(g));
         let project = Project::arbitrary(g);
-        let delegates = iter::repeat_with(|| Did::arbitrary(g))
-            .take(rng.usize(1..6))
-            .collect::<Vec<_>>();
+        let delegates = vec_distinct::<Did>(1..6);
         let threshold = delegates.len() / 2 + 1;
         let visibility = Visibility::arbitrary(g);
         let doc = RawDoc::new(project, delegates, threshold, visibility);
@@ -194,56 +196,6 @@ impl Arbitrary for DocAt {
     }
 }
 
-impl Arbitrary for SignedRefs<Unverified> {
-    fn arbitrary(g: &mut qcheck::Gen) -> Self {
-        let bytes: [u8; 64] = Arbitrary::arbitrary(g);
-        let signature = crypto::Signature::from(bytes);
-        let author = PublicKey::arbitrary(g);
-        let refs = Refs::arbitrary(g);
-
-        Self::new(refs, author, signature)
-    }
-}
-
-impl Arbitrary for Refs {
-    fn arbitrary(g: &mut qcheck::Gen) -> Self {
-        let mut refs: BTreeMap<git::fmt::RefString, storage::Oid> = BTreeMap::new();
-        let mut bytes: [u8; 20] = [0; 20];
-        let names = &[
-            "heads/master",
-            "heads/feature/1",
-            "heads/feature/2",
-            "heads/feature/3",
-            "rad/id",
-            "tags/v1.0",
-            "tags/v2.0",
-            "notes/1",
-        ];
-
-        for _ in 0..g.size().min(names.len()) {
-            if let Some(name) = g.choose(names) {
-                for byte in &mut bytes {
-                    *byte = u8::arbitrary(g);
-                }
-                let oid = storage::Oid::from_sha1(bytes);
-                let name = git::fmt::RefString::try_from(*name).unwrap();
-
-                refs.insert(name, oid);
-            }
-        }
-        Self::from(refs)
-    }
-}
-
-impl Arbitrary for RefsAt {
-    fn arbitrary(g: &mut qcheck::Gen) -> Self {
-        Self {
-            remote: PublicKey::arbitrary(g),
-            at: oid(),
-        }
-    }
-}
-
 impl Arbitrary for MockStorage {
     fn arbitrary(g: &mut qcheck::Gen) -> Self {
         let inventory = Arbitrary::arbitrary(g);
@@ -260,28 +212,18 @@ impl Arbitrary for MockRepository {
     }
 }
 
-impl Arbitrary for storage::Remote<crypto::Unverified> {
-    fn arbitrary(g: &mut qcheck::Gen) -> Self {
-        let refs = Refs::arbitrary(g);
-        let signer = MockSigner::arbitrary(g);
-        let signed = refs.signed(&signer.into()).unwrap();
-
-        storage::Remote::<crypto::Unverified>::new(signed)
-    }
-}
-
-impl Arbitrary for RepoId {
-    fn arbitrary(g: &mut qcheck::Gen) -> Self {
-        let bytes = <[u8; 20]>::arbitrary(g);
-        let oid = crate::git::Oid::from_sha1(bytes);
-
-        RepoId::from(oid)
-    }
-}
-
 impl Arbitrary for AddressType {
     fn arbitrary(g: &mut qcheck::Gen) -> Self {
-        let t = *g.choose(&[1, 2, 3, 4]).unwrap() as u8;
+        #[allow(unused_mut)]
+        let mut types = vec![1, 2, 3];
+
+        #[cfg(feature = "tor")]
+        types.push(4);
+
+        #[cfg(feature = "i2p")]
+        types.push(5);
+
+        let t = *g.choose(&types).unwrap() as u8;
 
         AddressType::try_from(t).unwrap()
     }
@@ -302,12 +244,44 @@ impl Arbitrary for Address {
                     .unwrap()
                     .to_string(),
             ),
+            #[cfg(feature = "tor")]
             AddressType::Onion => {
                 let pk = PublicKey::arbitrary(g);
                 let addr = OnionAddrV3::from(
-                    cyphernet::ed25519::PublicKey::from_pk_compressed(**pk).unwrap(),
+                    cyphernet::ed25519::PublicKey::from_pk_compressed(pk.into_inner().into())
+                        .unwrap(),
                 );
                 cyphernet::addr::HostName::Tor(addr)
+            }
+            #[cfg(feature = "i2p")]
+            AddressType::I2p => {
+                let address = if bool::arbitrary(g) {
+                    let name: String = iter::repeat_with(|| {
+                        char::from(
+                            // Base32 alphabet from RFC 4648.
+                            *g.choose(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+                                .expect("alphabet is non-empty"),
+                        )
+                    })
+                    .take(56)
+                    .collect();
+
+                    name + ".b32"
+                } else {
+                    g.choose(&["iris.radicle.example", "rosa.radicle.example"])
+                        .unwrap()
+                        .to_string()
+                };
+
+                let suffix = if bool::arbitrary(g) {
+                    ".i2p"
+                } else {
+                    ".i2p.alt"
+                };
+
+                let address = address + suffix;
+
+                cyphernet::addr::HostName::I2p(I2pAddr::from_str(&address).unwrap())
             }
         };
 
@@ -343,8 +317,65 @@ impl Arbitrary for Timestamp {
 impl Arbitrary for UserAgent {
     fn arbitrary(g: &mut qcheck::Gen) -> Self {
         UserAgent::from_str(
-            format!("/radicle:1.{}.{}/", u8::arbitrary(g), u8::arbitrary(g)).as_str(),
+            format!(
+                "/radicle:1.{}.{}/fake/arbitrary/",
+                u8::arbitrary(g),
+                u8::arbitrary(g)
+            )
+            .as_str(),
         )
         .unwrap()
+    }
+}
+
+/// Newtype wrapper around [`Vec`] to keep the [`Arbitrary`] implementation
+/// bounded to a smaller size.
+#[derive(Clone, Debug)]
+pub struct BoundedVec<T, const N: usize> {
+    inner: Vec<T>,
+}
+
+impl<T, const N: usize> BoundedVec<T, N> {
+    pub fn to_vec(self) -> Vec<T> {
+        self.inner
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
+impl<T, const N: usize> IntoIterator for BoundedVec<T, N> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.into_iter()
+    }
+}
+
+impl<'a, T, const N: usize> IntoIterator for &'a BoundedVec<T, N> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.iter()
+    }
+}
+
+impl<T: qcheck::Arbitrary, const N: usize> qcheck::Arbitrary for BoundedVec<T, N> {
+    fn arbitrary(g: &mut qcheck::Gen) -> Self {
+        let size = usize::arbitrary(g) % N;
+        Self {
+            inner: (0..size).map(|_| T::arbitrary(g)).collect(),
+        }
+    }
+
+    fn shrink(&self) -> Box<dyn Iterator<Item = Self>> {
+        Box::new(self.inner.shrink().map(|inner| Self { inner }))
     }
 }

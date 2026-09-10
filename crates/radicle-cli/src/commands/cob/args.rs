@@ -39,7 +39,7 @@ pub(super) enum Command {
 
     /// Print a log of all raw operations on a COB
     Log {
-        /// Tepository ID of the repository to operate on
+        /// Repository ID of the repository to operate on
         #[arg(long, short, value_name = "RID")]
         repo: RepoId,
 
@@ -204,16 +204,13 @@ where
 {
     // `clap` ensures we have 2 values per option occurrence,
     // so we can chunk the aggregated slice exactly.
-    let chunks = values.chunks_exact(2);
+    let (chunks, remainder) = values.as_chunks::<2>();
 
-    assert!(chunks.remainder().is_empty());
+    assert!(remainder.is_empty());
 
-    chunks.map(|chunk| {
-        // Slice accesses will not panic, guaranteed by `chunks_exact(2)`.
-        Embed {
-            name: chunk[0].to_string(),
-            content: EmbedContent::from(T::from(chunk[1].clone())),
-        }
+    chunks.iter().map(|chunk| Embed {
+        name: chunk[0].to_string(),
+        content: EmbedContent::from(T::from(chunk[1].clone())),
     })
 }
 
@@ -338,8 +335,8 @@ impl std::str::FromStr for FilteredTypeName {
 #[cfg(test)]
 mod test {
     use super::Args;
-    use clap::error::ErrorKind;
     use clap::Parser;
+    use clap::error::ErrorKind;
 
     const ARGS: &[&str] = &[
         "--repo",
@@ -399,7 +396,6 @@ mod test {
             .chain(ARGS.iter())
             .collect::<Vec<_>>(),
         );
-        println!("{args:?}");
         assert!(args.is_ok())
     }
 

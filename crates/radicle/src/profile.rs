@@ -3,7 +3,7 @@
 //!   $RAD_HOME/                                 # Radicle home
 //!     storage/                                 # Storage root
 //!       zEQNunJUqkNahQ8VvQYuWZZV7EJB/          # Project git repository
-//!       ...                                    # More projects...
+//!       …                                      # More projects…
 //!     keys/
 //!       radicle                                # Secret key (PKCS 8)
 //!       radicle.pub                            # Public key (PKCS 8)
@@ -12,7 +12,10 @@
 //!
 
 pub mod config;
-pub use config::{Config, ConfigPath, RawConfig, WriteError};
+pub use config::{Config, WriteError};
+
+mod signer;
+pub use signer::Signer;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -22,35 +25,34 @@ use localtime::LocalTime;
 use thiserror::Error;
 
 use crate::cob::migrate;
-use crate::crypto::ssh::agent::Agent;
-use crate::crypto::ssh::{keystore, Keystore, Passphrase};
-use crate::crypto::PublicKey;
-use crate::node::device::{BoxedDevice, Device};
+use crate::cob::store::access::{ReadOnly, WriteAs};
+use crate::crypto::ssh::{Keystore, Passphrase, keystore};
+use crate::crypto::{PublicKey, Seed};
 use crate::node::policy::config::store::Read;
-use crate::node::{
-    notifications, policy, policy::Scope, Alias, AliasStore, Handle as _, Node, UserAgent,
-};
+use crate::node::{Alias, AliasStore, Handle as _, Node, notifications, policy, policy::Scope};
 use crate::prelude::{Did, NodeId, RepoId};
-use crate::storage::git::transport;
-use crate::storage::git::Storage;
 use crate::storage::ReadRepository;
+use crate::storage::git::Storage;
+use crate::storage::git::transport;
 use crate::{cob, git, node, storage};
 
-/// Environment variables used by radicle.
+/// Environment variables used by Radicle.
 pub mod env {
     pub use std::env::*;
 
-    /// Path to the radicle home folder.
+    use crypto::Seed;
+
+    /// Path to the Radicle home folder.
     pub const RAD_HOME: &str = "RAD_HOME";
-    /// Path to the radicle node socket file.
+    /// Path to the Radicle node socket file.
     pub const RAD_SOCKET: &str = "RAD_SOCKET";
-    /// Passphrase for the encrypted radicle secret key.
+    /// Passphrase for the encrypted Radicle secret key.
     pub const RAD_PASSPHRASE: &str = "RAD_PASSPHRASE";
     /// RNG seed. Must be convertible to a `u64`.
     pub const RAD_RNG_SEED: &str = "RAD_RNG_SEED";
     /// Private key seed. Used for generating deterministic keypairs.
     pub const RAD_KEYGEN_SEED: &str = "RAD_KEYGEN_SEED";
-    /// Show radicle hints.
+    /// Show Radicle hints.
     pub const RAD_HINT: &str = "RAD_HINT";
     /// Environment variable to set to overwrite the commit date for both
     /// the author and the committer.
@@ -66,12 +68,12 @@ pub mod env {
     // to generate deterministic COB IDs.
     pub const GIT_COMMITTER_DATE: &str = "GIT_COMMITTER_DATE";
 
-    /// Commit timestamp to use. Can be overriden by [`RAD_COMMIT_TIME`].
+    /// Commit timestamp to use. Can be overridden by [`RAD_COMMIT_TIME`].
     pub fn commit_time() -> localtime::LocalTime {
         time(RAD_COMMIT_TIME).unwrap_or_else(local_time)
     }
 
-    /// Local time. Can be overriden by [`RAD_LOCAL_TIME`].
+    /// Local time. Can be overridden by [`RAD_LOCAL_TIME`].
     pub fn local_time() -> localtime::LocalTime {
         time(RAD_LOCAL_TIME).unwrap_or_else(localtime::LocalTime::now)
     }
@@ -88,10 +90,14 @@ pub mod env {
 
     /// Get the configured pager program from the environment.
     pub fn pager() -> Option<String> {
-        if let Ok(cfg) = crate::git::raw::Config::open_default() {
-            if let Ok(pager) = cfg.get_string("core.pager") {
-                return Some(pager);
-            }
+        // On Windows, custom pagers configured via Git are not supported,
+        // because of the complexity surrounding how the pager command is
+        // parsed and executed. See also <https://stackoverflow.com/a/773973/1835188>.
+        #[cfg(not(windows))]
+        if let Ok(cfg) = crate::git::raw::Config::open_default()
+            && let Ok(pager) = cfg.get_string("core.pager")
+        {
+            return Some(pager);
         }
         if let Ok(pager) = var("PAGER") {
             return Some(pager);
@@ -99,7 +105,7 @@ pub mod env {
         None
     }
 
-    /// Get the radicle passphrase from the environment.
+    /// Get the Radicle passphrase from the environment.
     pub fn passphrase() -> Option<super::Passphrase> {
         let Ok(passphrase) = var(RAD_PASSPHRASE) else {
             return None;
@@ -126,22 +132,31 @@ pub mod env {
     }
 
     /// Return the seed stored in the [`RAD_KEYGEN_SEED`] environment variable,
-    /// or generate a random one.
-    pub fn seed() -> crypto::Seed {
-        if let Ok(seed) = var(RAD_KEYGEN_SEED) {
-            let Ok(seed) = (0..seed.len())
-                .step_by(2)
-                .map(|i| u8::from_str_radix(&seed[i..i + 2], 16))
-                .collect::<Result<Vec<u8>, _>>()
-            else {
-                panic!("env::seed: invalid hexadecimal value set in `{RAD_KEYGEN_SEED}`");
-            };
-            let Ok(seed): Result<[u8; 32], _> = seed.try_into() else {
-                panic!("env::seed: invalid seed length set in `{RAD_KEYGEN_SEED}`");
-            };
-            crypto::Seed::new(seed)
-        } else {
-            crypto::Seed::generate()
+    /// if set. Otherwise, return `None`.
+    ///
+    /// # Panics
+    ///
+    /// If the environment value [`RAD_KEYGEN_SEED`] is set but malformed,
+    /// i.e., not Unicode, not hexadecimal, or not 32 bytes long.
+    pub fn seed() -> Option<Seed> {
+        match var(RAD_KEYGEN_SEED) {
+            Err(VarError::NotPresent) => None,
+            Err(VarError::NotUnicode(_)) => {
+                panic!("env::seed: invalid Unicode value set in `{RAD_KEYGEN_SEED}`")
+            }
+            Ok(seed) => Some(Seed::new(
+                (0..seed.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&seed[i..i + 2], 16))
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap_or_else(|_| {
+                        panic!("env::seed: invalid hexadecimal value set in `{RAD_KEYGEN_SEED}`")
+                    })
+                    .try_into()
+                    .unwrap_or_else(|_| {
+                        panic!("env::seed: invalid seed length set in `{RAD_KEYGEN_SEED}`")
+                    }),
+            )),
         }
     }
 
@@ -172,7 +187,7 @@ pub enum Error {
     Routing(#[from] node::routing::Error),
     #[error(transparent)]
     Keystore(#[from] keystore::Error),
-    #[error("no radicle profile found at path '{0}'")]
+    #[error("no Radicle profile found at path '{0}'")]
     NotFound(PathBuf),
     #[error(transparent)]
     PolicyStore(#[from] node::policy::store::Error),
@@ -191,32 +206,19 @@ pub enum Error {
 #[derive(Debug, Error)]
 pub enum SignerError {
     #[error(transparent)]
-    MemorySigner(#[from] keystore::MemorySignerError),
+    LoadError(#[from] crypto::LoadError),
 
     #[error(transparent)]
-    Agent(#[from] crate::crypto::ssh::agent::Error),
-
-    #[error("radicle key `{0}` is not registered; run `rad auth` to register it with ssh-agent")]
-    KeyNotRegistered(PublicKey),
+    Agent(#[from] crypto::ssh::agent::IntoSignerError),
 
     #[error(transparent)]
     Keystore(#[from] keystore::Error),
 
-    #[error("error connecting to ssh-agent: {source}")]
-    AgentConnection {
-        source: crate::crypto::ssh::agent::Error,
-    },
-}
+    #[error("error connecting to ssh-agent: {0}")]
+    AgentConnection(#[from] crypto::ssh::agent::ConnectError),
 
-impl SignerError {
-    /// Some signer errors are potentially recoverable by prompting the user
-    /// for a password.
-    pub fn prompt_for_passphrase(&self) -> bool {
-        matches!(
-            self,
-            Self::AgentConnection { .. } | Self::KeyNotRegistered(_)
-        )
-    }
+    #[error("public key is invalid: {0}")]
+    InvalidPublicKey(#[source] crypto::signature::Error),
 }
 
 #[derive(Debug, Clone)]
@@ -233,7 +235,7 @@ impl Profile {
         home: Home,
         alias: Alias,
         passphrase: Option<Passphrase>,
-        seed: crypto::Seed,
+        seed: Seed,
     ) -> Result<Self, Error> {
         let keystore = Keystore::new(&home.keys());
         let public_key = keystore.init("radicle", passphrase, seed)?;
@@ -248,16 +250,14 @@ impl Profile {
         // Create DBs.
         home.policies_mut()?;
         home.notifications_mut()?;
-        home.database_mut()?
-            .journal_mode(node::db::JournalMode::default())?
-            .init(
-                &public_key,
-                config.node.features(),
-                &config.node.alias,
-                &UserAgent::default(),
-                LocalTime::now().into(),
-                config.node.external_addresses.iter(),
-            )?;
+        home.database_mut(config.node.database)?.init(
+            &public_key,
+            config.node.features(),
+            &config.node.alias,
+            &config.node.user_agent(),
+            LocalTime::now().into(),
+            config.node.external_addresses.iter(),
+        )?;
 
         // Migrate COBs cache.
         let mut cobs = home.cobs_db_mut()?;
@@ -321,27 +321,45 @@ impl Profile {
         Did::from(self.public_key)
     }
 
-    pub fn signer(&self) -> Result<BoxedDevice, SignerError> {
-        if !self.keystore.is_encrypted()? {
-            let signer = keystore::MemorySigner::load(&self.keystore, None)?;
-            return Ok(Device::from(signer).boxed());
+    pub fn signer(&self) -> Result<Signer, SignerError> {
+        /// Where to obtain the signer from.
+        enum Source {
+            /// Load the secret key from the keystore without a passphrase.
+            /// This only works if the keystore is not encrypted.
+            KeystorePlain,
+            /// Load the secret key from the keystore using the given
+            /// passphrase to decrypt it.
+            KeystoreEncrypted(Passphrase),
+            /// Use `ssh-agent`.
+            Agent,
         }
 
-        if let Some(passphrase) = env::passphrase() {
-            let signer = keystore::MemorySigner::load(&self.keystore, Some(passphrase))?;
-            return Ok(Device::from(signer).boxed());
-        }
+        use Source::*;
 
-        let agent = Agent::connect().map_err(|source| SignerError::AgentConnection { source })?;
-        let signer = agent.signer(self.public_key);
-        if signer.is_ready()? {
-            Ok(Device::from(signer).boxed())
+        let source = if self.keystore.is_encrypted()? {
+            env::passphrase().map(KeystoreEncrypted).unwrap_or(Agent)
         } else {
-            Err(SignerError::KeyNotRegistered(self.public_key))
-        }
+            KeystorePlain
+        };
+
+        let signer = match source {
+            KeystoreEncrypted(passphrase) => {
+                Signer::Key(crypto::SigningKey::load(&self.keystore, Some(passphrase))?)
+            }
+            KeystorePlain => Signer::Key(crypto::SigningKey::load(&self.keystore, None)?),
+            Agent => Signer::Agent(
+                crypto::ssh::agent::Agent::connect()?.into_signer(
+                    self.id()
+                        .try_into()
+                        .map_err(SignerError::InvalidPublicKey)?,
+                )?,
+            ),
+        };
+
+        Ok(signer)
     }
 
-    /// Get radicle home.
+    /// Get Radicle home.
     pub fn home(&self) -> &Home {
         &self.home
     }
@@ -359,7 +377,7 @@ impl Profile {
     /// Return a multi-source store for aliases.
     pub fn aliases(&self) -> Aliases {
         let policies = self.home.policies().ok();
-        let db = self.home.database().ok();
+        let db = self.home.database(self.config.node.database).ok();
 
         Aliases { policies, db }
     }
@@ -413,6 +431,24 @@ impl Profile {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Return a handle to the database of the node, with SQLite configuration
+    /// from [`Self::config`] applied.
+    pub fn database_mut(&self) -> Result<node::Database, node::db::Error> {
+        self.home.database_mut(self.config.node.database)
+    }
+
+    /// Return a handle to a read-only database of the node, with SQLite
+    /// configuration from [`Self::config`] applied.
+    pub fn database(&self) -> Result<node::Database, node::db::Error> {
+        self.home.database(self.config.node.database)
+    }
+
+    /// Returns the routing store, with SQLite
+    /// configuration from [`Self::config`] applied.
+    pub fn routing(&self) -> Result<impl node::routing::Store + use<>, node::db::Error> {
+        self.home.routing(self.config.node.database)
     }
 }
 
@@ -469,15 +505,14 @@ impl AliasStore for Aliases {
     }
 }
 
-/// Get the path to the radicle home folder.
+/// Get the path to the Radicle home folder.
 pub fn home() -> Result<Home, io::Error> {
     #[cfg(unix)]
     const ERROR_MESSAGE_UNSET: &str =
         "Environment variables `RAD_HOME` and `HOME` are both unset or not valid Unicode.";
 
     #[cfg(windows)]
-    const ERROR_MESSAGE_UNSET: &str =
-        "Environment variables `RAD_HOME`, `HOME`, and `USERPROFILE` are all unset or not valid Unicode.";
+    const ERROR_MESSAGE_UNSET: &str = "Environment variables `RAD_HOME`, `HOME`, and `USERPROFILE` are all unset or not valid Unicode.";
 
     struct DetectedHome {
         path: String,
@@ -536,14 +571,6 @@ pub struct Home {
     path: PathBuf,
 }
 
-impl TryFrom<PathBuf> for Home {
-    type Error = io::Error;
-
-    fn try_from(home: PathBuf) -> Result<Self, Self::Error> {
-        Self::new(home)
-    }
-}
-
 impl Home {
     /// Creates the Radicle Home directories.
     ///
@@ -565,7 +592,7 @@ impl Home {
             path: dunce::canonicalize(path)?,
         };
 
-        for dir in &[home.storage(), home.keys(), home.node(), home.cobs()] {
+        for dir in &home.subdirectories() {
             if !dir.exists() {
                 fs::create_dir_all(dir)?;
             }
@@ -574,57 +601,108 @@ impl Home {
         Ok(home)
     }
 
+    /// Load existing Radicle Home directories.
+    ///
+    /// The `home` path is the expected base directory for all necessary
+    /// subdirectories.
+    ///
+    /// # Errors
+    ///
+    /// If `home` or any of the subdirectories are missing an [`io::Error`] is
+    /// returned.
+    pub fn load<P>(home: P) -> Result<Self, io::Error>
+    where
+        P: AsRef<Path>,
+    {
+        let path = dunce::canonicalize(home.as_ref())?;
+        if !path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Radicle home directory does not exist: {}", path.display()),
+            ));
+        }
+        let home = Self { path };
+
+        let missing = home
+            .subdirectories()
+            .into_iter()
+            .filter(|dir| !dir.exists())
+            .collect::<Vec<_>>();
+
+        if !missing.is_empty() {
+            let missing = missing
+                .into_iter()
+                .map(|dir| dir.display().to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Required Radicle directories are missing: [{}]", missing),
+            ));
+        }
+
+        Ok(home)
+    }
+
+    /// The set of directories found under the [`Home`] directory path.
+    ///
+    /// List of directories:
+    /// - [`Home::storage`]
+    /// - [`Home::keys`]
+    /// - [`Home::node`]
+    /// - [`Home::cobs`]
+    fn subdirectories(&self) -> [PathBuf; 4] {
+        [self.storage(), self.keys(), self.node(), self.cobs()]
+    }
+
     pub fn path(&self) -> &Path {
         self.path.as_path()
     }
 
+    /// The `/storage` directory under [`Home::path`].
     pub fn storage(&self) -> PathBuf {
         self.path.join("storage")
     }
 
+    /// The `config.json` file path under [`Home::path`].
     pub fn config(&self) -> PathBuf {
         self.path.join("config.json")
     }
 
+    /// The `/keys` directory under [`Home::path`].
     pub fn keys(&self) -> PathBuf {
         self.path.join("keys")
     }
 
+    /// The `/node` directory under [`Home::path`].
     pub fn node(&self) -> PathBuf {
         self.path.join("node")
     }
 
+    /// The `/cobs` directory under [`Home::path`].
     pub fn cobs(&self) -> PathBuf {
         self.path.join("cobs")
     }
 
-    pub fn socket(&self) -> PathBuf {
-        use env::RAD_SOCKET;
+    /// The location of the control socket of the node.
+    /// If the environment variable with name [`env::RAD_SOCKET`] is set,
+    /// its value is used.
+    /// Otherwise, the default socket name, which is relative to this
+    /// [`Home`], is used (see [`Self::socket_default`]).
+    pub fn socket_from_env(&self) -> PathBuf {
+        env::var_os(env::RAD_SOCKET)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.socket_default())
+    }
 
-        #[cfg(unix)]
+    /// The default location of the control socket of the node.
+    /// The returned value only depends on `self`, and not on
+    /// any environment variables.
+    ///
+    /// See also [`Self::socket_from_env`].
+    pub fn socket_default(&self) -> PathBuf {
         const DEFAULT_SOCKET_NAME: &str = "control.sock";
-
-        #[cfg(windows)]
-        const DEFAULT_SOCKET_NAME: &str = r#"\\.\pipe\radicle-node"#;
-
-        match env::var_os(RAD_SOCKET).map(PathBuf::from) {
-            None => {
-                #[cfg(unix)]
-                return self.node().join(DEFAULT_SOCKET_NAME);
-
-                #[cfg(windows)]
-                return PathBuf::from(DEFAULT_SOCKET_NAME);
-            }
-            Some(path) => {
-                #[cfg(windows)]
-                {
-                    const PIPE_PREFIX: &str = r#"\\.\pipe\"#;
-                    assert!(path.starts_with(PIPE_PREFIX), "The value of the environment variable {RAD_SOCKET} ('{}') must start with {PIPE_PREFIX}. This restriction might be relaxed in the future.", path.display());
-                }
-
-                path
-            }
-        }
+        self.node().join(DEFAULT_SOCKET_NAME)
     }
 
     /// Return a read-write handle to the notifications database.
@@ -646,34 +724,49 @@ impl Home {
     }
 
     /// Return a handle to a read-only database of the node.
-    pub fn database(&self) -> Result<node::Database, node::db::Error> {
+    pub fn database(
+        &self,
+        config: node::db::config::Config,
+    ) -> Result<node::Database, node::db::Error> {
         let path = self.node().join(node::NODE_DB_FILE);
-        let db = node::Database::reader(path)?;
+        let db = node::Database::reader(path, config)?;
 
         Ok(db)
     }
 
     /// Return a handle to the database of the node.
-    pub fn database_mut(&self) -> Result<node::Database, node::db::Error> {
+    pub fn database_mut(
+        &self,
+        config: node::db::config::Config,
+    ) -> Result<node::Database, node::db::Error> {
         let path = self.node().join(node::NODE_DB_FILE);
-        let db = node::Database::open(path)?;
+        let db = node::Database::open(path, config)?;
 
         Ok(db)
     }
 
     /// Returns the address store.
-    pub fn addresses(&self) -> Result<impl node::address::Store, node::db::Error> {
-        self.database_mut()
+    pub fn addresses(
+        &self,
+        config: node::db::config::Config,
+    ) -> Result<impl node::address::Store + use<>, node::db::Error> {
+        self.database_mut(config)
     }
 
     /// Returns the routing store.
-    pub fn routing(&self) -> Result<impl node::routing::Store, node::db::Error> {
-        self.database()
+    pub fn routing(
+        &self,
+        config: node::db::config::Config,
+    ) -> Result<impl node::routing::Store + use<>, node::db::Error> {
+        self.database(config)
     }
 
     /// Returns the routing store, mutably.
-    pub fn routing_mut(&self) -> Result<impl node::routing::Store, node::db::Error> {
-        self.database_mut()
+    pub fn routing_mut(
+        &self,
+        config: node::db::config::Config,
+    ) -> Result<impl node::routing::Store + use<>, node::db::Error> {
+        self.database_mut(config)
     }
 
     /// Get read access to the COBs cache.
@@ -693,15 +786,16 @@ impl Home {
     }
 
     /// Return a read-only handle for the issues cache.
-    pub fn issues<'a, R>(
+    pub fn issues<'a, Repo>(
         &self,
-        repository: &'a R,
-    ) -> Result<cob::issue::Cache<cob::issue::Issues<'a, R>, cob::cache::StoreReader>, Error>
+        repository: &'a Repo,
+    ) -> Result<cob::issue::Cache<'a, Repo, ReadOnly, cob::cache::StoreReader>, Error>
     where
-        R: ReadRepository + cob::Store<Namespace = NodeId>,
+        Repo: ReadRepository + cob::Store<Namespace = NodeId>,
     {
         let db = self.cobs_db()?;
-        let store = cob::issue::Issues::open(repository)?;
+
+        let store = cob::issue::Issues::open(repository, ReadOnly)?;
 
         db.check_version()?;
 
@@ -709,15 +803,16 @@ impl Home {
     }
 
     /// Return a read-write handle for the issues cache.
-    pub fn issues_mut<'a, R>(
+    pub fn issues_mut<'a, 'b, Repo, Signer: crypto::Signer>(
         &self,
-        repository: &'a R,
-    ) -> Result<cob::issue::Cache<cob::issue::Issues<'a, R>, cob::cache::StoreWriter>, Error>
+        repository: &'a Repo,
+        signer: &'b Signer,
+    ) -> Result<cob::issue::Cache<'a, Repo, WriteAs<'b, Signer>, cob::cache::StoreWriter>, Error>
     where
-        R: ReadRepository + cob::Store<Namespace = NodeId>,
+        Repo: ReadRepository + cob::Store<Namespace = NodeId>,
     {
         let db = self.cobs_db_mut()?;
-        let store = cob::issue::Issues::open(repository)?;
+        let store = cob::issue::Issues::open(repository, WriteAs::new(signer))?;
 
         db.check_version()?;
 
@@ -725,15 +820,15 @@ impl Home {
     }
 
     /// Return a read-only handle for the patches cache.
-    pub fn patches<'a, R>(
+    pub fn patches<'a, Repo>(
         &self,
-        repository: &'a R,
-    ) -> Result<cob::patch::Cache<cob::patch::Patches<'a, R>, cob::cache::StoreReader>, Error>
+        repository: &'a Repo,
+    ) -> Result<cob::patch::Cache<'a, Repo, ReadOnly, cob::cache::StoreReader>, Error>
     where
-        R: ReadRepository + cob::Store<Namespace = NodeId>,
+        Repo: ReadRepository + cob::Store<Namespace = NodeId>,
     {
         let db = self.cobs_db()?;
-        let store = cob::patch::Patches::open(repository)?;
+        let store = cob::patch::Patches::open(repository, ReadOnly)?;
 
         db.check_version()?;
 
@@ -741,15 +836,16 @@ impl Home {
     }
 
     /// Return a read-write handle for the patches cache.
-    pub fn patches_mut<'a, R>(
+    pub fn patches_mut<'a, 'b, Repo, Signer: crypto::Signer>(
         &self,
-        repository: &'a R,
-    ) -> Result<cob::patch::Cache<cob::patch::Patches<'a, R>, cob::cache::StoreWriter>, Error>
+        repository: &'a Repo,
+        signer: &'b Signer,
+    ) -> Result<cob::patch::Cache<'a, Repo, WriteAs<'b, Signer>, cob::cache::StoreWriter>, Error>
     where
-        R: ReadRepository + cob::Store<Namespace = NodeId>,
+        Repo: ReadRepository + cob::Store<Namespace = NodeId>,
     {
         let db = self.cobs_db_mut()?;
-        let store = cob::patch::Patches::open(repository)?;
+        let store = cob::patch::Patches::open(repository, WriteAs::new(signer))?;
 
         db.check_version()?;
 
@@ -804,7 +900,7 @@ mod test {
     }
 
     #[test]
-    fn test_config() {
+    fn config() {
         let cfg = json::from_value::<Config>(json::json!({
           "publicExplorer": "https://app.radicle.example.com/nodes/$host/$rid$path",
           "preferredSeeds": [],
@@ -835,6 +931,7 @@ mod test {
               "routingMaxAge": 604800,
               "gossipMaxAge": 604800,
               "fetchConcurrency": 1,
+              "fetchTimeout": 30,
               "maxOpenFiles": 4096,
               "rate": {
                 "inbound": { "fillRate": 10.0, "capacity": 2048 },

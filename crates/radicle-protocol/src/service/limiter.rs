@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use localtime::LocalTime;
-use radicle::node::{address, config, HostName, NodeId};
+use radicle::node::{HostName, NodeId, address, config};
 
 /// Peer rate limiter.
 ///
@@ -36,10 +36,10 @@ impl RateLimiter {
         tokens: &T,
         now: LocalTime,
     ) -> bool {
-        if let Some(nid) = nid {
-            if self.bypass.contains(nid) {
-                return false;
-            }
+        if let Some(nid) = nid
+            && self.bypass.contains(nid)
+        {
+            return false;
         }
         if let HostName::Ip(ip) = addr {
             // Don't limit LAN addresses.
@@ -71,6 +71,26 @@ impl AsTokens for config::RateLimit {
 
     fn capacity(&self) -> usize {
         self.capacity
+    }
+}
+
+impl AsTokens for config::LimitRateInbound {
+    fn capacity(&self) -> usize {
+        config::RateLimit::from(*self).capacity()
+    }
+
+    fn rate(&self) -> f64 {
+        config::RateLimit::from(*self).rate()
+    }
+}
+
+impl AsTokens for config::LimitRateOutbound {
+    fn capacity(&self) -> usize {
+        config::RateLimit::from(*self).capacity()
+    }
+
+    fn rate(&self) -> f64 {
+        config::RateLimit::from(*self).rate()
     }
 }
 
@@ -135,11 +155,11 @@ mod test {
     }
 
     #[test]
-    fn test_limitter_refill() {
+    fn limiter_refill() {
         let mut r = RateLimiter::default();
         let t = (3, 0.2); // Three tokens burst. One token every 5 seconds.
         let a = HostName::Dns(String::from("seed.radicle.example.com"));
-        let n = arbitrary::gen::<NodeId>(1);
+        let n = arbitrary::r#gen::<NodeId>(1);
         let n = Some(&n);
 
         assert_eq!(r.limit(a.clone(), n, &t, LocalTime::from_secs(0)), false); // Burst capacity
@@ -167,9 +187,9 @@ mod test {
 
     #[test]
     #[rustfmt::skip]
-    fn test_limitter_multi() {
+    fn limiter_multi() {
         let t = (1, 1.0); // One token per second. One token burst.
-        let n = arbitrary::gen::<NodeId>(1);
+        let n = arbitrary::r#gen::<NodeId>(1);
         let n = Some(&n);
         let mut r = RateLimiter::default();
         let addr1 = HostName::Dns(String::from("seed.radicle.example.com"));
@@ -187,10 +207,10 @@ mod test {
 
     #[test]
     #[rustfmt::skip]
-    fn test_limitter_different_rates() {
+    fn limiter_different_rates() {
         let t1 = (1, 1.0); // One token per second. One token burst.
         let t2 = (2, 2.0); // Two tokens per second. Two token burst.
-        let n = arbitrary::gen::<NodeId>(1);
+        let n = arbitrary::r#gen::<NodeId>(1);
         let n = Some(&n);
         let mut r = RateLimiter::default();
         let addr1 = HostName::Dns(String::from("seed.radicle.example.com"));

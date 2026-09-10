@@ -1,12 +1,12 @@
-#![allow(clippy::box_default)]
 mod args;
 
 use std::path::PathBuf;
 
-use anyhow::anyhow;
 use anyhow::Context as _;
+use anyhow::anyhow;
 
 use radicle::git;
+use radicle::identity::doc::GetPayload as _;
 use radicle::node::AliasStore;
 use radicle::prelude::*;
 use radicle::storage::git::transport;
@@ -15,7 +15,6 @@ use crate::project;
 use crate::terminal as term;
 
 pub use args::Args;
-pub(crate) use args::ABOUT;
 
 pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
     let profile = ctx.profile()?;
@@ -27,12 +26,24 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
 fn execute(args: Args, profile: &Profile) -> anyhow::Result<PathBuf> {
     let storage = &profile.storage;
     let remote = args.remote.unwrap_or(profile.did());
-    let doc = storage
-        .repository(args.repo)?
-        .identity_doc()
+
+    let repo = storage
+        .repository(args.repo)
         .context("repository could not be found in local storage")?;
-    let payload = doc.project()?;
-    let path = PathBuf::from(payload.name());
+
+    let doc = repo.identity_doc()?;
+
+    let default_branch_name = doc.default_branch_name().ok();
+
+    let path = PathBuf::from(
+        doc.project()
+            .transpose()
+            .ok()
+            .flatten()
+            .as_ref()
+            .map(|project| project.name().to_string())
+            .unwrap_or_else(|| repo.id().to_string()),
+    );
 
     transport::local::register(storage.clone());
 
@@ -40,7 +51,7 @@ fn execute(args: Args, profile: &Profile) -> anyhow::Result<PathBuf> {
         anyhow::bail!("the local path {:?} already exists", path.as_path());
     }
 
-    let mut spinner = term::spinner("Performing checkout...");
+    let mut spinner = term::spinner("Performing checkout…");
     let repo = match radicle::rad::checkout(args.repo, &remote, path.clone(), &storage, false) {
         Ok(repo) => repo,
         Err(err) => {
@@ -64,11 +75,11 @@ fn execute(args: Args, profile: &Profile) -> anyhow::Result<PathBuf> {
         .filter(|id| id != profile.id())
         .collect::<Vec<_>>();
 
-    // Setup remote tracking branches for project delegates.
+    // Set up remote tracking branches for project delegates.
     setup_remotes(
         project::SetupRemote {
             rid: args.repo,
-            tracking: Some(payload.default_branch().clone()),
+            tracking: default_branch_name,
             repo: &repo,
             fetch: true,
         },
@@ -79,7 +90,7 @@ fn execute(args: Args, profile: &Profile) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-/// Setup a remote and tracking branch for each given remote.
+/// Set up a remote and tracking branch for each given remote.
 pub fn setup_remotes(
     setup: project::SetupRemote,
     remotes: &[NodeId],
@@ -95,7 +106,7 @@ pub fn setup_remotes(
     Ok(())
 }
 
-/// Setup a remote and tracking branch for the given remote.
+/// Set up a remote and tracking branch for the given remote.
 pub fn setup_remote(
     setup: &project::SetupRemote,
     remote_id: &NodeId,

@@ -1,20 +1,20 @@
 mod args;
 
+use radicle::identity::doc::GetPayload as _;
+use radicle::node::Handle;
 use radicle::node::policy;
 use radicle::node::policy::{Policy, Scope};
-use radicle::node::Handle;
-use radicle::{prelude::*, Node};
+use radicle::{Node, prelude::*};
 use radicle_term::Element as _;
 
 use crate::commands::sync;
 use crate::terminal as term;
 
 pub use args::Args;
-pub(crate) use args::ABOUT;
 
 pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
     let profile = ctx.profile()?;
-    let mut node = radicle::Node::new(profile.socket());
+    let mut node = radicle::Node::new(profile.socket_from_env());
 
     match args::Operation::from(args) {
         args::Operation::List => seeding(&profile)?,
@@ -28,10 +28,11 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
             for rid in rids {
                 update(rid, scope, &mut node, &profile)?;
 
-                if should_fetch && node.is_running() {
-                    if let Err(e) = sync::fetch(rid, settings.clone(), &mut node, &profile) {
-                        term::error(e);
-                    }
+                if should_fetch
+                    && node.is_running()
+                    && let Err(e) = sync::fetch(rid, settings.clone(), &mut node, &profile)
+                {
+                    term::error(e);
                 }
             }
         }
@@ -42,18 +43,27 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
 
 pub fn update(
     rid: RepoId,
-    scope: Scope,
+    scope: Option<Scope>,
     node: &mut Node,
     profile: &Profile,
 ) -> Result<(), anyhow::Error> {
+    let scope = match scope {
+        Some(scope) => scope,
+        None => profile
+            .policies()?
+            .seed_policy(&rid)?
+            .scope()
+            .unwrap_or(Scope::Followed),
+    };
+
     let updated = profile.seed(rid, scope, node)?;
     let outcome = if updated { "updated" } else { "exists" };
 
-    if let Ok(repo) = profile.storage.repository(rid) {
-        if repo.identity_doc()?.is_public() {
-            profile.add_inventory(rid, node)?;
-            term::success!("Inventory updated with {}", term::format::tertiary(rid));
-        }
+    if let Ok(repo) = profile.storage.repository(rid)
+        && repo.identity_doc()?.is_public()
+    {
+        profile.add_inventory(rid, node)?;
+        term::success!("Inventory updated with {}", term::format::tertiary(rid));
     }
 
     term::success!(
@@ -81,16 +91,26 @@ pub fn seeding(profile: &Profile) -> anyhow::Result<()> {
         match policy {
             Ok(policy::SeedPolicy { rid, policy }) => {
                 let id = rid.to_string();
-                let name = storage
+
+                let name = match storage
                     .repository(rid)
-                    .and_then(|repo| repo.project().map(|proj| proj.name().to_string()))
-                    .unwrap_or_default();
-                let scope = policy.scope().unwrap_or_default().to_string();
+                    .and_then(|repo| repo.identity_doc().map(|identity| identity.project()))
+                {
+                    Ok(Some(Ok(project))) => project.name().to_string().into(),
+                    Ok(None) => term::format::dim("No name provided.".to_string()),
+                    Err(_) | Ok(Some(Err(_))) => {
+                        term::format::negative("Error determining name.".to_string())
+                    }
+                };
+
+                let scope = policy
+                    .scope()
+                    .map_or(String::new(), |scope| scope.to_string());
                 let policy = term::format::policy(&Policy::from(policy));
 
                 t.push([
                     term::format::tertiary(id),
-                    name.into(),
+                    name,
                     policy,
                     term::format::dim(scope),
                 ])
@@ -102,7 +122,7 @@ pub fn seeding(profile: &Profile) -> anyhow::Result<()> {
     }
 
     if t.is_empty() {
-        term::print(term::format::dim("No seeding policies to show."));
+        term::println(term::format::dim("No seeding policies to show."));
     } else {
         t.print();
     }

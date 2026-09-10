@@ -2,7 +2,6 @@
 mod args;
 
 pub use args::Args;
-pub(crate) use args::ABOUT;
 
 use radicle::crypto::ssh;
 use radicle::node::Handle as _;
@@ -15,21 +14,21 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
     let profile = ctx.profile()?;
 
     if args.did {
-        term::print(profile.did());
+        term::println(profile.did());
     } else if args.alias {
-        term::print(profile.config.alias());
+        term::println(profile.config.alias());
     } else if args.home {
-        term::print(profile.home().path().display());
+        term::println(profile.home().path().display());
     } else if args.ssh_key {
-        term::print(ssh::fmt::key(profile.id()));
+        term::println(ssh::fmt::key(profile.id()));
     } else if args.config {
-        term::print(profile.home.config().display());
+        term::println(profile.home.config().display());
     } else if args.ssh_fingerprint {
-        term::print(ssh::fmt::fingerprint(profile.id()));
+        term::println(ssh::fmt::fingerprint(profile.id()));
     } else if args.nid {
         crate::warning::deprecated("rad self --nid", "rad node status --only nid");
-        term::print(
-            Node::new(profile.socket())
+        term::println(
+            Node::new(profile.socket_from_env())
                 .nid()
                 .ok()
                 .unwrap_or_else(|| *profile.id()),
@@ -55,7 +54,7 @@ fn all(profile: &Profile) -> anyhow::Result<()> {
         term::format::tertiary(did).into(),
     ]);
 
-    let socket = profile.socket();
+    let socket = profile.socket_from_env();
     let node = if Node::new(&socket).is_running() {
         term::format::positive(format!("running ({})", socket.display()))
     } else {
@@ -64,12 +63,7 @@ fn all(profile: &Profile) -> anyhow::Result<()> {
     table.push([term::format::style("Node").into(), node.to_string().into()]);
 
     let ssh_agent = match ssh::agent::Agent::connect() {
-        Ok(c) => term::format::positive(format!(
-            "running ({})",
-            c.path()
-                .map(|p| p.display().to_string())
-                .unwrap_or(String::from("?"))
-        )),
+        Ok(c) => term::format::positive(format!("running ({})", c.path().display())),
         Err(e) if e.is_not_running() => term::format::yellow(String::from("not running")),
         Err(e) => term::format::negative(format!("error: {e}")),
     };

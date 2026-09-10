@@ -28,6 +28,7 @@ const DB_WRITE_TIMEOUT: time::Duration = time::Duration::from_secs(6);
 const MIGRATIONS: &[Migration] = &[
     Migration::Sql(include_str!("cache/migrations/1.sql")),
     Migration::Native(migrations::_2::run),
+    Migration::Sql(include_str!("cache/migrations/3.sql")),
 ];
 
 /// Function signature for native migrations.
@@ -111,9 +112,10 @@ pub enum Error {
     OutOfDate,
 }
 
-/// Read and write to the store.
+/// Read from and write to the store.
 pub type StoreWriter = Store<Write>;
-/// Write to the store.
+
+/// Read from the store.
 pub type StoreReader = Store<Read>;
 
 /// Read-only type witness.
@@ -213,13 +215,13 @@ impl Store<Write> {
     }
 
     /// Migrate this database to the latest version.
-    /// Returns the verison migrated to.
+    /// Returns the version migrated to.
     pub fn migrate<M: MigrateCallback>(&mut self, callback: M) -> Result<usize, Error> {
         self.migrate_to(MIGRATIONS.len(), callback)
     }
 
     /// Migrate this database to the given target version.
-    /// Returns the verison migrated to.
+    /// Returns the version migrated to.
     pub fn migrate_to<M: MigrateCallback>(
         &mut self,
         target: usize,
@@ -288,7 +290,7 @@ fn bump(db: &sql::Connection) -> Result<usize, Error> {
 
     db.execute(format!("PRAGMA user_version = {new}"))?;
 
-    Ok(new as usize)
+    Ok(new)
 }
 
 /// Update a COB object in the cache.
@@ -447,7 +449,7 @@ mod tests {
     use crate::assert_matches;
 
     #[test]
-    fn test_check_version() {
+    fn check_version() {
         let mut db = StoreWriter::memory().unwrap();
         assert_matches!(db.check_version(), Err(Error::OutOfDate));
 
@@ -456,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn test_migrate_to() {
+    fn migrate_to() {
         let mut db = StoreWriter::memory().unwrap();
         assert_eq!(db.version().unwrap(), 0);
 
@@ -466,10 +468,13 @@ mod tests {
         assert_eq!(db.migrate_to(2, migrate::ignore).unwrap(), 2); // 1 -> 2
         assert_eq!(db.version().unwrap(), 2);
 
-        assert_eq!(db.migrate_to(1, migrate::ignore).unwrap(), 2); // No-op.
-        assert_eq!(db.version().unwrap(), 2);
+        assert_eq!(db.migrate_to(3, migrate::ignore).unwrap(), 3); // 2 -> 3
+        assert_eq!(db.version().unwrap(), 3);
 
-        assert_eq!(db.migrate_to(99, migrate::ignore).unwrap(), 2); // No-op.
-        assert_eq!(db.version().unwrap(), 2);
+        assert_eq!(db.migrate_to(1, migrate::ignore).unwrap(), 3); // No-op.
+        assert_eq!(db.version().unwrap(), 3);
+
+        assert_eq!(db.migrate_to(99, migrate::ignore).unwrap(), 3); // No-op.
+        assert_eq!(db.version().unwrap(), 3);
     }
 }

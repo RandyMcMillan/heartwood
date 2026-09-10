@@ -4,22 +4,24 @@ pub(crate) mod ls_refs;
 use std::collections::BTreeSet;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use bstr::BString;
 use gix_features::progress::prodash::progress;
+use gix_protocol::Handshake;
 use gix_protocol::handshake;
-use gix_transport::client;
 use gix_transport::Protocol;
 use gix_transport::Service;
-use radicle::git::fmt::Qualified;
+use gix_transport::client;
 use radicle::git::Oid;
+use radicle::git::fmt::Qualified;
 use radicle::storage::git::Repository;
 use thiserror::Error;
 
 use crate::git::packfile::Keepfile;
 use crate::git::repository;
+use crate::stage::RefPrefix;
 
 /// Open a reader and writer stream to pass to the ls-refs and fetch
 /// processes for communicating during their respective protocols.
@@ -89,26 +91,26 @@ where
     }
 
     /// Perform the handshake with the server side.
-    pub(crate) fn handshake(&mut self) -> Result<handshake::Outcome, Box<handshake::Error>> {
-        log::trace!(target: "fetch", "Performing handshake for {}", self.repo);
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn handshake(&mut self) -> Result<Handshake, handshake::Error> {
+        log::trace!("Performing handshake for {}", self.repo);
         let (read, write) = self.stream.open();
-        gix_protocol::fetch::handshake(
+        gix_protocol::handshake(
             &mut Connection::new(read, write, self.repo.clone()),
+            Service::UploadPack,
             |_| Ok(None),
             vec![],
             &mut progress::Discard,
         )
-        .map_err(Box::new)
     }
 
     /// Perform ls-refs with the server side.
     pub(crate) fn ls_refs(
         &mut self,
-        mut prefixes: Vec<BString>,
-        handshake: &handshake::Outcome,
+        prefixes: impl IntoIterator<Item = RefPrefix>,
+        handshake: &Handshake,
     ) -> Result<Vec<handshake::Ref>, Error> {
-        prefixes.sort();
-        prefixes.dedup();
+        let prefixes = prefixes.into_iter().collect::<BTreeSet<_>>();
         let (read, write) = self.stream.open();
         Ok(ls_refs::run(
             ls_refs::Config {
@@ -126,10 +128,9 @@ where
         &mut self,
         wants_haves: WantsHaves,
         interrupt: Arc<AtomicBool>,
-        handshake: &handshake::Outcome,
+        handshake: &Handshake,
     ) -> Result<Option<Keepfile>, Error> {
         log::trace!(
-            target: "fetch",
             "Running fetch wants={:?}, haves={:?}",
             wants_haves.wants,
             wants_haves.haves
@@ -180,7 +181,7 @@ where
 }
 
 pub(crate) struct Connection<R, W> {
-    inner: client::git::Connection<R, W>,
+    inner: client::git::blocking_io::Connection<R, W>,
 }
 
 impl<R, W> Connection<R, W>
@@ -190,7 +191,7 @@ where
 {
     pub fn new(read: R, write: W, repo: BString) -> Self {
         Self {
-            inner: client::git::Connection::new(
+            inner: client::git::blocking_io::Connection::new(
                 read,
                 write,
                 Protocol::V2,
@@ -203,21 +204,7 @@ where
     }
 }
 
-impl<R, W> client::Transport for Connection<R, W>
-where
-    R: std::io::Read,
-    W: std::io::Write,
-{
-    fn handshake<'b>(
-        &mut self,
-        service: Service,
-        extra_parameters: &'b [(&'b str, Option<&'b str>)],
-    ) -> Result<client::SetServiceResponse<'_>, client::Error> {
-        self.inner.handshake(service, extra_parameters)
-    }
-}
-
-impl<R, W> client::TransportWithoutIO for Connection<R, W>
+impl<R, W> client::blocking_io::Transport for Connection<R, W>
 where
     R: std::io::Read,
     W: std::io::Write,
@@ -227,10 +214,24 @@ where
         write_mode: client::WriteMode,
         on_into_read: client::MessageKind,
         trace: bool,
-    ) -> Result<client::RequestWriter<'_>, client::Error> {
+    ) -> Result<client::blocking_io::RequestWriter<'_>, client::Error> {
         self.inner.request(write_mode, on_into_read, trace)
     }
 
+    fn handshake<'b>(
+        &mut self,
+        service: Service,
+        extra_parameters: &'b [(&'b str, Option<&'b str>)],
+    ) -> Result<client::blocking_io::SetServiceResponse<'_>, client::Error> {
+        self.inner.handshake(service, extra_parameters)
+    }
+}
+
+impl<R, W> client::TransportWithoutIO for Connection<R, W>
+where
+    R: std::io::Read,
+    W: std::io::Write,
+{
     fn to_url(&self) -> std::borrow::Cow<'_, bstr::BStr> {
         self.inner.to_url()
     }
@@ -324,14 +325,5 @@ impl WantsHaves {
 }
 
 fn agent_name() -> String {
-    let version = match radicle::git::version() {
-        Ok(version) => version,
-        Err(err) => {
-            use radicle::git::VERSION_REQUIRED;
-            log::warn!(target: "fetch", "The git version could not be determined: {err}");
-            log::warn!(target: "fetch", "Pretending that we are on git version {VERSION_REQUIRED}.");
-            VERSION_REQUIRED
-        }
-    };
-    format!("git/{version}")
+    format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
 }

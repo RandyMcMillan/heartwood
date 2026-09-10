@@ -6,7 +6,7 @@ use bytes::{Buf, BufMut};
 use radicle::node::Link;
 
 use crate::service::Message;
-use crate::{wire, wire::varint, wire::varint::VarInt, PROTOCOL_VERSION};
+use crate::{PROTOCOL_VERSION, wire, wire::varint, wire::varint::VarInt};
 
 /// Protocol version strings all start with the magic sequence `rad`, followed
 /// by a version number.
@@ -54,7 +54,7 @@ impl wire::Decode for Version {
 /// bit set to `1` for all streams she creates, while Bob will have it set to `0`.
 ///
 /// This ensures that Stream IDs never collide.
-/// Additionally, Stream IDs must never be re-used within a connection.
+/// Additionally, Stream IDs must never be reused within a connection.
 ///
 /// +=======+==================================+
 /// | Bits  | Stream Type                      |
@@ -189,11 +189,16 @@ impl From<StreamType> for u8 {
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// |      'r'      |      'a'      |      'd'      |      0x1      | Version
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |                     Stream ID                           |TTT|I| Stream ID with Stream [T]ype and [I]nitiator bits
+/// |                                                       |T T T I| Stream ID
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |                     Data                                   ...| Data (variable size)
+/// |                                                              …| Data (variable size)
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// ```
+///
+/// Note that the last four bits of the Stream ID encode the Stream Type
+/// and Initiator.
+/// The first three bits of the last four bits encode the Stream Type,
+/// while the last bit encodes the Initiator.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Frame<M = Message> {
     /// The protocol version.
@@ -205,6 +210,9 @@ pub struct Frame<M = Message> {
 }
 
 impl<M> Frame<M> {
+    /// The maximum length of a frame, in bytes (128 KiB).
+    pub const LENGTH_LIMIT: usize = 1 << 17;
+
     /// Create a 'git' protocol frame.
     pub fn git(stream: StreamId, data: Vec<u8>) -> Self {
         Self {
@@ -355,7 +363,7 @@ impl<M: wire::Decode> wire::Decode for Frame<M> {
                 Ok(frame)
             }
             Ok(StreamType::Gossip) => {
-                let data = varint::payload::decode(buf)?;
+                let data = varint::payload::decode(buf, Frame::<M>::LENGTH_LIMIT)?;
                 let mut cursor = io::Cursor::new(data);
                 let msg = M::decode(&mut cursor)?;
                 let frame = Frame {
@@ -370,7 +378,7 @@ impl<M: wire::Decode> wire::Decode for Frame<M> {
                 Ok(frame)
             }
             Ok(StreamType::Git) => {
-                let data = varint::payload::decode(buf)?;
+                let data = varint::payload::decode(buf, Frame::<M>::LENGTH_LIMIT)?;
                 Ok(Frame::git(stream, data))
             }
             Err(n) => Err(wire::Invalid::StreamType { actual: n }.into()),
@@ -395,7 +403,7 @@ mod test {
     use super::*;
 
     #[test]
-    fn test_stream_id() {
+    fn stream_id() {
         assert_eq!(StreamId(VarInt(0b000)).kind().unwrap(), StreamType::Control);
         assert_eq!(StreamId(VarInt(0b010)).kind().unwrap(), StreamType::Gossip);
         assert_eq!(StreamId(VarInt(0b100)).kind().unwrap(), StreamType::Git);
@@ -414,7 +422,7 @@ mod test {
     }
 
     #[test]
-    fn test_encode_git_large() {
+    fn encode_git_large() {
         use wire::Encode as _;
 
         let size = u16::MAX as usize * 3;

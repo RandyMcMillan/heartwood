@@ -1,233 +1,102 @@
-use std::ffi::OsString;
+mod args;
+
+pub use args::Args;
+
 use std::path::Path;
 use std::process;
 
-use anyhow::anyhow;
-
 use localtime::LocalTime;
 use radicle::cob::TypedId;
-use radicle::git::fmt::Qualified;
 use radicle::git::BranchName;
-use radicle::identity::Identity;
+use radicle::git::fmt::{Component, Qualified};
+use radicle::identity::{Identity, doc::GetPayload as _};
 use radicle::issue::cache::Issues as _;
 use radicle::node::notifications;
 use radicle::node::notifications::*;
 use radicle::patch::cache::Patches as _;
 use radicle::prelude::{NodeId, Profile, RepoId};
 use radicle::storage::{ReadRepository, ReadStorage};
-use radicle::{cob, git, Storage};
+use radicle::{Storage, cob, git};
 
 use term::Element as _;
 
 use crate::terminal as term;
-use crate::terminal::args;
-use crate::terminal::args::{Args, Error, Help};
+use crate::terminal::args::rid_or_cwd;
+use args::{ClearMode, Command, ListMode, SortBy};
 
-pub const HELP: Help = Help {
-    name: "inbox",
-    description: "Manage your Radicle notifications",
-    version: env!("RADICLE_VERSION"),
-    usage: r#"
-Usage
-
-    rad inbox [<option>...]
-    rad inbox list [<option>...]
-    rad inbox show <id> [<option>...]
-    rad inbox clear <id...> [<option>...]
-
-    By default, this command lists all items in your inbox.
-    If your working directory is a Radicle repository, it only shows item
-    belonging to this repository, unless `--all` is used.
-
-    The `rad inbox show` command takes a notification ID (which can be found in
-    the `list` command) and displays the information related to that
-    notification. This will mark the notification as read.
-
-    The `rad inbox clear` command will delete all notifications by their passed id
-    or all notifications if no ids were passed.
-
-Options
-
-    --all                Operate on all repositories
-    --repo <rid>         Operate on the given repository (default: rad .)
-    --sort-by <field>    Sort by `id` or `timestamp` (default: timestamp)
-    --reverse, -r        Reverse the list
-    --show-unknown       Show any updates that were not recognized
-    --help               Print help
-"#,
-};
-
-#[derive(Debug, Default, PartialEq, Eq)]
-enum Operation {
-    #[default]
-    List,
-    Show,
-    Clear,
-}
-
-#[derive(Default, Debug)]
-enum Mode {
-    #[default]
-    Contextual,
-    All,
-    ById(Vec<NotificationId>),
-    ByRepo(RepoId),
-}
-
-#[derive(Clone, Copy, Debug)]
-struct SortBy {
-    reverse: bool,
-    field: &'static str,
-}
-
-pub struct Options {
-    op: Operation,
-    mode: Mode,
-    sort_by: SortBy,
-    show_unknown: bool,
-}
-
-impl Args for Options {
-    fn from_args(args: Vec<OsString>) -> anyhow::Result<(Self, Vec<OsString>)> {
-        use lexopt::prelude::*;
-
-        let mut parser = lexopt::Parser::from_args(args);
-        let mut op: Option<Operation> = None;
-        let mut mode = None;
-        let mut ids = Vec::new();
-        let mut reverse = None;
-        let mut field = None;
-        let mut show_unknown = false;
-
-        while let Some(arg) = parser.next()? {
-            match arg {
-                Long("help") | Short('h') => {
-                    return Err(Error::Help.into());
-                }
-                Long("all") | Short('a') if mode.is_none() => {
-                    mode = Some(Mode::All);
-                }
-                Long("reverse") | Short('r') => {
-                    reverse = Some(true);
-                }
-                Long("show-unknown") => {
-                    show_unknown = true;
-                }
-                Long("sort-by") => {
-                    let val = parser.value()?;
-
-                    match term::args::string(&val).as_str() {
-                        "timestamp" => field = Some("timestamp"),
-                        "id" => field = Some("rowid"),
-                        other => {
-                            return Err(anyhow!(
-                                "unknown sorting field `{other}`, see `rad inbox --help`"
-                            ))
-                        }
-                    }
-                }
-                Long("repo") if mode.is_none() => {
-                    let val = parser.value()?;
-                    let repo = args::rid(&val)?;
-
-                    mode = Some(Mode::ByRepo(repo));
-                }
-                Value(val) if op.is_none() => match val.to_string_lossy().as_ref() {
-                    "list" => op = Some(Operation::List),
-                    "show" => op = Some(Operation::Show),
-                    "clear" => op = Some(Operation::Clear),
-                    cmd => return Err(anyhow!("unknown command `{cmd}`, see `rad inbox --help`")),
-                },
-                Value(val) if op.is_some() && mode.is_none() => {
-                    let id = term::args::number(&val)? as NotificationId;
-                    ids.push(id);
-                }
-                _ => anyhow::bail!(arg.unexpected()),
-            }
-        }
-        let mode = if ids.is_empty() {
-            mode.unwrap_or_default()
-        } else {
-            Mode::ById(ids)
-        };
-        let op = op.unwrap_or_default();
-
-        let sort_by = if let Some(field) = field {
-            SortBy {
-                field,
-                reverse: reverse.unwrap_or(false),
-            }
-        } else {
-            SortBy {
-                field: "timestamp",
-                reverse: true,
-            }
-        };
-
-        Ok((
-            Options {
-                op,
-                mode,
-                sort_by,
-                show_unknown,
-            },
-            vec![],
-        ))
-    }
-}
-
-pub fn run(options: Options, ctx: impl term::Context) -> anyhow::Result<()> {
+pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
     let profile = ctx.profile()?;
     let storage = &profile.storage;
     let mut notifs = profile.notifications_mut()?;
-    let Options {
-        op,
-        mode,
-        sort_by,
-        show_unknown,
-    } = options;
+    let command = args
+        .clone()
+        .command
+        .unwrap_or_else(|| Command::List(args.empty.into()));
 
-    match op {
-        Operation::List => list(
-            mode,
-            sort_by,
-            show_unknown,
-            &notifs.read_only(),
-            storage,
-            &profile,
-        ),
-        Operation::Clear => clear(mode, &mut notifs),
-        Operation::Show => show(mode, &mut notifs, storage, &profile),
+    match command {
+        Command::List(args) => {
+            let show_unknown = args.show_unknown;
+            let sort_by = args.sort_by;
+            let reverse = args.reverse;
+
+            list(
+                &notifs.read_only(),
+                args.into(),
+                sort_by,
+                reverse,
+                show_unknown,
+                storage,
+                &profile,
+            )
+        }
+        Command::Clear(args) => clear(&mut notifs, args.into()),
+        Command::Show { id } => show(&mut notifs, id, storage, &profile),
     }
 }
 
 fn list(
-    mode: Mode,
-    sort_by: SortBy,
-    show_unknown: bool,
     notifs: &notifications::StoreReader,
+    mode: ListMode,
+    sort_by: SortBy,
+    reverse: bool,
+    show_unknown: bool,
     storage: &Storage,
     profile: &Profile,
 ) -> anyhow::Result<()> {
     let repos: Vec<term::VStack<'_>> = match mode {
-        Mode::Contextual => {
+        ListMode::Contextual => {
             if let Ok((_, rid)) = radicle::rad::cwd() {
-                list_repo(rid, sort_by, show_unknown, notifs, storage, profile)?
-                    .into_iter()
-                    .collect()
+                list_repo(
+                    notifs,
+                    rid,
+                    sort_by,
+                    reverse,
+                    show_unknown,
+                    storage,
+                    profile,
+                )?
+                .into_iter()
+                .collect()
             } else {
-                list_all(sort_by, show_unknown, notifs, storage, profile)?
+                list_all(notifs, sort_by, reverse, show_unknown, storage, profile)?
             }
         }
-        Mode::ByRepo(rid) => list_repo(rid, sort_by, show_unknown, notifs, storage, profile)?
-            .into_iter()
-            .collect(),
-        Mode::All => list_all(sort_by, show_unknown, notifs, storage, profile)?,
-        Mode::ById(_) => anyhow::bail!("the `list` command does not take IDs"),
+        ListMode::All => list_all(notifs, sort_by, reverse, show_unknown, storage, profile)?,
+        ListMode::ByRepo(rid) => list_repo(
+            notifs,
+            rid,
+            sort_by,
+            reverse,
+            show_unknown,
+            storage,
+            profile,
+        )?
+        .into_iter()
+        .collect(),
     };
 
     if repos.is_empty() {
-        term::print(term::format::italic("Your inbox is empty."));
+        term::println(term::format::italic("Your inbox is empty."));
     } else {
         for repo in repos {
             repo.print();
@@ -237,9 +106,10 @@ fn list(
 }
 
 fn list_all<'a>(
-    sort_by: SortBy,
-    show_unknown: bool,
     notifs: &notifications::StoreReader,
+    sort_by: SortBy,
+    reverse: bool,
+    show_unknown: bool,
     storage: &Storage,
     profile: &Profile,
 ) -> anyhow::Result<Vec<term::VStack<'a>>> {
@@ -248,17 +118,26 @@ fn list_all<'a>(
 
     let mut vstacks = Vec::new();
     for repo in repos {
-        let vstack = list_repo(repo.rid, sort_by, show_unknown, notifs, storage, profile)?;
-        vstacks.extend(vstack.into_iter());
+        let vstack = list_repo(
+            notifs,
+            repo.rid,
+            sort_by,
+            reverse,
+            show_unknown,
+            storage,
+            profile,
+        )?;
+        vstacks.extend(vstack);
     }
     Ok(vstacks)
 }
 
 fn list_repo<'a, R: ReadStorage>(
+    notifs: &notifications::StoreReader,
     rid: RepoId,
     sort_by: SortBy,
+    reverse: bool,
     show_unknown: bool,
-    notifs: &notifications::StoreReader,
     storage: &R,
     profile: &Profile,
 ) -> anyhow::Result<Option<term::VStack<'a>>>
@@ -266,14 +145,15 @@ where
     <R as ReadStorage>::Repository: cob::Store<Namespace = NodeId>,
 {
     let repo = storage.repository(rid)?;
-    let (_, head) = repo.head()?;
+    let head = repo.head().ok().map(|(_, head)| head);
     let doc = repo.identity_doc()?;
-    let proj = doc.project()?;
     let issues = term::cob::issues(profile, &repo)?;
     let patches = term::cob::patches(profile, &repo)?;
 
-    let mut notifs = notifs.by_repo(&rid, sort_by.field)?.collect::<Vec<_>>();
-    if !sort_by.reverse {
+    let mut notifs = notifs
+        .by_repo(&rid, &sort_by.to_string())?
+        .collect::<Vec<_>>();
+    if !reverse {
         // Notifications are returned in descendant order by default.
         notifs.reverse();
     }
@@ -305,9 +185,13 @@ where
             state,
             name,
         } = match &n.kind {
-            NotificationKind::Branch { name } => match NotificationRow::branch(name, head, &n, &repo) {
-                Err(e) => return Some(Err(e)),
-                Ok(b) => b,
+            NotificationKind::Branch { name } =>
+            match head {
+                Some(head) => match NotificationRow::branch(name, head, &n, &repo) {
+                    Err(e) => return Some(Err(e)),
+                    Ok(b) => b,
+                },
+                None => return None
             },
             NotificationKind::Cob { typed_id } => {
                 match NotificationRow::cob(typed_id, &n, &issues, &patches, &repo) {
@@ -353,7 +237,11 @@ where
         Ok(Some(
             term::VStack::default()
                 .border(Some(term::colors::FAINT))
-                .child(term::label(term::format::bold(proj.name())))
+                .child(term::label(match doc.project() {
+                    Some(Ok(project)) => term::format::bold(project.name().to_string()),
+                    Some(Err(_)) => term::format::negative("Error determining name.".to_string()),
+                    None => term::format::dim("No name provided.".to_string()),
+                }))
                 .divider()
                 .child(table),
         ))
@@ -392,7 +280,7 @@ impl NotificationRow {
         S: ReadRepository,
     {
         let commit = if let Some(head) = n.update.new() {
-            repo.commit(head)?.summary().unwrap_or_default().to_owned()
+            repo.commit(head)?.summary()?.unwrap_or_default().to_owned()
         } else {
             String::new()
         };
@@ -490,7 +378,7 @@ impl NotificationRow {
         S: ReadRepository,
     {
         let commit = if let Some(head) = n.update.new() {
-            repo.commit(head)?.summary().unwrap_or_default().to_owned()
+            repo.commit(head)?.summary()?.unwrap_or_default().to_owned()
         } else {
             String::new()
         };
@@ -503,45 +391,30 @@ impl NotificationRow {
     }
 }
 
-fn clear(mode: Mode, notifs: &mut notifications::StoreWriter) -> anyhow::Result<()> {
+fn clear(notifs: &mut notifications::StoreWriter, mode: ClearMode) -> anyhow::Result<()> {
     let cleared = match mode {
-        Mode::All => notifs.clear_all()?,
-        Mode::ById(ids) => notifs.clear(&ids)?,
-        Mode::ByRepo(rid) => notifs.clear_by_repo(&rid)?,
-        Mode::Contextual => {
-            if let Ok((_, rid)) = radicle::rad::cwd() {
-                notifs.clear_by_repo(&rid)?
-            } else {
-                return Err(Error::WithHint {
-                    err: anyhow!("not a radicle repository"),
-                    hint: "to clear all repository notifications, use the `--all` flag",
-                }
-                .into());
-            }
+        ClearMode::ByNotifications(ids) => notifs.clear(&ids)?,
+        ClearMode::ByRepo(rid) => notifs.clear_by_repo(&rid)?,
+        ClearMode::All => notifs.clear_all()?,
+        ClearMode::Contextual => {
+            let (_, rid) = rid_or_cwd(None)?;
+            notifs.clear_by_repo(&rid)?
         }
     };
     if cleared > 0 {
         term::success!("Cleared {cleared} item(s) from your inbox");
     } else {
-        term::print(term::format::italic("Your inbox is empty."));
+        term::println(term::format::italic("Your inbox is empty."));
     }
     Ok(())
 }
 
 fn show(
-    mode: Mode,
     notifs: &mut notifications::StoreWriter,
+    id: NotificationId,
     storage: &Storage,
     profile: &Profile,
 ) -> anyhow::Result<()> {
-    let id = match mode {
-        Mode::ById(ids) => match ids.as_slice() {
-            [id] => *id,
-            [] => anyhow::bail!("a Notification ID must be given"),
-            _ => anyhow::bail!("too many Notification IDs given"),
-        },
-        _ => anyhow::bail!("a Notification ID must be given"),
-    };
     let n = notifs.get(id)?;
     let repo = storage.repository(n.repo)?;
 
@@ -572,7 +445,7 @@ fn show(
         NotificationKind::Branch { .. } => {
             let refstr = if let Some(remote) = n.remote {
                 n.qualified
-                    .with_namespace(remote.to_component())
+                    .with_namespace(Component::from(&remote))
                     .to_string()
             } else {
                 n.qualified.to_string()
@@ -583,7 +456,8 @@ fn show(
                 .spawn()?
                 .wait()?;
         }
-        notification => {
+        notification @ NotificationKind::Cob { .. }
+        | notification @ NotificationKind::Unknown { .. } => {
             term::json::to_pretty(&notification, Path::new("notification.json"))?.print();
         }
     }

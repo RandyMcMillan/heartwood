@@ -1,18 +1,18 @@
 use std::collections::VecDeque;
-use std::time;
 
 use localtime::LocalDuration;
 use log::*;
 use radicle::identity::RepoId;
-use radicle::node::config::FetchPackSizeLimit;
 use radicle::node::Address;
 use radicle::node::NodeId;
+use radicle::node::config::FetchPackSizeLimit;
 use radicle::storage::refs::RefsAt;
 
-use crate::service::message::Message;
-use crate::service::session::Session;
+use crate::fetcher;
 use crate::service::DisconnectReason;
 use crate::service::Link;
+use crate::service::message::Message;
+use crate::service::session::Session;
 
 use super::gossip;
 use super::message::{Announcement, AnnouncementMessage};
@@ -34,10 +34,11 @@ pub enum Io {
         remote: NodeId,
         /// If the node is fetching specific `rad/sigrefs`.
         refs_at: Option<Vec<RefsAt>>,
-        /// Fetch timeout.
-        timeout: time::Duration,
         /// Limit the number of bytes fetched.
         reader_limit: FetchPackSizeLimit,
+        /// Options for configuring the fetch worker, such as timeout, and
+        /// internal fetch protocol options.
+        config: fetcher::FetchConfig,
     },
     /// Ask for a wakeup in a specified amount of time.
     Wakeup(LocalDuration),
@@ -67,7 +68,7 @@ impl Outbox {
             _ => log::Level::Debug,
         };
         msg.log(level, &remote.id, Link::Outbound);
-        trace!(target: "service", "Write {:?} to {}", &msg, remote);
+        trace!(target: "service", "Write {:?} to {}", msg, remote);
 
         self.io.push_back(Io::Write(remote.id, vec![msg]));
     }
@@ -82,7 +83,7 @@ impl Outbox {
         // Store our announcement so that it can be retrieved from us later, just like
         // announcements we receive from peers.
         if let Err(e) = gossip.announced(&ann.node, &ann) {
-            error!(target: "service", "Error updating our gossip store with announced message: {e}");
+            warn!(target: "service", "Failed to update gossip store with announced message: {e}");
         }
 
         for peer in peers {
@@ -135,11 +136,9 @@ impl Outbox {
         peer: &mut Session,
         rid: RepoId,
         refs_at: Vec<RefsAt>,
-        timeout: time::Duration,
         reader_limit: FetchPackSizeLimit,
+        config: fetcher::FetchConfig,
     ) {
-        peer.fetching(rid);
-
         let refs_at = (!refs_at.is_empty()).then_some(refs_at);
 
         if let Some(refs_at) = &refs_at {
@@ -155,8 +154,8 @@ impl Outbox {
             rid,
             refs_at,
             remote: peer.id,
-            timeout,
             reader_limit,
+            config,
         });
     }
 

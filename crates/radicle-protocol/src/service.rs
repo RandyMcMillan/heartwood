@@ -1,7 +1,8 @@
 #![allow(clippy::too_many_arguments)]
-#![allow(clippy::collapsible_match)]
-#![allow(clippy::collapsible_if)]
-#![warn(clippy::unwrap_used)]
+#![deny(clippy::unwrap_used)]
+pub mod command;
+pub use command::{Command, QueryState};
+
 pub mod filter;
 pub mod gossip;
 pub mod io;
@@ -14,9 +15,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::IpAddr;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::{fmt, net, time};
 
-use crossbeam_channel as chan;
 use fastrand::Rng;
 use localtime::{LocalDuration, LocalTime};
 use log::*;
@@ -28,34 +29,36 @@ use radicle::node::address;
 use radicle::node::address::Store as _;
 use radicle::node::address::{AddressBook, AddressType, KnownAddress};
 use radicle::node::config::{PeerConfig, RateLimit};
-use radicle::node::device::Device;
 use radicle::node::refs::Store as _;
 use radicle::node::routing::Store as _;
 use radicle::node::seed;
 use radicle::node::seed::Store as _;
-use radicle::node::{ConnectOptions, Penalty, Severity};
-use radicle::storage::refs::SIGREFS_BRANCH;
-use radicle::storage::RepositoryError;
+use radicle::node::{Penalty, Severity};
+use radicle::storage::refs::{FeatureLevel, SIGREFS_BRANCH};
+use radicle::storage::{RepositoryError, RepositoryInfo, SignedRefsInfo};
 use radicle_fetch::policy::SeedingPolicy;
 
+use crate::fetcher;
+use crate::fetcher::FetcherState;
+use crate::fetcher::RefsToFetch;
+use crate::fetcher::service::FetcherService;
 use crate::service::gossip::Store as _;
 use crate::service::message::{
     Announcement, AnnouncementMessage, Info, NodeAnnouncement, Ping, RefsAnnouncement, RefsStatus,
 };
-use crate::service::policy::{store::Write, Scope};
+use crate::service::policy::{Scope, store::Write};
 use radicle::identity::RepoId;
 use radicle::node::events::Emitter;
 use radicle::node::routing;
 use radicle::node::routing::InsertResult;
-use radicle::node::{
-    Address, Alias, Features, FetchResult, HostName, Seed, Seeds, SyncStatus, SyncedAt,
-};
+use radicle::node::{Address, Features, FetchResult, HostName, Seed, Seeds, SyncStatus, SyncedAt};
 use radicle::prelude::*;
 use radicle::storage;
-use radicle::storage::{refs::RefsAt, Namespaces, ReadStorage};
+use radicle::storage::{Namespaces, ReadStorage, refs::RefsAt};
 // use radicle::worker::fetch;
 // use crate::worker::FetchError;
 use radicle::crypto;
+use radicle::crypto::Signer as _;
 use radicle::node::Link;
 use radicle::node::PROTOCOL_VERSION;
 
@@ -97,7 +100,7 @@ pub const MAX_CONNECTION_ATTEMPTS: usize = 3;
 /// How far back from the present time should we request gossip messages when connecting to a peer,
 /// when we come online for the first time.
 pub const INITIAL_SUBSCRIBE_BACKLOG_DELTA: LocalDuration = LocalDuration::from_mins(60 * 24);
-/// When subscribing, what margin of error do we give ourselves. A igher delta means we ask for
+/// When subscribing, what margin of error do we give ourselves. A greater delta means we ask for
 /// messages further back than strictly necessary, to account for missed messages.
 pub const SUBSCRIBE_BACKLOG_DELTA: LocalDuration = LocalDuration::from_mins(3);
 /// Minimum amount of time to wait before reconnecting to a peer.
@@ -106,8 +109,8 @@ pub const MIN_RECONNECTION_DELTA: LocalDuration = LocalDuration::from_secs(3);
 pub const MAX_RECONNECTION_DELTA: LocalDuration = LocalDuration::from_mins(60);
 /// Connection retry delta used for ephemeral peers that failed to connect previously.
 pub const CONNECTION_RETRY_DELTA: LocalDuration = LocalDuration::from_mins(10);
-/// How long to wait for a fetch to stall before aborting, default is 3s.
-pub const FETCH_TIMEOUT: time::Duration = time::Duration::from_secs(3);
+/// How long to wait for a fetch to stall before aborting, default is 30s.
+pub const FETCH_TIMEOUT: time::Duration = time::Duration::from_secs(30);
 /// Target number of peers to maintain connections to.
 pub const TARGET_OUTBOUND_PEERS: usize = 8;
 
@@ -221,6 +224,12 @@ pub enum ConnectError {
     SelfConnection,
     #[error("outbound connection limit reached when attempting {nid} ({addr})")]
     LimitReached { nid: NodeId, addr: Address },
+    #[error(
+        "attempted connection to {nid}, via {addr} but addresses of this kind are not supported"
+    )]
+    UnsupportedAddress { nid: NodeId, addr: Address },
+    #[error("attempted connection with blocked peer {nid}")]
+    Blocked { nid: NodeId },
 }
 
 /// A store for all node data.
@@ -231,93 +240,6 @@ pub trait Store:
 
 impl Store for radicle::node::Database {}
 
-/// Function used to query internal service state.
-pub type QueryState = dyn Fn(&dyn ServiceState) -> Result<(), CommandError> + Send + Sync;
-
-/// Commands sent to the service by the operator.
-pub enum Command {
-    /// Announce repository references for given repository and namespaces to peers.
-    AnnounceRefs(RepoId, HashSet<PublicKey>, chan::Sender<RefsAt>),
-    /// Announce local repositories to peers.
-    AnnounceInventory,
-    /// Add repository to local inventory.
-    AddInventory(RepoId, chan::Sender<bool>),
-    /// Connect to node with the given address.
-    Connect(NodeId, Address, ConnectOptions),
-    /// Disconnect from node.
-    Disconnect(NodeId),
-    /// Get the node configuration.
-    Config(chan::Sender<Config>),
-    /// Get the node's listen addresses.
-    ListenAddrs(chan::Sender<Vec<std::net::SocketAddr>>),
-    /// Lookup seeds for the given repository in the routing table, and report
-    /// sync status for given namespaces.
-    Seeds(RepoId, HashSet<PublicKey>, chan::Sender<Seeds>),
-    /// Fetch the given repository from the network.
-    Fetch(RepoId, NodeId, time::Duration, chan::Sender<FetchResult>),
-    /// Seed the given repository.
-    Seed(RepoId, Scope, chan::Sender<bool>),
-    /// Unseed the given repository.
-    Unseed(RepoId, chan::Sender<bool>),
-    /// Follow the given node.
-    Follow(NodeId, Option<Alias>, chan::Sender<bool>),
-    /// Unfollow the given node.
-    Unfollow(NodeId, chan::Sender<bool>),
-    /// Query the internal service state.
-    QueryState(Arc<QueryState>, chan::Sender<Result<(), CommandError>>),
-}
-
-impl fmt::Debug for Command {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AnnounceRefs(id, _, _) => write!(f, "AnnounceRefs({id})"),
-            Self::AnnounceInventory => write!(f, "AnnounceInventory"),
-            Self::AddInventory(rid, _) => write!(f, "AddInventory({rid})"),
-            Self::Connect(id, addr, opts) => write!(f, "Connect({id}, {addr}, {opts:?})"),
-            Self::Disconnect(id) => write!(f, "Disconnect({id})"),
-            Self::Config(_) => write!(f, "Config"),
-            Self::ListenAddrs(_) => write!(f, "ListenAddrs"),
-            Self::Seeds(id, _, _) => write!(f, "Seeds({id})"),
-            Self::Fetch(id, node, _, _) => write!(f, "Fetch({id}, {node})"),
-            Self::Seed(id, scope, _) => write!(f, "Seed({id}, {scope})"),
-            Self::Unseed(id, _) => write!(f, "Unseed({id})"),
-            Self::Follow(id, _, _) => write!(f, "Follow({id})"),
-            Self::Unfollow(id, _) => write!(f, "Unfollow({id})"),
-            Self::QueryState { .. } => write!(f, "QueryState(..)"),
-        }
-    }
-}
-
-/// Command-related errors.
-#[derive(thiserror::Error, Debug)]
-pub enum CommandError {
-    #[error(transparent)]
-    Storage(#[from] storage::Error),
-    #[error(transparent)]
-    Routing(#[from] routing::Error),
-    #[error(transparent)]
-    Policy(#[from] policy::Error),
-}
-
-/// Error returned by [`Service::try_fetch`].
-#[derive(thiserror::Error, Debug)]
-enum TryFetchError<'a> {
-    #[error("ongoing fetch for repository exists")]
-    AlreadyFetching(&'a mut FetchState),
-    #[error("peer is not connected; cannot initiate fetch")]
-    SessionNotConnected,
-    #[error("peer fetch capacity reached; cannot initiate fetch")]
-    SessionCapacityReached,
-    #[error(transparent)]
-    Namespaces(Box<NamespacesError>),
-}
-
-impl From<NamespacesError> for TryFetchError<'_> {
-    fn from(e: NamespacesError) -> Self {
-        Self::Namespaces(Box::new(e))
-    }
-}
-
 /// Fetch state for an ongoing fetch.
 #[derive(Debug)]
 pub struct FetchState {
@@ -326,16 +248,7 @@ pub struct FetchState {
     /// What refs we're fetching.
     pub refs_at: Vec<RefsAt>,
     /// Channels waiting for fetch results.
-    pub subscribers: Vec<chan::Sender<FetchResult>>,
-}
-
-impl FetchState {
-    /// Add a subscriber to this fetch.
-    fn subscribe(&mut self, c: chan::Sender<FetchResult>) {
-        if !self.subscribers.iter().any(|s| s.same_channel(&c)) {
-            self.subscribers.push(c);
-        }
-    }
+    pub subscribers: Vec<mpsc::Sender<FetchResult>>,
 }
 
 /// Holds all node stores.
@@ -411,11 +324,11 @@ impl<D> From<D> for Stores<D> {
 
 /// The node service.
 #[derive(Debug)]
-pub struct Service<D, S, G> {
+pub struct Service<D, S> {
     /// Service configuration.
     config: Config,
     /// Our cryptographic signer and key.
-    signer: Device<G>,
+    secret_key: crypto::SigningKey,
     /// Project storage.
     storage: S,
     /// Node database.
@@ -437,8 +350,7 @@ pub struct Service<D, S, G> {
     inventory: InventoryAnnouncement,
     /// Source of entropy.
     rng: Rng,
-    /// Ongoing fetches.
-    fetching: HashMap<RepoId, FetchState>,
+    fetcher: FetcherService<command::Responder<FetchResult>>,
     /// Request/connection rate limiter.
     limiter: RateLimiter,
     /// Current seeded repositories bloom filter.
@@ -469,12 +381,7 @@ pub struct Service<D, S, G> {
     metrics: Metrics,
 }
 
-impl<D, S, G> Service<D, S, G> {
-    /// Get the local node id.
-    pub fn node_id(&self) -> NodeId {
-        *self.signer.public_key()
-    }
-
+impl<D, S> Service<D, S> {
     /// Get the local service time.
     pub fn local_time(&self) -> LocalTime {
         self.clock
@@ -485,18 +392,164 @@ impl<D, S, G> Service<D, S, G> {
     }
 }
 
-impl<D, S, G> Service<D, S, G>
+impl<D, S> Service<D, S>
+where
+    D: Store,
+    S: WriteStorage + 'static,
+{
+    /// Initialize service with current time. Call this once.
+    pub fn initialize(&mut self, time: LocalTime) -> Result<(), Error> {
+        debug!(target: "service", "Init @{}", time.as_millis());
+        assert_ne!(time, LocalTime::default());
+
+        let nid = *self.nid();
+
+        self.clock = time;
+        self.started_at = Some(time);
+        self.last_online_at = match self.db.gossip().last() {
+            Ok(Some(last)) => Some(last.to_local_time()),
+            Ok(None) => None,
+            Err(e) => {
+                warn!(target: "service", "Failed to get the latest gossip message from db: {e}");
+                None
+            }
+        };
+
+        // Populate refs database. This is only useful as part of the upgrade process for nodes
+        // that have been online since before the refs database was created.
+        match self.db.refs().count() {
+            Ok(0) => {
+                info!(target: "service", "Empty refs database, populating from storage..");
+                if let Err(e) = self.db.refs_mut().populate(&self.storage) {
+                    warn!(target: "service", "Failed to populate refs database: {e}");
+                }
+            }
+            Ok(n) => debug!(target: "service", "Refs database has {n} cached references"),
+            Err(e) => {
+                warn!(target: "service", "Failed to retrieve count of refs from database: {e}")
+            }
+        }
+
+        let announced = self
+            .db
+            .seeds()
+            .seeded_by(&nid)?
+            .collect::<Result<HashMap<_, _>, _>>()?;
+        let mut inventory = BTreeSet::new();
+        let mut private = BTreeSet::new();
+
+        for repo in self.storage.repositories()? {
+            let repo = self.upgrade_sigrefs(repo)?;
+            let rid = repo.rid;
+
+            // If we're not seeding this repo, just skip it.
+            if !self.policies.is_seeding(&rid)? {
+                debug!(target: "service", "Local repository {rid} is not seeded");
+                continue;
+            }
+            // Add public repositories to inventory.
+            if repo.doc.is_public() {
+                inventory.insert(rid);
+            } else {
+                private.insert(rid);
+            }
+            // If we have no owned refs for this repo, then there's nothing to announce.
+            let Some(updated_at) = repo.synced_at else {
+                continue;
+            };
+            // Skip this repo if the sync status matches what we have in storage.
+            if let Some(announced) = announced.get(&rid)
+                && updated_at.oid == announced.oid
+            {
+                continue;
+            }
+            // Make sure our local node's sync status is up to date with storage.
+            if self.db.seeds_mut().synced(
+                &rid,
+                &nid,
+                updated_at.oid,
+                updated_at.timestamp.into(),
+            )? {
+                debug!(target: "service", "Saved local sync status for {rid}..");
+            }
+            // If we got here, it likely means a repo was updated while the node was stopped.
+            // Therefore, we pre-load a refs announcement for this repo, so that it is included in
+            // the historical gossip messages when a node connects and subscribes to this repo.
+            if let Ok((ann, _)) = self.refs_announcement_for(rid, [nid]) {
+                debug!(target: "service", "Adding refs announcement for {rid} to historical gossip messages..");
+                self.db.gossip_mut().announced(&nid, &ann)?;
+            }
+        }
+
+        // Ensure that our inventory is recorded in our routing table, and we are seeding
+        // all of it. It can happen that inventory is not properly seeded if for eg. the
+        // user creates a new repository while the node is stopped.
+        self.db
+            .routing_mut()
+            .add_inventory(inventory.iter(), nid, time.into())?;
+        self.inventory = gossip::inventory(self.timestamp(), inventory);
+
+        // Ensure that private repositories are not in our inventory. It's possible that
+        // a repository was public and then it was made private.
+        self.db
+            .routing_mut()
+            .remove_inventories(private.iter(), &nid)?;
+
+        // Set up subscription filter for seeded repos.
+        self.filter = Filter::allowed_by(self.policies.seed_policies()?);
+        // Connect to configured peers.
+        let addrs = self.config.connect.clone();
+        for (id, addr) in addrs.into_iter().map(|ca| ca.into()) {
+            if let Err(e) = self.connect(id, addr) {
+                debug!(target: "service", "Service::initialization connection error: {e}");
+            }
+        }
+        // Try to establish some connections.
+        self.maintain_connections();
+        // Start periodic tasks.
+        self.outbox.wakeup(IDLE_INTERVAL);
+        self.outbox.wakeup(GOSSIP_INTERVAL);
+
+        Ok(())
+    }
+
+    fn upgrade_sigrefs(&mut self, mut info: RepositoryInfo) -> Result<RepositoryInfo, Error> {
+        if !matches!(info.refs, SignedRefsInfo::NeedsMigration) {
+            return Ok(info);
+        }
+
+        let rid = info.rid;
+
+        log::info!(
+            "Migrating `rad/sigrefs` of {rid} to force feature level {}.",
+            FeatureLevel::LATEST
+        );
+
+        let repo = self.storage.repository_mut(rid)?;
+        // NOTE: We assume to reach `FeatureLevel::LATEST` by signing refs.
+        let refs = repo.force_sign_refs(&self.secret_key)?;
+
+        let repo = self.storage.repository(rid)?;
+        let synced_at = SyncedAt::new(refs.at, &repo)?;
+
+        info.synced_at = Some(synced_at);
+        info.refs = SignedRefsInfo::Some(refs);
+
+        Ok(info)
+    }
+}
+
+impl<D, S> Service<D, S>
 where
     D: Store,
     S: ReadStorage + 'static,
-    G: crypto::signature::Signer<crypto::Signature>,
 {
     pub fn new(
         config: Config,
         db: Stores<D>,
         storage: S,
         policies: policy::Config<Write>,
-        signer: Device<G>,
+        secret_key: crypto::SigningKey,
         rng: Rng,
         node: NodeAnnouncement,
         emitter: Emitter<Event>,
@@ -506,12 +559,20 @@ where
         let last_timestamp = node.timestamp;
         let clock = LocalTime::default(); // Updated on initialize.
         let inventory = gossip::inventory(clock.into(), []); // Updated on initialize.
-
+        let fetcher = {
+            let config = fetcher::Config::new()
+                .with_max_concurrency(
+                    std::num::NonZeroUsize::new(config.limits.fetch_concurrency.into())
+                        .expect("fetch concurrency was zero, must be at least 1"),
+                )
+                .with_max_capacity(fetcher::MaxQueueSize::default());
+            FetcherService::new(config)
+        };
         Self {
             config,
             storage,
             policies,
-            signer,
+            secret_key,
             rng,
             inventory,
             node,
@@ -520,7 +581,7 @@ where
             outbox: Outbox::default(),
             limiter,
             sessions,
-            fetching: HashMap::new(),
+            fetcher,
             filter: Filter::empty(),
             relayed_by: HashMap::default(),
             last_idle: LocalTime::default(),
@@ -572,7 +633,7 @@ where
             self.filter = Filter::allowed_by(self.policies.seed_policies()?);
             // Update and announce new inventory.
             if let Err(e) = self.remove_inventory(id) {
-                error!(target: "service", "Error updating inventory after unseed: {e}");
+                warn!(target: "service", "Failed to update inventory after unseed: {e}");
             }
         }
         Ok(updated)
@@ -580,7 +641,7 @@ where
 
     /// Find the closest `n` peers by proximity in seeding graphs.
     /// Returns a sorted list from the closest peer to the furthest.
-    /// Peers with more seedings in common score score higher.
+    /// Peers with more seedings in common score higher.
     #[allow(unused)]
     pub fn closest_peers(&self, n: usize) -> Vec<NodeId> {
         todo!()
@@ -611,14 +672,19 @@ where
         &self.policies
     }
 
-    /// Get the local signer.
-    pub fn signer(&self) -> &Device<G> {
-        &self.signer
+    /// Get the local secret key.
+    #[cfg(any(test, feature = "test"))]
+    pub fn secret_key(&self) -> &radicle::crypto::SigningKey {
+        &self.secret_key
     }
 
     /// Subscriber to inner `Emitter` events.
     pub fn events(&mut self) -> Events {
         Events::from(self.emitter.subscribe())
+    }
+
+    pub fn fetcher(&self) -> &FetcherState {
+        self.fetcher.state()
     }
 
     /// Get I/O outbox.
@@ -645,119 +711,6 @@ where
             .collect();
 
         Ok(Lookup { local, remote })
-    }
-
-    /// Initialize service with current time. Call this once.
-    pub fn initialize(&mut self, time: LocalTime) -> Result<(), Error> {
-        debug!(target: "service", "Init @{}", time.as_millis());
-        assert_ne!(time, LocalTime::default());
-
-        let nid = self.node_id();
-
-        self.clock = time;
-        self.started_at = Some(time);
-        self.last_online_at = match self.db.gossip().last() {
-            Ok(Some(last)) => Some(last.to_local_time()),
-            Ok(None) => None,
-            Err(e) => {
-                error!(target: "service", "Error getting the lastest gossip message from db: {e}");
-                None
-            }
-        };
-
-        // Populate refs database. This is only useful as part of the upgrade process for nodes
-        // that have been online since before the refs database was created.
-        match self.db.refs().count() {
-            Ok(0) => {
-                info!(target: "service", "Empty refs database, populating from storage..");
-                if let Err(e) = self.db.refs_mut().populate(&self.storage) {
-                    error!(target: "service", "Failed to populate refs database: {e}");
-                }
-            }
-            Ok(n) => debug!(target: "service", "Refs database has {n} cached references"),
-            Err(e) => error!(target: "service", "Error checking refs database: {e}"),
-        }
-
-        let announced = self
-            .db
-            .seeds()
-            .seeded_by(&nid)?
-            .collect::<Result<HashMap<_, _>, _>>()?;
-        let mut inventory = BTreeSet::new();
-        let mut private = BTreeSet::new();
-
-        for repo in self.storage.repositories()? {
-            let rid = repo.rid;
-
-            // If we're not seeding this repo, just skip it.
-            if !self.policies.is_seeding(&rid)? {
-                warn!(target: "service", "Local repository {rid} is not seeded");
-                continue;
-            }
-            // Add public repositories to inventory.
-            if repo.doc.is_public() {
-                inventory.insert(rid);
-            } else {
-                private.insert(rid);
-            }
-            // If we have no owned refs for this repo, then there's nothing to announce.
-            let Some(updated_at) = repo.synced_at else {
-                continue;
-            };
-            // Skip this repo if the sync status matches what we have in storage.
-            if let Some(announced) = announced.get(&rid) {
-                if updated_at.oid == announced.oid {
-                    continue;
-                }
-            }
-            // Make sure our local node's sync status is up to date with storage.
-            if self.db.seeds_mut().synced(
-                &rid,
-                &nid,
-                updated_at.oid,
-                updated_at.timestamp.into(),
-            )? {
-                debug!(target: "service", "Saved local sync status for {rid}..");
-            }
-            // If we got here, it likely means a repo was updated while the node was stopped.
-            // Therefore, we pre-load a refs announcement for this repo, so that it is included in
-            // the historical gossip messages when a node connects and subscribes to this repo.
-            if let Ok((ann, _)) = self.refs_announcement_for(rid, [nid]) {
-                debug!(target: "service", "Adding refs announcement for {rid} to historical gossip messages..");
-                self.db.gossip_mut().announced(&nid, &ann)?;
-            }
-        }
-
-        // Ensure that our inventory is recorded in our routing table, and we are seeding
-        // all of it. It can happen that inventory is not properly seeded if for eg. the
-        // user creates a new repository while the node is stopped.
-        self.db
-            .routing_mut()
-            .add_inventory(inventory.iter(), nid, time.into())?;
-        self.inventory = gossip::inventory(self.timestamp(), inventory);
-
-        // Ensure that private repositories are not in our inventory. It's possible that
-        // a repository was public and then it was made private.
-        self.db
-            .routing_mut()
-            .remove_inventories(private.iter(), &nid)?;
-
-        // Setup subscription filter for seeded repos.
-        self.filter = Filter::allowed_by(self.policies.seed_policies()?);
-        // Connect to configured peers.
-        let addrs = self.config.connect.clone();
-        for (id, addr) in addrs.into_iter().map(|ca| ca.into()) {
-            if let Err(e) = self.connect(id, addr) {
-                error!(target: "service", "Service::initialization connection error: {e}");
-            }
-        }
-        // Try to establish some connections.
-        self.maintain_connections();
-        // Start periodic tasks.
-        self.outbox.wakeup(IDLE_INTERVAL);
-        self.outbox.wakeup(GOSSIP_INTERVAL);
-
-        Ok(())
     }
 
     pub fn tick(&mut self, now: LocalTime, metrics: &Metrics) {
@@ -790,7 +743,7 @@ where
         );
 
         if now - self.last_idle >= IDLE_INTERVAL {
-            trace!(target: "service", "Running 'idle' task...");
+            trace!(target: "service", "Running 'idle' task…");
 
             self.keep_alive(&now);
             self.disconnect_unresponsive_peers(&now);
@@ -801,42 +754,42 @@ where
             self.last_idle = now;
         }
         if now - self.last_gossip >= GOSSIP_INTERVAL {
-            trace!(target: "service", "Running 'gossip' task...");
+            trace!(target: "service", "Running 'gossip' task…");
 
             if let Err(e) = self.relay_announcements() {
-                error!(target: "service", "Error relaying stored announcements: {e}");
+                warn!(target: "service", "Failed to relay stored announcements: {e}");
             }
             self.outbox.wakeup(GOSSIP_INTERVAL);
             self.last_gossip = now;
         }
         if now - self.last_sync >= SYNC_INTERVAL {
-            trace!(target: "service", "Running 'sync' task...");
+            trace!(target: "service", "Running 'sync' task…");
 
             if let Err(e) = self.fetch_missing_repositories() {
-                error!(target: "service", "Error fetching missing inventory: {e}");
+                warn!(target: "service", "Failed to fetch missing inventory: {e}");
             }
             self.outbox.wakeup(SYNC_INTERVAL);
             self.last_sync = now;
         }
         if now - self.last_announce >= ANNOUNCE_INTERVAL {
-            trace!(target: "service", "Running 'announce' task...");
+            trace!(target: "service", "Running 'announce' task…");
 
             self.announce_inventory();
             self.outbox.wakeup(ANNOUNCE_INTERVAL);
             self.last_announce = now;
         }
         if now - self.last_prune >= PRUNE_INTERVAL {
-            trace!(target: "service", "Running 'prune' task...");
+            trace!(target: "service", "Running 'prune' task…");
 
             if let Err(err) = self.prune_routing_entries(&now) {
-                error!(target: "service", "Error pruning routing entries: {err}");
+                warn!(target: "service", "Failed to prune routing entries: {err}");
             }
             if let Err(err) = self
                 .db
                 .gossip_mut()
                 .prune((now - LocalDuration::from(self.config.limits.gossip_max_age)).into())
             {
-                error!(target: "service", "Error pruning gossip entries: {err}");
+                warn!(target: "service", "Failed to prune gossip entries: {err}");
             }
 
             self.outbox.wakeup(PRUNE_INTERVAL);
@@ -874,10 +827,10 @@ where
                 self.outbox.disconnect(nid, DisconnectReason::Command);
             }
             Command::Config(resp) => {
-                resp.send(self.config.clone()).ok();
+                resp.ok(self.config.clone()).ok();
             }
             Command::ListenAddrs(resp) => {
-                resp.send(self.listening.clone()).ok();
+                resp.ok(self.listening.clone()).ok();
             }
             Command::Seeds(rid, namespaces, resp) => match self.seeds(&rid, namespaces) {
                 Ok(seeds) => {
@@ -887,21 +840,28 @@ where
                         "Found {} connected seed(s) and {} disconnected seed(s) for {}",
                         connected.len(), disconnected.len(),  rid
                     );
-                    resp.send(seeds).ok();
+                    resp.ok(seeds).ok();
                 }
                 Err(e) => {
-                    error!(target: "service", "Error getting seeds for {rid}: {e}");
+                    warn!(target: "service", "Failed to get seeds for {rid}: {e}");
+                    resp.err(e).ok();
                 }
             },
-            Command::Fetch(rid, seed, timeout, resp) => {
-                self.fetch(rid, seed, timeout, Some(resp));
+            Command::Fetch(rid, seed, timeout, signed_references_minimum_feature_level, resp) => {
+                let feature_level = signed_references_minimum_feature_level
+                    .unwrap_or(self.config.fetch.feature_level_min());
+                let config = self
+                    .fetch_config()
+                    .with_timeout(timeout)
+                    .with_minimum_feature_level(feature_level);
+                self.fetch(rid, seed, vec![], config, Some(resp));
             }
             Command::Seed(rid, scope, resp) => {
                 // Update our seeding policy.
                 let seeded = self
                     .seed(&rid, scope)
                     .expect("Service::command: error seeding repository");
-                resp.send(seeded).ok();
+                resp.ok(seeded).ok();
 
                 // Let all our peers know that we're interested in this repo from now on.
                 self.outbox.broadcast(
@@ -913,43 +873,65 @@ where
                 let updated = self
                     .unseed(&id)
                     .expect("Service::command: error unseeding repository");
-                resp.send(updated).ok();
+                resp.ok(updated).ok();
             }
             Command::Follow(id, alias, resp) => {
                 let seeded = self
                     .policies
                     .follow(&id, alias.as_ref())
                     .expect("Service::command: error following node");
-                resp.send(seeded).ok();
+                resp.ok(seeded).ok();
             }
             Command::Unfollow(id, resp) => {
                 let updated = self
                     .policies
                     .unfollow(&id)
                     .expect("Service::command: error unfollowing node");
-                resp.send(updated).ok();
+                resp.ok(updated).ok();
+            }
+            Command::Block(id, resp) => {
+                let updated = self
+                    .policies
+                    .set_follow_policy(&id, policy::Policy::Block)
+                    .expect("Service::command: error blocking node");
+                if updated {
+                    self.outbox.disconnect(id, DisconnectReason::Policy);
+                }
+                resp.ok(updated).ok();
             }
             Command::AnnounceRefs(id, namespaces, resp) => {
                 let doc = match self.storage.get(id) {
                     Ok(Some(doc)) => doc,
                     Ok(None) => {
-                        error!(target: "service", "Error announcing refs: repository {id} not found");
+                        warn!(target: "service", "Failed to announce refs: repository {id} not found");
+                        resp.err(command::Error::custom(format!("repository {id} not found")))
+                            .ok();
                         return;
                     }
                     Err(e) => {
-                        error!(target: "service", "Error announcing refs: doc error: {e}");
+                        warn!(target: "service", "Failed to announce refs: doc error: {e}");
+                        resp.err(e).ok();
                         return;
                     }
                 };
 
                 match self.announce_own_refs(id, doc, namespaces) {
                     Ok((refs, _timestamp)) => {
-                        for r in refs {
-                            resp.send(r).ok();
+                        // TODO(finto): currently the command caller only
+                        // expects one `RefsAt`, this should be fixed in the
+                        // trait, eventually.
+                        if let Some(refs) = refs.first() {
+                            resp.ok(*refs).ok();
+                        } else {
+                            resp.err(command::Error::custom(format!(
+                                "no refs were announced for {id}"
+                            )))
+                            .ok();
                         }
                     }
                     Err(err) => {
-                        error!(target: "service", "Error announcing refs: {err}");
+                        warn!(target: "service", "Failed to announce refs: {err}");
+                        resp.err(err).ok();
                     }
                 }
             }
@@ -958,10 +940,11 @@ where
             }
             Command::AddInventory(rid, resp) => match self.add_inventory(rid) {
                 Ok(updated) => {
-                    resp.send(updated).ok();
+                    resp.ok(updated).ok();
                 }
                 Err(e) => {
-                    error!(target: "service", "Error adding {rid} to inventory: {e}");
+                    warn!(target: "service", "Failed to add {rid} to inventory: {e}");
+                    resp.err(e).ok();
                 }
             },
             Command::QueryState(query, sender) => {
@@ -978,268 +961,191 @@ where
         from: NodeId,
         refs: NonEmpty<RefsAt>,
         scope: Scope,
-        timeout: time::Duration,
-        channel: Option<chan::Sender<FetchResult>>,
+        config: fetcher::FetchConfig,
     ) -> bool {
         match self.refs_status_of(rid, refs, &scope) {
             Ok(status) => {
                 if status.want.is_empty() {
                     debug!(target: "service", "Skipping fetch for {rid}, all refs are already in storage");
                 } else {
-                    return self._fetch(rid, from, status.want, timeout, channel);
+                    self.fetch(rid, from, status.want, config, None);
+                    return true;
                 }
             }
             Err(e) => {
-                error!(target: "service", "Error getting the refs status of {rid}: {e}");
+                warn!(target: "service", "Failed to get the refs status of {rid}: {e}");
             }
         }
         // We didn't try to fetch anything.
         false
     }
 
-    /// Initiate an outgoing fetch for some repository.
     fn fetch(
         &mut self,
         rid: RepoId,
         from: NodeId,
-        timeout: time::Duration,
-        channel: Option<chan::Sender<FetchResult>>,
-    ) -> bool {
-        self._fetch(rid, from, vec![], timeout, channel)
-    }
-
-    fn _fetch(
-        &mut self,
-        rid: RepoId,
-        from: NodeId,
         refs_at: Vec<RefsAt>,
-        timeout: time::Duration,
-        channel: Option<chan::Sender<FetchResult>>,
-    ) -> bool {
-        match self.try_fetch(rid, &from, refs_at.clone(), timeout) {
-            Ok(fetching) => {
+        config: fetcher::FetchConfig,
+        channel: Option<command::Responder<FetchResult>>,
+    ) {
+        let session = {
+            let reason = format!("peer {from} is not connected; cannot initiate fetch");
+            let Some(session) = self.sessions.get_mut(&from) else {
                 if let Some(c) = channel {
-                    fetching.subscribe(c);
+                    c.ok(FetchResult::Failed { reason }).ok();
                 }
-                return true;
-            }
-            Err(TryFetchError::AlreadyFetching(fetching)) => {
-                // If we're already fetching the same refs from the requested peer, there's nothing
-                // to do, we simply add the supplied channel to the list of subscribers so that it
-                // is notified on completion. Otherwise, we queue a fetch with the requested peer.
-                if fetching.from == from && fetching.refs_at == refs_at {
-                    debug!(target: "service", "Ignoring redundant fetch of {rid} from {from}");
-
-                    if let Some(c) = channel {
-                        fetching.subscribe(c);
-                    }
-                } else {
-                    let fetch = QueuedFetch {
-                        rid,
-                        refs_at,
-                        from,
-                        timeout,
-                        channel,
-                    };
-                    debug!(target: "service", "Queueing fetch for {rid} with {from} (already fetching)..");
-
-                    self.queue_fetch(fetch);
-                }
-            }
-            Err(TryFetchError::SessionCapacityReached) => {
-                debug!(target: "service", "Fetch capacity reached for {from}, queueing {rid}..");
-                self.queue_fetch(QueuedFetch {
-                    rid,
-                    refs_at,
-                    from,
-                    timeout,
-                    channel,
-                });
-            }
-            Err(e) => {
+                return;
+            };
+            if !session.is_connected() {
                 if let Some(c) = channel {
-                    c.send(FetchResult::Failed {
-                        reason: e.to_string(),
-                    })
-                    .ok();
+                    c.ok(FetchResult::Failed { reason }).ok();
                 }
+                return;
             }
-        }
-        false
-    }
-
-    fn queue_fetch(&mut self, fetch: QueuedFetch) {
-        let Some(s) = self.sessions.get_mut(&fetch.from) else {
-            log::error!(target: "service", "Cannot queue fetch for unknown session {}", fetch.from);
-            return;
+            session
         };
-        if let Err(e) = s.queue_fetch(fetch) {
-            let fetch = e.inner();
-            log::debug!(target: "service", "Unable to queue fetch for {} with {}: {e}", &fetch.rid, &fetch.from);
-        }
-    }
 
-    // TODO: Buffer/throttle fetches.
-    fn try_fetch(
-        &mut self,
-        rid: RepoId,
-        from: &NodeId,
-        refs_at: Vec<RefsAt>,
-        timeout: time::Duration,
-    ) -> Result<&mut FetchState, TryFetchError<'_>> {
-        let from = *from;
-        let Some(session) = self.sessions.get_mut(&from) else {
-            return Err(TryFetchError::SessionNotConnected);
-        };
-        let fetching = self.fetching.entry(rid);
-
-        trace!(target: "service", "Trying to fetch {refs_at:?} for {rid}..");
-
-        let fetching = match fetching {
-            Entry::Vacant(fetching) => fetching,
-            Entry::Occupied(fetching) => {
-                // We're already fetching this repo from some peer.
-                return Err(TryFetchError::AlreadyFetching(fetching.into_mut()));
-            }
-        };
-        // Sanity check: We shouldn't be fetching from this session, since we return above if we're
-        // fetching from any session.
-        debug_assert!(!session.is_fetching(&rid));
-
-        if !session.is_connected() {
-            // This can happen if a session disconnects in the time between asking for seeds to
-            // fetch from, and initiating the fetch from one of those seeds.
-            return Err(TryFetchError::SessionNotConnected);
-        }
-        if session.is_at_capacity() {
-            // If we're already fetching multiple repos from this peer.
-            return Err(TryFetchError::SessionCapacityReached);
-        }
-
-        let fetching = fetching.insert(FetchState {
+        let cmd = fetcher::state::command::Fetch {
             from,
-            refs_at: refs_at.clone(),
-            subscribers: vec![],
-        });
-        self.outbox.fetch(
-            session,
             rid,
-            refs_at,
-            timeout,
-            self.config.limits.fetch_pack_receive,
-        );
+            refs: refs_at.into(),
+            config,
+        };
+        let fetcher::service::FetchInitiated { event, rejected } = self.fetcher.fetch(cmd, channel);
 
-        Ok(fetching)
+        if let Some(c) = rejected {
+            c.ok(FetchResult::Failed {
+                reason: "fetch queue at capacity".to_string(),
+            })
+            .ok();
+        }
+
+        match event {
+            fetcher::state::event::Fetch::Started {
+                rid,
+                from,
+                refs: refs_at,
+                config,
+            } => {
+                debug!(target: "service", "Starting fetch for {rid} from {from}");
+                self.outbox.fetch(
+                    session,
+                    rid,
+                    refs_at.into(),
+                    self.config.limits.fetch_pack_receive,
+                    config,
+                );
+            }
+            fetcher::state::event::Fetch::Queued { rid, from } => {
+                debug!(target: "service", "Queued fetch for {rid} from {from}");
+            }
+            fetcher::state::event::Fetch::AlreadyFetching { rid, from } => {
+                debug!(target: "service", "Already fetching {rid} from {from}");
+            }
+            fetcher::state::event::Fetch::QueueAtCapacity { rid, from, .. } => {
+                debug!(target: "service", "Queue at capacity for {from}, rejected {rid}");
+            }
+        }
     }
 
     pub fn fetched(
         &mut self,
         rid: RepoId,
-        remote: NodeId,
+        from: NodeId,
         result: Result<crate::worker::fetch::FetchResult, crate::worker::FetchError>,
     ) {
-        let Some(fetching) = self.fetching.remove(&rid) else {
-            error!(target: "service", "Received unexpected fetch result for {rid}, from {remote}");
-            return;
-        };
-        debug_assert_eq!(fetching.from, remote);
+        let cmd = fetcher::state::command::Fetched { from, rid };
+        let fetcher::service::FetchCompleted { event, subscribers } = self.fetcher.fetched(cmd);
 
-        if let Some(s) = self.sessions.get_mut(&remote) {
-            // Mark this RID as fetched for this session.
-            s.fetched(rid);
-        }
-
-        // Notify all fetch subscribers of the fetch result. This is used when the user requests
-        // a fetch via the CLI, for example.
-        for sub in &fetching.subscribers {
-            debug!(target: "service", "Found existing fetch request from {remote}, sending result..");
-
-            let result = match &result {
-                Ok(success) => FetchResult::Success {
-                    updated: success.updated.clone(),
-                    namespaces: success.namespaces.clone(),
-                    clone: success.clone,
-                },
-                Err(e) => FetchResult::Failed {
-                    reason: e.to_string(),
-                },
-            };
-            if sub.send(result).is_err() {
-                error!(target: "service", "Error sending fetch result for {rid} from {remote}..");
-            } else {
-                debug!(target: "service", "Sent fetch result for {rid} from {remote}..");
-            }
-        }
-
-        match result {
-            Ok(crate::worker::fetch::FetchResult {
-                updated,
-                canonical,
-                namespaces,
-                clone,
-                doc,
-            }) => {
-                info!(target: "service", "Fetched {rid} from {remote} successfully");
-                // Update our routing table in case this fetch was user-initiated and doesn't
-                // come from an announcement.
-                self.seed_discovered(rid, remote, self.clock.into());
-
-                for update in &updated {
-                    if update.is_skipped() {
-                        trace!(target: "service", "Ref skipped: {update} for {rid}");
-                    } else {
-                        debug!(target: "service", "Ref updated: {update} for {rid}");
-                    }
-                }
-                self.emitter.emit(Event::RefsFetched {
-                    remote,
-                    rid,
-                    updated: updated.clone(),
-                });
-                self.emitter.emit_all(
-                    canonical
-                        .into_iter()
-                        .map(|(refname, target)| Event::CanonicalRefUpdated {
-                            rid,
-                            refname,
-                            target,
-                        })
-                        .collect(),
-                );
-
-                // Announce our new inventory if this fetch was a full clone.
-                // Only update and announce inventory for public repositories.
-                if clone && doc.is_public() {
-                    debug!(target: "service", "Updating and announcing inventory for cloned repository {rid}..");
-
-                    if let Err(e) = self.add_inventory(rid) {
-                        error!(target: "service", "Error announcing inventory for {rid}: {e}");
-                    }
-                }
-
-                // It's possible for a fetch to succeed but nothing was updated.
-                if updated.is_empty() || updated.iter().all(|u| u.is_skipped()) {
-                    debug!(target: "service", "Nothing to announce, no refs were updated..");
-                } else {
-                    // Finally, announce the refs. This is useful for nodes to know what we've synced,
-                    // beyond just knowing that we have added an item to our inventory.
-                    if let Err(e) = self.announce_refs(rid, doc.into(), namespaces, false) {
-                        error!(target: "service", "Failed to announce new refs: {e}");
-                    }
-                }
-            }
-            Err(err) => {
-                error!(target: "service", "Fetch failed for {rid} from {remote}: {err}");
-
-                // For now, we only disconnect the remote in case of timeout. In the future,
-                // there may be other reasons to disconnect.
-                if err.is_timeout() {
-                    self.outbox.disconnect(remote, DisconnectReason::Fetch(err));
-                }
-            }
-        }
-        // We can now try to dequeue more fetches.
+        // Dequeue next fetches
         self.dequeue_fetches();
+
+        match event {
+            fetcher::state::event::Fetched::NotFound { from, rid } => {
+                debug!(target: "service", "Unexpected fetch result for {rid} from {from}");
+            }
+            fetcher::state::event::Fetched::Completed { from, rid, refs: _ } => {
+                // Notify responders
+                let fetch_result = match &result {
+                    Ok(success) => FetchResult::Success {
+                        updated: success.updated.clone(),
+                        namespaces: success.namespaces.clone(),
+                        clone: success.clone,
+                    },
+                    Err(e) => FetchResult::Failed {
+                        reason: e.to_string(),
+                    },
+                };
+                for responder in subscribers {
+                    responder.ok(fetch_result.clone()).ok();
+                }
+                match result {
+                    Ok(crate::worker::fetch::FetchResult {
+                        updated,
+                        canonical,
+                        namespaces,
+                        clone,
+                        doc,
+                    }) => {
+                        info!(target: "service", "Fetched {rid} from {from} successfully");
+                        // Update our routing table in case this fetch was user-initiated and doesn't
+                        // come from an announcement.
+                        self.seed_discovered(rid, from, self.clock.into());
+
+                        for update in &updated {
+                            if update.is_skipped() {
+                                trace!(target: "service", "Ref skipped: {update} for {rid}");
+                            } else {
+                                debug!(target: "service", "Ref updated: {update} for {rid}");
+                            }
+                        }
+                        self.emitter.emit(Event::RefsFetched {
+                            remote: from,
+                            rid,
+                            updated: updated.clone(),
+                        });
+                        self.emitter
+                            .emit_all(canonical.into_iter().map(|(refname, target)| {
+                                Event::CanonicalRefUpdated {
+                                    rid,
+                                    refname,
+                                    target,
+                                }
+                            }));
+
+                        // Announce our new inventory if this fetch was a full clone.
+                        // Only update and announce inventory for public repositories.
+                        if clone && doc.is_public() {
+                            debug!(target: "service", "Updating and announcing inventory for cloned repository {rid}..");
+
+                            if let Err(e) = self.add_inventory(rid) {
+                                warn!(target: "service", "Failed to announce inventory for {rid}: {e}");
+                            }
+                        }
+
+                        // It's possible for a fetch to succeed but nothing was updated.
+                        if updated.is_empty() || updated.iter().all(|u| u.is_skipped()) {
+                            debug!(target: "service", "Nothing to announce, no refs were updated..");
+                        } else {
+                            // Finally, announce the refs. This is useful for nodes to know what we've synced,
+                            // beyond just knowing that we have added an item to our inventory.
+                            if let Err(e) = self.announce_refs(rid, doc.into(), namespaces, false) {
+                                warn!(target: "service", "Failed to announce new refs: {e}");
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        warn!(target: "service", "Fetch failed for {rid} from {from}: {err}");
+
+                        // For now, we only disconnect the from in case of timeout. In the future,
+                        // there may be other reasons to disconnect.
+                        if err.is_timeout() {
+                            self.outbox.disconnect(from, DisconnectReason::Fetch(err));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Attempt to dequeue fetches from all peers.
@@ -1256,37 +1162,43 @@ where
             .map(|(k, _)| *k)
             .collect::<Vec<_>>();
 
-        // Try to dequeue once per session.
         for nid in sessions {
-            // SAFETY: All the keys we are iterating on exist.
             #[allow(clippy::unwrap_used)]
             let sess = self.sessions.get_mut(&nid).unwrap();
-            if !sess.is_connected() || sess.is_at_capacity() {
+            if !sess.is_connected() {
                 continue;
             }
 
-            if let Some(QueuedFetch {
+            let Some(fetcher::QueuedFetch {
                 rid,
-                from,
-                refs_at,
-                timeout,
-                channel,
-            }) = sess.dequeue_fetch()
-            {
-                debug!(target: "service", "Dequeued fetch for {rid} from session {from}..");
+                refs: refs_at,
+                config,
+            }) = self.fetcher.dequeue(&nid)
+            else {
+                continue;
+            };
 
-                if let Some(refs) = NonEmpty::from_vec(refs_at) {
-                    let repo_entry = self.policies.seed_policy(&rid).expect(
-                        "Service::dequeue_fetch: error accessing repo seeding configuration",
-                    );
-                    let SeedingPolicy::Allow { scope } = repo_entry.policy else {
-                        debug!(target: "service", "Repository {rid} is no longer seeded, skipping..");
-                        continue;
-                    };
-                    self.fetch_refs_at(rid, from, refs, scope, timeout, channel);
-                } else {
-                    // If no refs are specified, always do a full fetch.
-                    self.fetch(rid, from, timeout, channel);
+            // Check seeding policy
+            let repo_entry = self
+                .policies
+                .seed_policy(&rid)
+                .expect("error accessing repo seeding configuration");
+
+            let SeedingPolicy::Allow { scope } = repo_entry.policy else {
+                debug!(target: "service", "Repository {} no longer seeded, skipping", rid);
+                continue;
+            };
+
+            debug!(target: "service", "Dequeued fetch for {} from {}", rid, nid);
+
+            match refs_at {
+                RefsToFetch::Refs(refs) => {
+                    self.fetch_refs_at(rid, nid, refs, scope, config);
+                }
+                RefsToFetch::All => {
+                    // Channel is `None` since they will already be
+                    // registered with the fetcher service.
+                    self.fetch(rid, nid, vec![], config, None);
                 }
             }
         }
@@ -1310,10 +1222,10 @@ where
                     return false;
                 }
             }
-            Err(e) => error!(target: "service", "Error querying ban status for {ip}: {e}"),
+            Err(e) => warn!(target: "service", "Failed to query ban status for {ip}: {e}"),
         }
         let host: HostName = ip.into();
-        let tokens = RateLimit::from(self.config.limits.rate.inbound.clone());
+        let tokens = self.config.limits.rate.inbound;
 
         if self.limiter.limit(host.clone(), None, &tokens, self.clock) {
             trace!(target: "service", "Rate limiting inbound connection from {host}..");
@@ -1340,6 +1252,16 @@ where
     }
 
     pub fn connected(&mut self, remote: NodeId, addr: Address, link: Link) {
+        if let Ok(true) = self.policies.is_blocked(&remote) {
+            self.emitter.emit(Event::PeerDisconnected {
+                nid: remote,
+                reason: format!("{remote} is blocked"),
+            });
+            info!(target: "service", "Disconnecting blocked inbound peer {remote}");
+            self.outbox.disconnect(remote, DisconnectReason::Policy);
+            return;
+        }
+
         info!(target: "service", "Connected to {remote} ({addr}) ({link:?})");
         self.emitter.emit(Event::PeerConnected { nid: remote });
 
@@ -1372,16 +1294,14 @@ where
                     self.outbox.write_all(peer, msgs);
                 }
                 Entry::Vacant(e) => {
-                    if let HostName::Ip(ip) = addr.host {
-                        if !address::is_local(&ip) {
-                            if let Err(e) =
-                                self.db
-                                    .addresses_mut()
-                                    .record_ip(&remote, ip, self.clock.into())
-                            {
-                                log::error!(target: "service", "Error recording IP address for {remote}: {e}");
-                            }
-                        }
+                    if let HostName::Ip(ip) = addr.host
+                        && !address::is_local(&ip)
+                        && let Err(e) =
+                            self.db
+                                .addresses_mut()
+                                .record_ip(&remote, ip, self.clock.into())
+                    {
+                        log::debug!(target: "service", "Failed to record IP address for {remote}: {e}");
                     }
                     let peer = e.insert(Session::inbound(
                         remote,
@@ -1389,7 +1309,6 @@ where
                         self.config.is_persistent(&remote),
                         self.rng.clone(),
                         self.clock,
-                        self.config.limits.clone(),
                     ));
                     self.outbox.write_all(peer, msgs);
                 }
@@ -1420,22 +1339,33 @@ where
         let link = session.link;
         let addr = session.addr.clone();
 
-        self.fetching.retain(|_, fetching| {
-            if fetching.from != remote {
-                return true;
+        let cmd = fetcher::state::command::Cancel { from: remote };
+        let fetcher::service::FetchesCancelled { event, orphaned } = self.fetcher.cancel(cmd);
+
+        match event {
+            fetcher::state::event::Cancel::Unexpected { from } => {
+                debug!(target: "service", "No fetches to cancel for {from}");
             }
-            // Remove and fail any pending fetches from this remote node.
-            for resp in &fetching.subscribers {
-                resp.send(FetchResult::Failed {
-                    reason: format!("disconnected: {reason}"),
+            fetcher::state::event::Cancel::Canceled {
+                from,
+                active,
+                queued,
+            } => {
+                debug!(target: "service", "Cancelled {} ongoing, {} queued for {from}", active.len(), queued.len());
+            }
+        }
+
+        // Notify orphaned responders
+        for (rid, responder) in orphaned {
+            responder
+                .ok(FetchResult::Failed {
+                    reason: format!("failed fetch to {rid}, peer disconnected: {reason}"),
                 })
                 .ok();
-            }
-            false
-        });
+        }
 
         // Attempt to re-connect to persistent peers.
-        if self.config.peer(&remote).is_some() {
+        if self.config.is_persistent(&remote) {
             let delay = LocalDuration::from_secs(2u64.saturating_pow(session.attempts() as u32))
                 .clamp(MIN_RECONNECTION_DELTA, MAX_RECONNECTION_DELTA);
 
@@ -1465,6 +1395,7 @@ where
                 DisconnectReason::Session(e) => e.severity(),
                 DisconnectReason::Command
                 | DisconnectReason::Conflict
+                | DisconnectReason::Policy
                 | DisconnectReason::SelfConnection => Severity::Low,
             };
 
@@ -1473,7 +1404,7 @@ where
                 .addresses_mut()
                 .disconnected(&remote, &addr, severity)
             {
-                error!(target: "service", "Error updating address store: {e}");
+                debug!(target: "service", "Failed to update address store: {e}");
             }
             // Only re-attempt outbound connections, since we don't care if an inbound connection
             // is dropped.
@@ -1524,7 +1455,7 @@ where
 
         // Don't allow messages from too far in the future.
         if timestamp.saturating_sub(now.as_millis()) > MAX_TIME_DELTA.as_millis() as u64 {
-            return Err(session::Error::InvalidTimestamp(timestamp));
+            return Err(session::Error::future_timestamp(timestamp, now.into()));
         }
 
         // We don't process announcements from nodes we don't know, since the node announcement is
@@ -1544,13 +1475,13 @@ where
                     }
                 }
                 Err(e) => {
-                    error!(target: "service", "Error looking up node in address book: {e}");
+                    debug!(target: "service", "Failed to look up node in address book: {e}");
                     return Ok(None);
                 }
             }
         }
 
-        // Discard announcement messages we've already seen, otherwise update our last seen time.
+        // Discard announcement messages we've already seen; otherwise, update our last seen time.
         let relay = match self.db.gossip_mut().announced(announcer, announcement) {
             Ok(Some(id)) => {
                 log::debug!(
@@ -1577,7 +1508,7 @@ where
                 return Ok(None);
             }
             Err(e) => {
-                error!(target: "service", "Error updating gossip entry from {announcer}: {e}");
+                debug!(target: "service", "Failed to update gossip entry from {announcer}: {e}");
                 return Ok(None);
             }
         };
@@ -1602,7 +1533,7 @@ where
                         }
                     }
                     Err(e) => {
-                        error!(target: "service", "Error processing inventory from {announcer}: {e}");
+                        debug!(target: "service", "Failed to process inventory from {announcer}: {e}");
                         return Ok(None);
                     }
                 }
@@ -1633,7 +1564,7 @@ where
                                         missing.push(*id);
                                     }
                                 }
-                                Err(e) => error!(
+                                Err(e) => debug!(
                                     target: "service",
                                     "Error checking local inventory for {id}: {e}"
                                 ),
@@ -1649,7 +1580,7 @@ where
 
                 for rid in missing {
                     debug!(target: "service", "Missing seeded inventory {rid}; initiating fetch..");
-                    self.fetch(rid, *announcer, FETCH_TIMEOUT, None);
+                    self.fetch(rid, *announcer, vec![], self.fetch_config(), None);
                 }
                 return Ok(relay);
             }
@@ -1703,7 +1634,7 @@ where
                             }
                         }
                         Err(e) => {
-                            error!(target: "service", "Error updating sync status for {}: {e}", message.rid);
+                            debug!(target: "service", "Failed to update sync status for {}: {e}", message.rid);
                         }
                     }
                 }
@@ -1718,9 +1649,18 @@ where
                     );
                     return Ok(None);
                 };
-                // Refs can be relayed by peers who don't have the data in storage,
-                // therefore we only check whether we are connected to the *announcer*,
-                // which is required by the protocol to only announce refs it has.
+                // Ref announcements may be relayed by peers who don't have the
+                // actual refs in storage, therefore we only check whether we
+                // are connected to the *announcer*, which is required by the
+                // protocol to only announce refs it has.
+                //
+                // TODO(Ade): Perhaps it makes sense to establish connections to
+                // followed but unconnected peers. Consider:
+                //   Connections: Alice ←→ Bob ←→ Eve
+                //   Follows:     Alice ←→ Eve
+                // Eve announces refs, and Bob relays these announcements to Alice.
+                // Then, Alice might determine that Bob does not have Eve's refs,
+                // and therefore connect directly to Eve in order to fetch.
                 let Some(remote) = self.sessions.get(announcer).cloned() else {
                     trace!(
                         target: "service",
@@ -1730,7 +1670,7 @@ where
                     return Ok(relay);
                 };
                 // Finally, start the fetch.
-                self.fetch_refs_at(message.rid, remote.id, refs, scope, FETCH_TIMEOUT, None);
+                self.fetch_refs_at(message.rid, remote.id, refs, scope, self.fetch_config());
 
                 return Ok(relay);
             }
@@ -1781,7 +1721,7 @@ where
                     }
                     Err(err) => {
                         // An error here is due to a fault in our address store.
-                        error!(target: "service", "Error processing node announcement from {announcer}: {err}");
+                        warn!(target: "service", "Failed to process node announcement from {announcer}: {err}");
                     }
                 }
             }
@@ -1810,17 +1750,17 @@ where
         remote: &NodeId,
         message: Message,
     ) -> Result<(), session::Error> {
-        let local = self.node_id();
+        let local = *self.nid();
         let relay = self.config.is_relay();
         let Some(peer) = self.sessions.get_mut(remote) else {
-            warn!(target: "service", "Session not found for {remote}");
+            debug!(target: "service", "Session not found for {remote}");
             return Ok(());
         };
         peer.last_active = self.clock;
 
         let limit: RateLimit = match peer.link {
-            Link::Outbound => self.config.limits.rate.outbound.clone().into(),
-            Link::Inbound => self.config.limits.rate.inbound.clone().into(),
+            Link::Outbound => self.config.limits.rate.outbound.into(),
+            Link::Inbound => self.config.limits.rate.inbound.into(),
         };
         if self
             .limiter
@@ -1863,20 +1803,20 @@ where
                 let relayer = remote;
                 let relayer_addr = peer.addr.clone();
 
-                if let Some(id) = self.handle_announcement(relayer, &relayer_addr, &ann)? {
-                    if self.config.is_relay() {
-                        if let AnnouncementMessage::Inventory(_) = ann.message {
-                            if let Err(e) = self
-                                .database_mut()
-                                .gossip_mut()
-                                .set_relay(id, gossip::RelayStatus::Relay)
-                            {
-                                error!(target: "service", "Error setting relay flag for message: {e}");
-                                return Ok(());
-                            }
-                        } else {
-                            self.relay(id, ann);
+                if let Some(id) = self.handle_announcement(relayer, &relayer_addr, &ann)?
+                    && self.config.is_relay()
+                {
+                    if let AnnouncementMessage::Inventory(_) = ann.message {
+                        if let Err(e) = self
+                            .database_mut()
+                            .gossip_mut()
+                            .set_relay(id, gossip::RelayStatus::Relay)
+                        {
+                            warn!(target: "service", "Failed to set relay flag for message: {e}");
+                            return Ok(());
                         }
+                    } else {
+                        self.relay(id, ann);
                     }
                 }
             }
@@ -1892,12 +1832,27 @@ where
                             let ann = match ann {
                                 Ok(a) => a,
                                 Err(e) => {
-                                    error!(target: "service", "Error reading gossip message from store: {e}");
+                                    debug!(target: "service", "Failed to read gossip message from store: {e}");
                                     continue;
                                 }
                             };
                             // Don't send announcements authored by the remote, back to the remote.
                             if ann.node == *remote {
+                                continue;
+                            }
+                            // Only send a `RefsAnnouncement` for repositories that are visible to
+                            // the peer. If we do not have the repository, we can not know whether
+                            // it should be visible to the peer or not, so we default to `false`.
+                            if let AnnouncementMessage::Refs(RefsAnnouncement { rid, .. }) =
+                                &ann.message
+                                && !self
+                                    .storage
+                                    .get(*rid)
+                                    .ok()
+                                    .flatten()
+                                    .map(|doc| doc.is_visible_to(&(*remote).into()))
+                                    .unwrap_or(false)
+                            {
                                 continue;
                             }
                             // Only send messages if we're a relay, or it's our own messages.
@@ -1907,7 +1862,7 @@ where
                         }
                     }
                     Err(e) => {
-                        error!(target: "service", "Error querying gossip messages from store: {e}");
+                        warn!(target: "service", "Failed to query gossip messages from store: {e}");
                     }
                 }
                 peer.subscribe = Some(subscribe);
@@ -1928,20 +1883,18 @@ where
                 );
             }
             Message::Pong { zeroes } => {
-                if let Some((ping, latencies)) = connected {
-                    if let session::PingState::AwaitingResponse {
+                if let Some((ping, latencies)) = connected
+                    && let session::PingState::AwaitingResponse {
                         len: ponglen,
                         since,
                     } = *ping
-                    {
-                        if (ponglen as usize) == zeroes.len() {
-                            *ping = session::PingState::Ok;
-                            // Keep track of peer latency.
-                            latencies.push_back(self.clock - since);
-                            if latencies.len() > MAX_LATENCIES {
-                                latencies.pop_front();
-                            }
-                        }
+                    && (ponglen as usize) == zeroes.len()
+                {
+                    *ping = session::PingState::Ok;
+                    // Keep track of peer latency.
+                    latencies.push_back(self.clock - since);
+                    if latencies.len() > MAX_LATENCIES {
+                        latencies.pop_front();
                     }
                 }
             }
@@ -1974,18 +1927,18 @@ where
             },
         };
         // Remove our own remote, we don't want to fetch that.
-        refs.want.retain(|r| r.remote != self.node_id());
+        refs.want.retain(|r| r.remote != *self.nid());
 
         Ok(refs)
     }
 
     /// Add a seed to our routing table.
     fn seed_discovered(&mut self, rid: RepoId, nid: NodeId, time: Timestamp) {
-        if let Ok(result) = self.db.routing_mut().add_inventory([&rid], nid, time) {
-            if let &[(_, InsertResult::SeedAdded)] = result.as_slice() {
-                self.emitter.emit(Event::SeedDiscovered { rid, nid });
-                debug!(target: "service", "Routing table updated for {rid} with seed {nid}");
-            }
+        if let Ok(result) = self.db.routing_mut().add_inventory([&rid], nid, time)
+            && let &[(_, InsertResult::SeedAdded)] = result.as_slice()
+        {
+            self.emitter.emit(Event::SeedDiscovered { rid, nid });
+            debug!(target: "service", "Routing table updated for {rid} with seed {nid}");
         }
     }
 
@@ -1994,7 +1947,7 @@ where
         let now = self.clock();
         let filter = self.filter();
 
-        // TODO: Only subscribe to outbound connections, otherwise we will consume too
+        // TODO: Only subscribe to outbound connections; otherwise, we will consume too
         // much bandwidth.
 
         // If we've been previously connected to the network, we'll have received gossip messages.
@@ -2011,8 +1964,8 @@ where
         debug!(target: "service", "Subscribing to messages since timestamp {since}..");
 
         vec![
-            Message::node(self.node.clone(), &self.signer),
-            Message::inventory(self.inventory.clone(), &self.signer),
+            Message::node(self.node.clone(), &self.secret_key),
+            Message::inventory(self.inventory.clone(), &self.secret_key),
             Message::subscribe(filter, since, Timestamp::MAX),
         ]
     }
@@ -2028,7 +1981,7 @@ where
 
     /// Remove a local repository from our inventory.
     fn remove_inventory(&mut self, rid: &RepoId) -> Result<bool, Error> {
-        let node = self.node_id();
+        let node = *self.nid();
         let now = self.timestamp();
 
         let removed = self.db.routing_mut().remove_inventory(rid, &node)?;
@@ -2040,11 +1993,11 @@ where
 
     /// Add a local repository to our inventory.
     fn add_inventory(&mut self, rid: RepoId) -> Result<bool, Error> {
-        let node = self.node_id();
+        let node = *self.nid();
         let now = self.timestamp();
 
         if !self.storage.contains(&rid)? {
-            error!(target: "service", "Attempt to add non-existing inventory {rid}: repository not found in storage");
+            debug!(target: "service", "Attempt to add non-existing inventory {rid}: repository not found in storage");
             return Ok(false);
         }
         // Add to our local inventory.
@@ -2069,7 +2022,7 @@ where
 
     /// Get our local inventory.
     ///
-    /// A node's inventory is the advertized list of repositories offered by a node.
+    /// A node's inventory is the advertised list of repositories offered by a node.
     ///
     /// A node's inventory consists of *public* repositories that are seeded and available locally
     /// in the node's storage. We use the routing table as the canonical state of all inventories,
@@ -2095,6 +2048,7 @@ where
     ) -> Result<SyncedRouting, Error> {
         let mut synced = SyncedRouting::default();
         let included = inventory.into_iter().collect::<BTreeSet<_>>();
+        let mut events = Vec::new();
 
         for (rid, result) in
             self.db
@@ -2104,7 +2058,7 @@ where
             match result {
                 InsertResult::SeedAdded => {
                     debug!(target: "service", "Routing table updated for {rid} with seed {from}");
-                    self.emitter.emit(Event::SeedDiscovered { rid, nid: from });
+                    events.push(Event::SeedDiscovered { rid, nid: from });
 
                     if self
                         .policies
@@ -2122,14 +2076,26 @@ where
                 InsertResult::NotUpdated => {}
             }
         }
-        for rid in self.db.routing().get_inventory(&from)?.into_iter() {
-            if !included.contains(&rid) {
-                if self.db.routing_mut().remove_inventory(&rid, &from)? {
-                    synced.removed.push(rid);
-                    self.emitter.emit(Event::SeedDropped { rid, nid: from });
-                }
-            }
-        }
+
+        synced.removed.extend(
+            self.db
+                .routing()
+                .get_inventory(&from)?
+                .into_iter()
+                .filter(|rid| !included.contains(rid)),
+        );
+        self.db
+            .routing_mut()
+            .remove_inventories(&synced.removed, &from)?;
+        events.extend(
+            synced
+                .removed
+                .iter()
+                .map(|&rid| Event::SeedDropped { rid, nid: from }),
+        );
+
+        self.emitter.emit_all(events);
+
         Ok(synced)
     }
 
@@ -2144,7 +2110,9 @@ where
         let mut refs = BoundedVec::<_, REF_REMOTE_LIMIT>::new();
 
         for remote_id in remotes.into_iter() {
-            let refs_at = RefsAt::new(&repo, remote_id)?;
+            let refs_at = RefsAt::new(&repo, remote_id).map_err(|err| {
+                radicle::storage::Error::Refs(radicle::storage::refs::Error::Read(err))
+            })?;
 
             if refs.push(refs_at).is_err() {
                 warn!(
@@ -2160,7 +2128,7 @@ where
             refs: refs.clone(),
             timestamp,
         });
-        Ok((msg.signed(&self.signer), refs.into()))
+        Ok((msg.signed(&self.secret_key), refs.into()))
     }
 
     /// Announce our own refs for the given repo.
@@ -2188,7 +2156,7 @@ where
                 r.at,
                 timestamp.to_local_time(),
             ) {
-                error!(
+                warn!(
                     target: "service",
                     "Error updating refs database for `rad/sigrefs` of {} in {rid}: {e}",
                     r.remote
@@ -2219,7 +2187,7 @@ where
             );
             // Update our local node's sync status to mark the refs as announced.
             if let Err(e) = self.db.seeds_mut().synced(&rid, &ann.node, r.at, timestamp) {
-                error!(target: "service", "Error updating sync status for local node: {e}");
+                warn!(target: "service", "Failed to update sync status for local node: {e}");
             } else {
                 debug!(target: "service", "Saved local sync status for {rid}..");
             }
@@ -2249,8 +2217,14 @@ where
     fn connect(&mut self, nid: NodeId, addr: Address) -> Result<(), ConnectError> {
         debug!(target: "service", "Connecting to {nid} ({addr})..");
 
-        if nid == self.node_id() {
+        if nid == *self.nid() {
             return Err(ConnectError::SelfConnection);
+        }
+        if let Ok(true) = self.policies.is_blocked(&nid) {
+            return Err(ConnectError::Blocked { nid });
+        }
+        if !self.is_supported_address(&addr) {
+            return Err(ConnectError::UnsupportedAddress { nid, addr });
         }
         if self.sessions.contains_key(&nid) {
             return Err(ConnectError::SessionExists { nid });
@@ -2262,17 +2236,11 @@ where
         let timestamp: Timestamp = self.clock.into();
 
         if let Err(e) = self.db.addresses_mut().attempted(&nid, &addr, timestamp) {
-            error!(target: "service", "Error updating address book with connection attempt: {e}");
+            warn!(target: "service", "Failed to update address book with connection attempt: {e}");
         }
         self.sessions.insert(
             nid,
-            Session::outbound(
-                nid,
-                addr.clone(),
-                persistent,
-                self.rng.clone(),
-                self.config.limits.clone(),
-            ),
+            Session::outbound(nid, addr.clone(), persistent, self.rng.clone()),
         );
         self.outbox.connect(nid, addr);
 
@@ -2399,7 +2367,7 @@ where
     fn relay_announcements(&mut self) -> Result<(), Error> {
         let now = self.clock.into();
         let rows = self.database_mut().gossip_mut().relays(now)?;
-        let local = self.node_id();
+        let local = *self.nid();
 
         for (id, msg) in rows {
             let announcer = msg.node;
@@ -2423,7 +2391,7 @@ where
         let msg = AnnouncementMessage::from(self.inventory.clone());
 
         self.outbox.announce(
-            msg.signed(&self.signer),
+            msg.signed(&self.secret_key),
             self.sessions.connected().map(|(_, p)| p),
             self.db.gossip_mut(),
         );
@@ -2437,7 +2405,7 @@ where
         }
 
         let delta = count - usize::from(self.config.limits.routing_max_size);
-        let nid = self.node_id();
+        let nid = *self.nid();
         self.db.routing_mut().prune(
             (*now - LocalDuration::from(self.config.limits.routing_max_age)).into(),
             Some(delta),
@@ -2488,8 +2456,10 @@ where
                     .filter(|entry| !entry.address.banned)
                     .filter(|entry| !entry.penalty.is_connect_threshold_reached())
                     .filter(|entry| !self.sessions.contains_key(&entry.node))
+                    .filter(|entry| !self.policies.is_blocked(&entry.node).unwrap_or(false))
                     .filter(|entry| !self.config.external_addresses.contains(&entry.address.addr))
                     .filter(|entry| &entry.node != self.nid())
+                    .filter(|entry| self.is_supported_address(&entry.address.addr))
                     .fold(HashMap::new(), |mut acc, entry| {
                         acc.entry(entry.node)
                             .and_modify(|e: &mut Peer| e.addresses.push(entry.address.clone()))
@@ -2506,7 +2476,7 @@ where
                 peers
             }
             Err(e) => {
-                error!(target: "service", "Unable to lookup available peers in address book: {e}");
+                warn!(target: "service", "Unable to lookup available peers in address book: {e}");
                 Vec::new()
             }
         }
@@ -2519,7 +2489,7 @@ where
             let policy = match policy {
                 Ok(policy) => policy,
                 Err(err) => {
-                    log::error!(target: "protocol::filter", "Failed to read seed policy: {err}");
+                    debug!(target: "protocol::filter", "Failed to read seed policy: {err}");
                     continue;
                 }
             };
@@ -2529,14 +2499,22 @@ where
             if !policy.is_allow() {
                 continue;
             }
-            if self.storage.contains(&rid)? {
-                continue;
+            match self.storage.contains(&rid) {
+                Ok(exists) => {
+                    if exists {
+                        continue;
+                    }
+                }
+                Err(err) => {
+                    log::debug!(target: "protocol::filter", "Failed to check if {rid} exists: {err}");
+                    continue;
+                }
             }
-            match self.seeds(&rid, [self.node_id()].into()) {
+            match self.seeds(&rid, [*self.nid()].into()) {
                 Ok(seeds) => {
                     if let Some(connected) = NonEmpty::from_vec(seeds.connected().collect()) {
                         for seed in connected {
-                            self.fetch(rid, seed.nid, FETCH_TIMEOUT, None);
+                            self.fetch(rid, seed.nid, vec![], self.fetch_config(), None);
                         }
                     } else {
                         // TODO: We should make sure that this fetch is retried later, either
@@ -2552,7 +2530,7 @@ where
                     }
                 }
                 Err(e) => {
-                    error!(target: "service", "Couldn't fetch missing repo {rid}: failed to lookup seeds: {e}");
+                    debug!(target: "service", "Couldn't fetch missing repo {rid}: failed to lookup seeds: {e}");
                 }
             }
         }
@@ -2561,7 +2539,7 @@ where
 
     /// Run idle task for all connections.
     fn idle_connections(&mut self) {
-        for (_, sess) in self.sessions.iter_mut() {
+        for sess in self.sessions.values_mut() {
             sess.idle(self.clock);
 
             if sess.is_stable() {
@@ -2571,7 +2549,7 @@ where
                         .addresses_mut()
                         .connected(&sess.id, &sess.addr, self.clock.into())
                 {
-                    error!(target: "service", "Error updating address book with connection: {e}");
+                    warn!(target: "service", "Failed to update address book with connection: {e}");
                 }
             }
         }
@@ -2610,7 +2588,7 @@ where
                         // If we succeeded the last time we tried, this is a good address.
                         // If it's been long enough that we failed to connect, we also try again.
                         (Some(success), Some(attempt)) => {
-                            success >= attempt || now - attempt >= CONNECTION_RETRY_DELTA
+                            success > attempt || now - attempt >= CONNECTION_RETRY_DELTA
                         }
                         // If we haven't succeeded yet, and we waited long enough, we can try this address.
                         (None, Some(attempt)) => now - attempt >= CONNECTION_RETRY_DELTA,
@@ -2619,11 +2597,7 @@ where
                     })
                     .map(|ka| (peer.nid, ka))
             })
-            .filter(|(_, ka)| match AddressType::from(&ka.addr) {
-                // Only consider onion addresses if configured.
-                AddressType::Onion => self.config.onion.is_some(),
-                AddressType::Dns | AddressType::Ipv4 | AddressType::Ipv6 => true,
-            });
+            .filter(|(_, ka)| self.is_supported_address(&ka.addr));
 
         // Peers we are going to attempt connections to.
         let connect = available.take(wanted).collect::<Vec<_>>();
@@ -2636,7 +2610,7 @@ where
         }
         for (id, ka) in connect {
             if let Err(e) = self.connect(id, ka.addr.clone()) {
-                error!(target: "service", "Service::maintain_connections connection error: {e}");
+                warn!(target: "service", "Service::maintain_connections connection error: {e}");
             }
         }
     }
@@ -2649,13 +2623,16 @@ where
         let mut reconnect = Vec::new();
 
         for (nid, session) in self.sessions.iter_mut() {
-            if let Some(addr) = self.config.peer(nid) {
+            if self.config.is_persistent(nid) {
+                if self.policies.is_blocked(nid).unwrap_or(false) {
+                    continue;
+                }
                 if let session::State::Disconnected { retry_at, .. } = &mut session.state {
                     // TODO: Try to reconnect only if the peer was attempted. A disconnect without
                     // even a successful attempt means that we're unlikely to be able to reconnect.
 
                     if now >= *retry_at {
-                        reconnect.push((*nid, addr.clone(), session.attempts()));
+                        reconnect.push((*nid, session.addr.clone(), session.attempts()));
                     }
                 }
             }
@@ -2663,9 +2640,43 @@ where
 
         for (nid, addr, attempts) in reconnect {
             if self.reconnect(nid, addr) {
-                debug!(target: "service", "Reconnecting to {nid} (attempts={attempts})...");
+                debug!(target: "service", "Reconnecting to {nid} (attempts={attempts})…");
             }
         }
+    }
+
+    /// Checks if the given [`Address`] is supported for connecting to.
+    ///
+    /// # IPv4/IPv6/DNS
+    ///
+    /// Always returns `true`.
+    ///
+    /// # Tor
+    ///
+    /// If the [`Address`] is an `.onion` address and the service supports onion
+    /// routing then this will return `true`.
+    ///
+    /// # I2P
+    ///
+    /// If the [`Address`] is an I2P address and the service supports I2P
+    /// connections then this will return `true`.
+    fn is_supported_address(&self, address: &Address) -> bool {
+        match AddressType::from(address) {
+            // Only consider onion addresses if configured.
+            #[cfg(feature = "tor")]
+            AddressType::Onion => self.config.onion != radicle::node::config::AddressConfig::Drop,
+            #[cfg(feature = "i2p")]
+            AddressType::I2p => self.config.i2p != radicle::node::config::AddressConfig::Drop,
+            AddressType::Dns | AddressType::Ipv4 | AddressType::Ipv6 => true,
+            _ => false,
+        }
+    }
+
+    fn fetch_config(&self) -> fetcher::FetchConfig {
+        let timeout: LocalDuration = self.config.limits.fetch_timeout.into();
+        fetcher::FetchConfig::default()
+            .with_timeout(timeout.into())
+            .with_minimum_feature_level(self.config.fetch.feature_level_min())
     }
 }
 
@@ -2676,7 +2687,7 @@ pub trait ServiceState {
     /// Get the existing sessions.
     fn sessions(&self) -> &Sessions;
     /// Get fetch state.
-    fn fetching(&self) -> &HashMap<RepoId, FetchState>;
+    fn fetching(&self) -> &FetcherState;
     /// Get outbox.
     fn outbox(&self) -> &Outbox;
     /// Get rate limiter.
@@ -2695,22 +2706,21 @@ pub trait ServiceState {
     fn metrics(&self) -> &Metrics;
 }
 
-impl<D, S, G> ServiceState for Service<D, S, G>
+impl<D, S> ServiceState for Service<D, S>
 where
     D: routing::Store,
-    G: crypto::signature::Signer<crypto::Signature>,
     S: ReadStorage,
 {
     fn nid(&self) -> &NodeId {
-        self.signer.public_key()
+        self.secret_key.public_key()
     }
 
     fn sessions(&self) -> &Sessions {
         &self.sessions
     }
 
-    fn fetching(&self) -> &HashMap<RepoId, FetchState> {
-        &self.fetching
+    fn fetching(&self) -> &FetcherState {
+        self.fetcher.state()
     }
 
     fn outbox(&self) -> &Outbox {
@@ -2749,7 +2759,7 @@ where
 /// Disconnect reason.
 #[derive(Debug)]
 pub enum DisconnectReason {
-    /// Error while dialing the remote. This error occures before a connection is
+    /// Error while dialing the remote. This error occurs before a connection is
     /// even established. Errors of this kind are usually not transient.
     Dial(Arc<dyn std::error::Error + Sync + Send>),
     /// Error with an underlying established connection. Sometimes, reconnecting
@@ -2763,6 +2773,8 @@ pub enum DisconnectReason {
     Conflict,
     /// Connection to self.
     SelfConnection,
+    /// Peer is blocked by policy
+    Policy,
     /// User requested disconnect
     Command,
 }
@@ -2791,6 +2803,7 @@ impl fmt::Display for DisconnectReason {
             Self::Command => write!(f, "command"),
             Self::SelfConnection => write!(f, "self-connection"),
             Self::Conflict => write!(f, "conflict"),
+            Self::Policy => write!(f, "policy"),
             Self::Session(err) => write!(f, "{err}"),
             Self::Fetch(err) => write!(f, "fetch: {err}"),
         }
@@ -2800,7 +2813,7 @@ impl fmt::Display for DisconnectReason {
 /// Result of a project lookup.
 #[derive(Debug)]
 pub struct Lookup {
-    /// Whether the project was found locally or not.
+    /// Whether or not the project was found locally.
     pub local: Option<Doc>,
     /// A list of remote peers on which the project is known to exist.
     pub remote: Vec<NodeId>,

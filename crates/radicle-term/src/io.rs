@@ -4,15 +4,15 @@ use std::process::Stdio;
 use std::sync::LazyLock;
 use std::{env, fmt, io, process};
 
+use inquire::InquireError;
 use inquire::ui::{ErrorMessageRenderConfig, StyleSheet, Styled};
 use inquire::validator;
-use inquire::InquireError;
-use inquire::{ui::Color, ui::RenderConfig, Confirm, CustomType, Password};
+use inquire::{Confirm, CustomType, Password, ui::Color, ui::RenderConfig};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
 use crate::format;
-use crate::{style, Paint, Size};
+use crate::{Paint, Size, style};
 
 pub use inquire;
 pub use inquire::Select;
@@ -70,18 +70,18 @@ impl PaintTarget {
 
 #[macro_export]
 macro_rules! info {
-    ($writer:expr; $($arg:tt)*) => ({
+    ($writer:expr_2021; $($arg:tt)*) => ({
         writeln!($writer, $($arg)*).ok();
     });
     ($($arg:tt)*) => ({
-        println!("{}", format_args!($($arg)*));
+        $crate::io::println(format_args!($($arg)*));
     })
 }
 
 #[macro_export]
 macro_rules! success {
     // Pattern when a writer is provided.
-    ($writer:expr; $($arg:tt)*) => ({
+    ($writer:expr_2021; $($arg:tt)*) => ({
         $crate::io::success_args($writer, format_args!($($arg)*));
     });
     // Pattern without writer.
@@ -100,7 +100,7 @@ macro_rules! tip {
 #[macro_export]
 macro_rules! notice {
     // Pattern when a writer is provided.
-    ($writer:expr; $($arg:tt)*) => ({
+    ($writer:expr_2021; $($arg:tt)*) => ({
         $crate::io::notice_args($writer, format_args!($($arg)*));
     });
     ($($arg:tt)*) => ({
@@ -118,11 +118,11 @@ pub fn success_args<W: io::Write>(w: &mut W, args: fmt::Arguments) {
 }
 
 pub fn tip_args(args: fmt::Arguments) {
-    println!(
+    println(format_args!(
         "{} {}",
         format::yellow("*"),
         style(format!("{args}")).italic()
-    );
+    ));
 }
 
 pub fn notice_args<W: io::Write>(w: &mut W, args: fmt::Arguments) {
@@ -148,27 +148,76 @@ pub fn viewport() -> Option<Size> {
 }
 
 pub fn headline(headline: impl fmt::Display) {
-    println!();
-    println!("{}", style(headline).bold());
-    println!();
+    println("");
+    println(style(headline).bold());
+    println("");
 }
 
 pub fn header(header: &str) {
-    println!();
-    println!("{}", style(format::yellow(header)).bold().underline());
-    println!();
+    println("");
+    println(style(format::yellow(header)).bold().underline());
+    println("");
 }
 
 pub fn blob(text: impl fmt::Display) {
-    println!("{}", style(text.to_string().trim()).dim());
+    println(style(text.to_string().trim()).dim());
 }
 
 pub fn blank() {
-    println!()
+    println("");
 }
 
+/// Print a line to stdout, silently ignoring broken pipe errors.
+///
+/// Use this function instead of [`println!`] when you want to print to standard
+/// output, but silently ignore broken pipe errors.
+///
+/// See also [`self::print`].
+///
+/// # Panics
+///
+/// If writing to standard output fails with an error not of kind [`io::ErrorKind::BrokenPipe`].
+pub fn println(msg: impl fmt::Display) {
+    use io::Write;
+
+    let mut stdout = io::stdout().lock();
+    let _ = writeln!(stdout, "{msg}").or_else(swallow_broken_pipe_stdout);
+}
+
+/// Print to stdout without a trailing newline, silently ignoring broken pipe
+/// errors.
+///
+/// Use this function instead of [`print!`] when you want to print to standard
+/// output, but silently ignore broken pipe errors.
+///
+/// See also [`self::println`].
+///
+/// # Panics
+///
+/// If writing to standard output fails with an error not of kind [`io::ErrorKind::BrokenPipe`].
 pub fn print(msg: impl fmt::Display) {
-    println!("{msg}");
+    use io::Write;
+
+    let mut stdout = io::stdout().lock();
+    let _ = write!(stdout, "{msg}").or_else(swallow_broken_pipe_stdout);
+}
+
+/// If the given `err` is of kind [`io::ErrorKind::BrokenPipe`], return `Ok(())`
+/// to silently ignore it. Otherwise, panic saying "failed printing to stdout",
+/// followed by the error message.
+///
+/// This may be used with [`Result::or_else`] to ignore broken pipes when
+/// writing to standard output.
+///
+/// # Panics
+///
+/// If `err` is not of kind [`io::ErrorKind::BrokenPipe`].
+pub(crate) fn swallow_broken_pipe_stdout(err: io::Error) -> io::Result<()> {
+    if err.kind() == io::ErrorKind::BrokenPipe {
+        Ok(())
+    } else {
+        panic!("failed printing to stdout: {err}")
+    }
 }
 
 pub fn prefixed(prefix: &str, text: &str) -> String {
@@ -179,7 +228,7 @@ pub fn prefixed(prefix: &str, text: &str) -> String {
 }
 
 pub fn help(name: &str, version: &str, description: &str, usage: &str) {
-    println!("rad-{name} {version}\n{description}\n{usage}");
+    println(format_args!("rad-{name} {version}\n{description}\n{usage}"));
 }
 
 pub fn manual(name: &str) -> io::Result<process::ExitStatus> {
@@ -192,40 +241,43 @@ pub fn manual(name: &str) -> io::Result<process::ExitStatus> {
 }
 
 pub fn usage(name: &str, usage: &str) {
-    println!(
+    println(format_args!(
         "{} {}\n{}",
         PREFIX_ERROR,
         Paint::red(format!("Error: rad-{name}: invalid usage")),
         Paint::red(prefixed(TAB, usage)).dim()
-    );
+    ));
 }
 
-pub fn println(prefix: impl fmt::Display, msg: impl fmt::Display) {
-    println!("{prefix} {msg}");
+pub fn println_prefixed(prefix: impl fmt::Display, msg: impl fmt::Display) {
+    println(format_args!("{prefix} {msg}"));
 }
 
 pub fn indented(msg: impl fmt::Display) {
-    println!("{TAB}{msg}");
+    println(format_args!("{TAB}{msg}"));
 }
 
 pub fn subcommand(msg: impl fmt::Display) {
-    println!("{}", style(format!("Running `{msg}`...")).dim());
+    println(style(format!("Running `{msg}`…")).dim());
 }
 
 pub fn warning(warning: impl fmt::Display) {
-    println!(
+    println(format_args!(
         "{} {} {warning}",
         PREFIX_WARNING,
         Paint::yellow("Warning:").bold(),
-    );
+    ));
 }
 
 pub fn error(error: impl fmt::Display) {
-    println!("{PREFIX_ERROR} {} {error}", Paint::red("Error:"));
+    println(format_args!(
+        "{PREFIX_ERROR} {} {error}",
+        Paint::red("Error:")
+    ));
 }
 
 pub fn hint(hint: impl fmt::Display) {
-    println!("{}", format::hint(format!("{SYMBOL_ERROR} Hint: {hint}")));
+    println(format::hint(format!("{SYMBOL_ERROR} Hint: {hint}")));
 }
 
 pub fn ask<D: fmt::Display>(prompt: D, default: bool) -> bool {
@@ -341,7 +393,6 @@ pub fn passphrase<V: validator::StringValidator + 'static>(
 ) -> io::Result<Option<Passphrase>> {
     match Password::new("Passphrase:")
         .with_render_config(*CONFIG)
-        .with_display_mode(inquire::PasswordDisplayMode::Masked)
         .without_confirmation()
         .with_validator(validate)
         .prompt()
@@ -358,10 +409,9 @@ pub fn passphrase_confirm<K: AsRef<OsStr>>(prompt: &str, var: K) -> io::Result<O
 
     match Password::new(prompt)
         .with_render_config(*CONFIG)
-        .with_display_mode(inquire::PasswordDisplayMode::Masked)
         .with_custom_confirmation_message("Repeat passphrase:")
         .with_custom_confirmation_error_message("The passphrases don't match.")
-        .with_help_message("Leave this blank to keep your radicle key unencrypted")
+        .with_help_message("Leave this blank to keep your Radicle key unencrypted")
         .prompt()
     {
         Ok(p) => Ok(Some(Passphrase::from(p))),

@@ -4,14 +4,14 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::{path::Path, process, thread, time};
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use localtime::LocalTime;
 
+use radicle::Node;
 use radicle::node;
 use radicle::node::{Address, ConnectResult, Handle as _, NodeId};
 use radicle::profile::env::RAD_PASSPHRASE;
-use radicle::Node;
-use radicle::{profile, Profile};
+use radicle::{Profile, profile};
 
 use crate::commands::node::logs::{LogRotatorFileSystem, Rotated};
 use crate::terminal as term;
@@ -33,7 +33,7 @@ pub fn start(
         return Ok(());
     }
     let envs = if profile.keystore.is_encrypted()? {
-        // Ask passphrase here, otherwise it'll be a fatal error when running the daemon
+        // Ask passphrase here; otherwise, it'll be a fatal error when running the daemon
         // without `RAD_PASSPHRASE`.
         let validator = term::io::PassphraseValidator::new(profile.keystore.clone());
         let passphrase = if let Some(phrase) = profile::env::passphrase() {
@@ -62,28 +62,42 @@ pub fn start(
     } = LogRotatorFileSystem::from_profile(profile).rotate()?;
 
     if daemon {
-        let child = process::Command::new(cmd)
+        let mut command = process::Command::new(cmd);
+
+        command
             .args(options)
             .envs(envs)
             .stdin(process::Stdio::null())
             .stdout(process::Stdio::from(log_file.try_clone()?))
-            .stderr(process::Stdio::from(log_file))
+            .stderr(process::Stdio::from(log_file));
+
+        #[cfg(windows)]
+        {
+            use radicle_windows::process::creation_flags::*;
+            std::os::windows::process::CommandExt::creation_flags(
+                &mut command,
+                (CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | DETACHED_PROCESS).0,
+            );
+        }
+
+        let child = command
             .spawn()
             .map_err(|e| anyhow!("failed to start node process {cmd:?}: {e}"))?;
+
         let pid = term::format::parens(term::format::dim(child.id()));
 
         if verbose {
             logs(0, Some(time::Duration::from_secs(1)), profile)?;
         } else {
             let started = time::Instant::now();
-            let mut spinner = term::spinner(format!("Node starting.. {pid}"));
+            let mut spinner = term::spinner(format!("Node starting… (Process ID: {pid})"));
 
             loop {
                 if node.is_running() {
-                    spinner.message(format!("Node started {pid}"));
+                    spinner.message(format!("Node started. (Process ID: {pid})"));
                     spinner.finish();
 
-                    term::print(term::format::dim(
+                    term::println(term::format::dim(
                         "To stay in sync with the network, leave the node running in the background.",
                     ));
                     term::info!(
@@ -105,7 +119,7 @@ pub fn start(
     } else {
         // Write a hint to the log file, but swallow any errors.
         let mut log_file = log_file;
-        let _ = log_file.write_all(format!("radicle-node started in foreground, no futher log messages are written to '{}' (this file).\n", log_path.display()).as_bytes());
+        let _ = log_file.write_all(format!("radicle-node started in foreground, no further log messages are written to '{}' (this file).\n", log_path.display()).as_bytes());
 
         let mut child = process::Command::new(cmd)
             .args(options)
@@ -120,7 +134,7 @@ pub fn start(
 }
 
 pub fn stop(node: Node, profile: &Profile) {
-    let mut spinner = term::spinner("Stopping node...");
+    let mut spinner = term::spinner("Stopping node…");
     if node.shutdown().is_err() {
         spinner.error("node is not running");
     } else {
@@ -170,7 +184,7 @@ pub fn logs(lines: usize, follow: Option<time::Duration>, profile: &Profile) -> 
     }
     tail.reverse();
 
-    print!("{}", term::format::dim(String::from_utf8_lossy(&tail)));
+    term::print(term::format::dim(String::from_utf8_lossy(&tail)));
 
     if let Some(timeout) = follow {
         file.seek(SeekFrom::End(0))?;
@@ -184,7 +198,7 @@ pub fn logs(lines: usize, follow: Option<time::Duration>, profile: &Profile) -> 
             if len == 0 {
                 thread::sleep(time::Duration::from_millis(250));
             } else {
-                print!("{}", term::format::dim(line));
+                term::print(term::format::dim(line));
             }
         }
     }
@@ -198,7 +212,7 @@ pub fn connect(
     timeout: time::Duration,
 ) -> anyhow::Result<()> {
     let spinner = term::spinner(format!(
-        "Connecting to {}@{addr}...",
+        "Connecting to {}@{addr}…",
         term::format::node_id_human_compact(&nid)
     ));
     match node.connect(
@@ -222,11 +236,11 @@ pub fn connect_many(
     addrs: Vec<Address>,
     timeout: time::Duration,
 ) -> anyhow::Result<()> {
-    let mut spinner = term::spinner("Connecting...");
+    let mut spinner = term::spinner("Connecting…");
     let mut errors = HashMap::new();
     for addr in addrs {
         spinner.message(format!(
-            "Connecting to {}@{addr}...",
+            "Connecting to {}@{addr}…",
             term::format::node_id_human_compact(&nid)
         ));
         match node.connect(
@@ -257,7 +271,7 @@ pub fn connect_many(
 }
 
 pub fn status(node: &Node, profile: &Profile) -> anyhow::Result<()> {
-    for warning in crate::warning::nodes_renamed(&profile.config) {
+    for warning in crate::warning::config_warnings(&profile.config) {
         term::warning(warning);
     }
 
@@ -384,17 +398,17 @@ pub fn sessions(node: &Node) -> Result<Option<term::Table<5, term::Label>>, node
                 term::Label::blank(),
             ),
             node::State::Attempted => (
-                term::format::addr_compact(&sess.addr).into(),
+                sess.addr.display_compact().to_string().into(),
                 term::Label::from(state_attempted()),
                 term::Label::blank(),
             ),
             node::State::Connected { since, .. } => (
-                term::format::addr_compact(&sess.addr).into(),
+                sess.addr.display_compact().to_string().into(),
                 term::Label::from(state_connected()),
                 term::format::dim(now - since).into(),
             ),
             node::State::Disconnected { since, .. } => (
-                term::format::addr_compact(&sess.addr).into(),
+                sess.addr.display_compact().to_string().into(),
                 term::Label::from(state_disconnected()),
                 term::format::dim(now - since).into(),
             ),
@@ -414,7 +428,7 @@ pub fn config(node: &Node) -> anyhow::Result<()> {
     let cfg = node.config()?;
     let cfg = serde_json::to_string_pretty(&cfg)?;
 
-    println!("{cfg}");
+    term::println(cfg);
 
     Ok(())
 }

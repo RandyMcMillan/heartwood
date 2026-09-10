@@ -40,56 +40,56 @@
 ///
 #[macro_export]
 macro_rules! assert_matches {
-    ( $e:expr , $($pat:pat_param)|+ ) => {
+    ( $e:expr_2021 , $($pat:pat_param)|+ ) => {
         match $e {
             $($pat)|+ => (),
             ref e => panic!("assertion failed: `{:?}` does not match `{}`",
                 e, stringify!($($pat)|+))
         }
     };
-    ( $e:expr , $($pat:pat_param)|+ if $cond:expr ) => {
+    ( $e:expr_2021 , $($pat:pat_param)|+ if $cond:expr_2021 ) => {
         match $e {
             $($pat)|+ if $cond => (),
             ref e => panic!("assertion failed: `{:?}` does not match `{}`",
                 e, stringify!($($pat)|+ if $cond))
         }
     };
-    ( $e:expr , $($pat:pat_param)|+ => $arm:expr ) => {
+    ( $e:expr_2021 , $($pat:pat_param)|+ => $arm:expr_2021 ) => {
         match $e {
             $($pat)|+ => $arm,
             ref e => panic!("assertion failed: `{:?}` does not match `{}`",
                 e, stringify!($($pat)|+))
         }
     };
-    ( $e:expr , $($pat:pat_param)|+ if $cond:expr => $arm:expr ) => {
+    ( $e:expr_2021 , $($pat:pat_param)|+ if $cond:expr_2021 => $arm:expr_2021 ) => {
         match $e {
             $($pat)|+ if $cond => $arm,
             ref e => panic!("assertion failed: `{:?}` does not match `{}`",
                 e, stringify!($($pat)|+ if $cond))
         }
     };
-    ( $e:expr , $($pat:pat_param)|+ , $($arg:tt)* ) => {
+    ( $e:expr_2021 , $($pat:pat_param)|+ , $($arg:tt)* ) => {
         match $e {
             $($pat)|+ => (),
             ref e => panic!("assertion failed: `{:?}` does not match `{}`: {}",
                 e, stringify!($($pat)|+), format_args!($($arg)*))
         }
     };
-    ( $e:expr , $($pat:pat_param)|+ if $cond:expr , $($arg:tt)* ) => {
+    ( $e:expr_2021 , $($pat:pat_param)|+ if $cond:expr_2021 , $($arg:tt)* ) => {
         match $e {
             $($pat)|+ if $cond => (),
             ref e => panic!("assertion failed: `{:?}` does not match `{}`: {}",
                 e, stringify!($($pat)|+ if $cond), format_args!($($arg)*))
         }
     };
-    ( $e:expr , $($pat:pat_param)|+ => $arm:expr , $($arg:tt)* ) => {
+    ( $e:expr_2021 , $($pat:pat_param)|+ => $arm:expr_2021 , $($arg:tt)* ) => {
         match $e {
             $($pat)|+ => $arm,
             ref e => panic!("assertion failed: `{:?}` does not match `{}`: {}",
                 e, stringify!($($pat)|+), format_args!($($arg)*))
         }
     };
-    ( $e:expr , $($pat:pat_param)|+ if $cond:expr => $arm:expr , $($arg:tt)* ) => {
+    ( $e:expr_2021 , $($pat:pat_param)|+ if $cond:expr_2021 => $arm:expr_2021 , $($arg:tt)* ) => {
         match $e {
             $($pat)|+ if $cond => $arm,
             ref e => panic!("assertion failed: `{:?}` does not match `{}`: {}",
@@ -125,7 +125,7 @@ macro_rules! _assert_matches_cfg {
 
 #[cfg(test)]
 mod test {
-    use std::panic::{catch_unwind, UnwindSafe};
+    use std::panic::{UnwindSafe, catch_unwind};
 
     #[derive(Debug)]
     enum Foo {
@@ -135,7 +135,7 @@ mod test {
     }
 
     #[test]
-    fn test_assert_succeed() {
+    fn assert_succeed() {
         let a = Foo::A(123);
 
         assert_matches!(a, Foo::A(_));
@@ -166,7 +166,7 @@ mod test {
 
     #[test]
     #[should_panic]
-    fn test_assert_panic_0() {
+    fn assert_panic_0() {
         let a = Foo::A(123);
 
         assert_matches!(a, Foo::B(_));
@@ -174,7 +174,7 @@ mod test {
 
     #[test]
     #[should_panic]
-    fn test_assert_panic_1() {
+    fn assert_panic_1() {
         let b = Foo::B("foo");
 
         assert_matches!(b, Foo::B("bar"));
@@ -182,14 +182,14 @@ mod test {
 
     #[test]
     #[should_panic]
-    fn test_assert_panic_2() {
+    fn assert_panic_2() {
         let b = Foo::B("foo");
 
         assert_matches!(b, Foo::B(s) if s == "bar");
     }
 
     #[test]
-    fn test_assert_no_move() {
+    fn assert_no_move() {
         let b = &mut Foo::A(0);
         assert_matches!(*b, Foo::A(0));
     }
@@ -226,7 +226,7 @@ mod test {
     }
 
     #[test]
-    fn test_panic_message() {
+    fn panic_message_format() {
         let a = Foo::A(1);
 
         // expr, pat

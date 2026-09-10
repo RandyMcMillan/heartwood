@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 
 use radicle::{
     cob::{Label, Reaction, Title},
-    identity::{did::DidError, Did, RepoId},
+    identity::{Did, RepoId, did::DidError},
     issue::{CloseReason, State},
 };
 
@@ -196,7 +196,7 @@ impl Command {
             // Special handling for `--edit` will be removed in the future.
             | Command::Edit { .. } => true,
             Command::Comment(args) => !args.is_edit(),
-            _ => false,
+            Command::Cache{..} | Command::Show { .. } | Command::List(_) => false,
         }
     }
 }
@@ -310,7 +310,7 @@ pub(crate) struct CommentArgs {
     /// The body of the comment
     #[arg(long, short)]
     #[arg(value_name = "MESSAGE")]
-    message: Message,
+    message: Option<Message>,
 
     /// Optionally, the comment to reply to. If not specified, the comment
     /// will be in reply to the issue itself
@@ -441,6 +441,7 @@ impl From<CommentArgs> for CommentAction {
             edit,
         }: CommentArgs,
     ) -> Self {
+        let message = message.unwrap_or(Message::Edit);
         match (reply_to, edit) {
             (Some(_), Some(_)) => {
                 unreachable!("the argument '--reply-to' cannot be used with '--edit'")

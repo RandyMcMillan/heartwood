@@ -34,12 +34,12 @@ pub fn fetch<W: WriteRepository>(
     };
 
     callbacks.update_tips(|name, old, new| {
-        if let Ok(name) = git::fmt::RefString::try_from(name) {
-            if name.to_namespaced().is_some() {
-                updates.push(RefUpdate::from(name, old, new));
-                // Returning `true` ensures the process is not aborted.
-                return true;
-            }
+        if let Ok(name) = git::fmt::RefString::try_from(name)
+            && name.to_namespaced().is_some()
+        {
+            updates.push(RefUpdate::from(name, old, new));
+            // Returning `true` ensures the process is not aborted.
+            return true;
         }
         false
     });
@@ -59,7 +59,8 @@ pub fn fetch<W: WriteRepository>(
     drop(opts);
 
     repo.set_identity_head()?;
-    repo.set_head()?;
+    repo.set_canonical_symbolic_refs("set-canonical test (radicle)")?;
+    repo.set_default_branch_to_canonical_head()?;
 
     let validations = repo.validate()?;
     if !validations.is_empty() {
@@ -71,14 +72,13 @@ pub fn fetch<W: WriteRepository>(
 pub mod setup {
     use std::path::{Path, PathBuf};
 
-    use tempfile::{tempdir, TempDir};
+    use tempfile::{TempDir, tempdir};
 
     use super::storage::{Namespaces, RefUpdate};
-    use crate::crypto::test::signer::MockSigner;
-    use crate::node::device::Device;
-    use crate::storage::git::transport::remote;
+    use crate::crypto::{Signer as _, SigningKey};
     use crate::storage::git::Repository;
-    use crate::{git, profile::Home, rad::REMOTE_NAME, test::fixtures, Storage};
+    use crate::storage::git::transport::remote;
+    use crate::{Storage, git, profile::Home, rad::REMOTE_NAME, test::fixtures};
     use crate::{prelude::*, rad};
 
     /// A node.
@@ -88,20 +88,20 @@ pub mod setup {
         pub tmp: TempDir,
         pub root: PathBuf,
         pub storage: Storage,
-        pub signer: Device<MockSigner>,
+        pub signer: SigningKey,
     }
 
     impl Default for Node {
         fn default() -> Self {
             let root = tempdir().unwrap();
 
-            Self::new(root, MockSigner::default(), "Radcliff")
+            Self::new(root, SigningKey::mock(73), "Radcliff")
         }
     }
 
     impl Node {
-        pub fn new(tmp: TempDir, signer: MockSigner, alias: &str) -> Self {
-            let signer = Device::from(signer);
+        pub fn new(tmp: TempDir, signer: SigningKey, alias: &str) -> Self {
+            let signer = signer;
             let root = tmp.path().to_path_buf();
             let home = root.join("home");
             let paths = Home::new(home.as_path()).unwrap();
@@ -244,19 +244,22 @@ pub mod setup {
         pub alice: NodeWithRepo,
         pub bob: NodeWithRepo,
         pub eve: NodeWithRepo,
+        pub dave: NodeWithRepo,
         pub rid: RepoId,
     }
 
     impl Default for Network {
         fn default() -> Self {
-            let alice = Node::new(tempdir().unwrap(), MockSigner::from_seed([!0; 32]), "alice");
-            let mut bob = Node::new(tempdir().unwrap(), MockSigner::from_seed([!1; 32]), "bob");
-            let mut eve = Node::new(tempdir().unwrap(), MockSigner::from_seed([!2; 32]), "eve");
+            let alice = Node::new(tempdir().unwrap(), SigningKey::mock(!0), "alice");
+            let mut bob = Node::new(tempdir().unwrap(), SigningKey::mock(!1), "bob");
+            let mut eve = Node::new(tempdir().unwrap(), SigningKey::mock(!2), "eve");
+            let mut dave = Node::new(tempdir().unwrap(), SigningKey::mock(!3), "dave");
             let repo = alice.project();
             let rid = repo.id;
 
             bob.clone(repo.id, &alice);
             eve.clone(repo.id, &alice);
+            dave.clone(repo.id, &alice);
 
             let alice = NodeWithRepo { node: alice, repo };
             let repo = bob.storage.repository(rid).unwrap();
@@ -275,11 +278,20 @@ pub mod setup {
                     checkout: None,
                 },
             };
+            let repo = dave.storage.repository(rid).unwrap();
+            let dave = NodeWithRepo {
+                node: dave,
+                repo: NodeRepo {
+                    repo,
+                    checkout: None,
+                },
+            };
 
             Self {
                 alice,
                 bob,
                 eve,
+                dave,
                 rid,
             }
         }

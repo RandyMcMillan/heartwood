@@ -5,6 +5,7 @@ use radicle::git;
 use radicle::storage::git::Repository;
 
 use crate::terminal as term;
+use crate::terminal::Error;
 
 use super::*;
 
@@ -32,10 +33,9 @@ pub fn run(
     workdir: Option<&git::raw::Repository>,
 ) -> anyhow::Result<()> {
     let patches = term::cob::patches(profile, stored)?;
-    let Some(patch) = patches.get(patch_id).map_err(|e| Error::WithHint {
-        err: e.into(),
-        hint: "reset the cache with `rad patch cache` and try again",
-    })?
+    let Some(patch) = patches
+        .get(patch_id)
+        .map_err(|e| Error::with_hint(e, "reset the cache with `rad patch cache` and try again"))?
     else {
         anyhow::bail!("Patch `{patch_id}` not found");
     };

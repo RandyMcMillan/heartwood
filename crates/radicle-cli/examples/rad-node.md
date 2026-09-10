@@ -1,4 +1,4 @@
-The radicle node is our daemon friend that is running as a background
+The Radicle node is our daemon friend that is running as a background
 process. It allows us to interact with the network as well as storing
 some key data that we may be interested in.
 
@@ -84,7 +84,7 @@ Running the command again gives us an error:
 
 ```
 $ rad node stop
-✗ Stopping node... error: node is not running
+✗ Stopping node… error: node is not running
 ```
 
 Note that if we unseed a repository, it is no longer part of our inventory:
@@ -108,7 +108,7 @@ up in our inventory:
 ```
 $ rad seed rad:z42hL2jL4XNk6K8oHQaSWfMgCL7ji
 ✓ Inventory updated with rad:z42hL2jL4XNk6K8oHQaSWfMgCL7ji
-✓ Seeding policy updated for rad:z42hL2jL4XNk6K8oHQaSWfMgCL7ji with scope 'all'
+✓ Seeding policy updated for rad:z42hL2jL4XNk6K8oHQaSWfMgCL7ji with scope 'followed'
 $ rad node inventory
 rad:z42hL2jL4XNk6K8oHQaSWfMgCL7ji
 ```
@@ -125,8 +125,8 @@ $ rad sync status
 ✗ Error: to sync a repository, your node must be running. To start it, run `rad node start`
 ```
 ``` (fail)
-$ rad node connect z6Mkt67GdsW7715MEfRuP4pSZxJRJh6kj6Y48WRqVv4N1tRk@radicle.xyz:8776
-✗ Connecting to z6Mkt67…v4N1tRk@radicle.xyz:8776... <canceled>
+$ rad node connect z6Mkt67GdsW7715MEfRuP4pSZxJRJh6kj6Y48WRqVv4N1tRk@radicle.example:58776
+✗ Connecting to z6Mkt67…v4N1tRk@radicle.example:58776… <canceled>
 ✗ Error: failed to open node control socket "[..]/.radicle/node/control.sock" (entity not found)
 ✗ Hint: to start your node, run `rad node start`.
 ```

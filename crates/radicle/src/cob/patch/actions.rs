@@ -5,9 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::cob::{thread::Edit, ActorId, Embed, Label, Timestamp, Uri};
+use crate::cob::{ActorId, Embed, Label, Timestamp, Uri, thread::Edit};
 
-use super::{lookup, Error, Patch, ReviewId, Verdict};
+use super::{Error, Patch, ReviewId, Verdict, lookup};
 
 /// A review edit that keeps track of the different versions of actions.
 ///
@@ -188,7 +188,7 @@ mod test {
     use super::ReviewEdit;
 
     #[test]
-    fn test_review_edit() {
+    fn review_edit() {
         let v1 = json!({
             "type": "review.edit",
             "review": "89d45fb371eb2622ba88188d474347cc526d80bb",

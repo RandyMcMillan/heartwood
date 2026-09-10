@@ -1,6 +1,6 @@
 use radicle::identity::RepoId;
 
-pub(crate) const ABOUT: &str = "Publish a repository to the network";
+const ABOUT: &str = "Publish a repository to the network";
 
 const LONG_ABOUT: &str = r#"
 Publishing a private repository makes it public and discoverable
@@ -21,14 +21,14 @@ pub struct Args {
     ///
     /// [example values: rad:z3Tr6bC7ctEg2EHmLvknUr29mEDLH, z3Tr6bC7ctEg2EHmLvknUr29mEDLH]
     #[arg(value_name = "RID")]
-    pub(super) rid: Option<RepoId>,
+    pub(super) repo: Option<RepoId>,
 }
 
 #[cfg(test)]
 mod test {
     use super::Args;
-    use clap::error::ErrorKind;
     use clap::Parser;
+    use clap::error::ErrorKind;
 
     #[test]
     fn should_parse_rid_non_urn() {

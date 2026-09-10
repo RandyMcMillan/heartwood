@@ -1,12 +1,11 @@
-#![allow(clippy::type_complexity)]
-#![allow(clippy::collapsible_if)]
 mod features;
 
 pub mod address;
+use address::AddressType;
+
 pub mod command;
 pub mod config;
 pub mod db;
-pub mod device;
 pub mod events;
 pub mod notifications;
 pub mod policy;
@@ -17,20 +16,22 @@ pub mod sync;
 pub mod timestamp;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::fmt::Display;
 use std::io::{BufRead, BufReader};
 use std::marker::PhantomData;
+use std::net::IpAddr;
+use std::net::Ipv6Addr;
 use std::ops::{ControlFlow, Deref};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{fmt, io, net, thread, time};
 
 #[cfg(unix)]
-use std::os::unix::net::UnixStream as Stream;
+use std::os::unix::net::UnixStream;
 #[cfg(windows)]
-use winpipe::WinStream as Stream;
+use uds_windows::UnixStream;
 
-use amplify::WrapperMut;
-use cyphernet::addr::NetAddr;
+use cyphernet::addr::{AddrParseError, NetAddr};
 use localtime::{LocalDuration, LocalTime};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -40,22 +41,23 @@ use crate::crypto::PublicKey;
 use crate::git;
 use crate::identity::RepoId;
 use crate::profile;
-use crate::storage::refs::RefsAt;
 use crate::storage::RefUpdate;
+use crate::storage::refs::{FeatureLevel, RefsAt};
 
 pub use address::KnownAddress;
-pub use command::{Command, CommandResult, ConnectOptions, Success, DEFAULT_TIMEOUT};
+pub use command::{Command, CommandResult, ConnectOptions, DEFAULT_TIMEOUT, Success};
 pub use config::Config;
-pub use cyphernet::addr::{HostName, PeerAddr};
+pub use cyphernet::addr::{HostName, PeerAddr, PeerAddrParseError};
 pub use db::Database;
 pub use events::{Event, Events};
 pub use features::Features;
+pub use radicle_core::NodeId;
 pub use seed::SyncedAt;
 pub use timestamp::Timestamp;
 
 /// Peer-to-peer protocol version.
 pub const PROTOCOL_VERSION: u8 = 1;
-/// Default radicle protocol port.
+/// Default Radicle protocol port.
 pub const DEFAULT_PORT: u16 = 8776;
 /// Default timeout when waiting for an event to be received on the
 /// [`Handle::subscribe`] channel.
@@ -102,17 +104,10 @@ pub enum State {
     #[serde(rename_all = "camelCase")]
     Connected {
         /// Connected since this time.
-        #[serde(with = "crate::serde_ext::localtime::time")]
-        #[cfg_attr(
-            feature = "schemars",
-            schemars(with = "crate::schemars_ext::localtime::LocalDurationInSeconds")
-        )]
         since: LocalTime,
         /// Ping state.
         #[serde(skip)]
         ping: PingState,
-        /// Ongoing fetches.
-        fetching: HashSet<RepoId>,
         /// Measured latencies for this peer.
         #[serde(skip)]
         latencies: VecDeque<LocalDuration>,
@@ -124,18 +119,8 @@ pub enum State {
     #[serde(rename_all = "camelCase")]
     Disconnected {
         /// Since when has this peer been disconnected.
-        #[serde(with = "crate::serde_ext::localtime::time")]
-        #[cfg_attr(
-            feature = "schemars",
-            schemars(with = "crate::schemars_ext::localtime::LocalDurationInSeconds")
-        )]
         since: LocalTime,
         /// When to retry the connection.
-        #[serde(with = "crate::serde_ext::localtime::time")]
-        #[cfg_attr(
-            feature = "schemars",
-            schemars(with = "crate::schemars_ext::localtime::LocalDurationInSeconds")
-        )]
         retry_at: LocalTime,
     },
 }
@@ -233,18 +218,56 @@ impl PartialOrd for SyncStatus {
 
 /// Node user agent.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Serialize, Deserialize)]
-pub struct UserAgent(String);
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "schemars",
+    schemars(description = "\
+    A user agent string that starts and ends with the symbol '/', and contains segments of the form 'client:version' separated by '/'. \
+    The client and version parts must be non-empty, and must consist of printable ASCII characters excluding '/' and ':'. \
+    The entire string must be at most 64 characters long.",
+    extend(
+        "examples" = [
+            "/radicle:1.9.0/",
+            "/example:42.0.0/other-client:2.3.4/",
+        ],
+        "pattern" = r"^/([^:/\s]+((:[^:/\s]+))?/)+$",
+    ),
+))]
+pub struct UserAgent(
+    #[cfg_attr(feature = "schemars", schemars(
+        length(min = 3, max = UserAgent::LEN_MAX),
+    ))]
+    String,
+);
 
 impl UserAgent {
+    const LEN_MAX: usize = 64;
+
     /// Return a reference to the user agent string.
     pub fn as_str(&self) -> &str {
         self.0.as_str()
+    }
+
+    /// Return a user agent that can be used for testing purposes.
+    #[cfg(any(test, feature = "test"))]
+    pub fn test() -> Self {
+        UserAgent("/radicle:test/".to_owned())
     }
 }
 
 impl Default for UserAgent {
     fn default() -> Self {
-        UserAgent(String::from("/radicle/"))
+        const NAME: &str = env!("CARGO_PKG_NAME");
+        const VERSION: &str = env!("RADICLE_VERSION");
+
+        // The length check can be performed at compile time.
+        #[allow(clippy::int_plus_one)]
+        const _: () = assert!(1 + NAME.len() + 1 + VERSION.len() + 1 <= UserAgent::LEN_MAX);
+
+        // All other checks are performed by the `FromStr` implementation
+        // at run time.
+        UserAgent::from_str(&format!("/{NAME}:{VERSION}/"))
+            .expect("default user agent should be valid")
     }
 }
 
@@ -260,7 +283,7 @@ impl FromStr for UserAgent {
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         let reserved = ['/', ':'];
 
-        if input.len() > 64 {
+        if input.len() > UserAgent::LEN_MAX {
             return Err(input.to_owned());
         }
         let Some(s) = input.strip_prefix('/') else {
@@ -437,83 +460,229 @@ impl TryFrom<&sqlite::Value> for Alias {
 }
 
 /// Peer public protocol address.
-#[derive(Clone, Eq, PartialEq, Debug, Hash, From, Wrapper, WrapperMut, Serialize, Deserialize)]
-#[wrapper(Deref, Display, FromStr)]
-#[wrapper_mut(DerefMut)]
+#[derive(Clone, Eq, PartialEq, Debug, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 #[cfg_attr(
     feature = "schemars",
     derive(schemars::JsonSchema),
     schemars(description = "\
-    An IP address, or a DNS name, or a Tor onion name, followed by the symbol ':', \
-    followed by a TCP port number.\
-")
-)]
-pub struct Address(
-    #[serde(with = "crate::serde_ext::string")]
-    #[cfg_attr(feature = "schemars", schemars(
-        with = "String",
-        regex(pattern = r"^.+:((6553[0-5])|(655[0-2][0-9])|(65[0-4][0-9]{2})|(6[0-4][0-9]{3})|([1-5][0-9]{4})|([0-5]{0,5})|([0-9]{1,4}))$"),
-        extend("examples" = [
+    An IP address, or a DNS name, or a Tor onion name, or an I2P address,\
+    followed by the symbol ':', followed by a TCP port number.",
+    extend("examples" = [
             "xmrhfasfg5suueegrnc4gsgyi2tyclcy5oz7f5drnrodmdtob6t2ioyd.onion:8776",
+            "f2atcc7udeub5kh4nkljtjwyk7ikjviorufzgwnfwhkphljl3vhq.b32.i2p:8776",
             "seed.example.com:8776",
             "192.0.2.0:31337",
-        ]),
-    ))]
-    NetAddr<HostName>,
-);
+        ],
+        "pattern" = "^.+:((6553[0-5])|(655[0-2][0-9])|(65[0-4][0-9]{2})|(6[0-4][0-9]{3})|([1-5][0-9]{4})|([0-5]{0,5})|([0-9]{1,4}))$",
+    ),
+))]
+pub struct Address {
+    inner: NetAddr<HostName>,
+
+    /// See documentation of [`Address::is_ipv6_without_square_brackets`] for details.
+    #[deprecated]
+    is_ipv6_without_square_brackets: bool,
+}
 
 impl Address {
     /// Check whether this address is from the local network.
     pub fn is_local(&self) -> bool {
-        match self.0.host {
-            HostName::Ip(ip) => address::is_local(&ip),
+        match &self.inner.host {
+            HostName::Ip(ip) => address::is_local(ip),
+            HostName::Dns(name) => {
+                let name = name.strip_suffix(".").unwrap_or(name);
+
+                // RFC 2606, Section 2
+                // <https://datatracker.ietf.org/doc/html/rfc2606#section-2>
+                name.ends_with(".localhost") || name == "localhost"
+            }
             _ => false,
         }
     }
 
     /// Check whether this address is globally routable.
     pub fn is_routable(&self) -> bool {
-        match self.0.host {
+        match self.inner.host {
             HostName::Ip(ip) => address::is_routable(&ip),
+            HostName::Dns(_) => !self.is_local(),
             _ => true,
         }
     }
 
     /// Return the [`HostName`] of the [`Address`].
     pub fn host(&self) -> &HostName {
-        &self.0.host
+        &self.inner.host
+    }
+
+    /// Return the [`AddressType`] of the [`Address`].
+    ///
+    /// Returns `None` if the [`AddressType`] is not known.
+    pub fn address_type(&self) -> Option<AddressType> {
+        match self.host() {
+            HostName::Ip(IpAddr::V4(_)) => Some(AddressType::Ipv4),
+            HostName::Ip(IpAddr::V6(_)) => Some(AddressType::Ipv6),
+            HostName::Dns(_) => Some(AddressType::Dns),
+            #[cfg(feature = "tor")]
+            HostName::Tor(_) => Some(AddressType::Onion),
+            #[cfg(feature = "i2p")]
+            HostName::I2p(_) => Some(AddressType::I2p),
+            _ => None,
+        }
+    }
+
+    /// Returns `true` if the [`HostName`] is a Tor onion address.
+    #[cfg(feature = "tor")]
+    pub fn is_onion(&self) -> bool {
+        matches!(self.inner.host, HostName::Tor(_))
+    }
+
+    /// Returns `true` if the [`HostName`] is an I2P address.
+    #[cfg(feature = "i2p")]
+    pub fn is_i2p(&self) -> bool {
+        matches!(self.inner.host, HostName::I2p(_))
     }
 
     /// Return the port number of the [`Address`].
     pub fn port(&self) -> u16 {
-        self.0.port
+        self.inner.port
+    }
+
+    pub fn display_compact(&self) -> impl Display + use<> {
+        let host = match self.host() {
+            HostName::Ip(IpAddr::V4(ip)) => ip.to_string(),
+            HostName::Ip(IpAddr::V6(ip)) => format!("[{ip}]"),
+            HostName::Dns(dns) => dns.clone(),
+            #[cfg(feature = "tor")]
+            HostName::Tor(onion) => {
+                let onion = onion.to_string();
+                let start = onion.chars().take(8).collect::<String>();
+                let end = onion
+                    .chars()
+                    .skip(onion.len() - 8 - ".onion".len())
+                    .collect::<String>();
+                format!("{start}…{end}")
+            }
+            #[cfg(feature = "i2p")]
+            HostName::I2p(i2p) => i2p.to_string(),
+            _ => unreachable!(),
+        };
+
+        let port = self.port().to_string();
+
+        format!("{host}:{port}")
+    }
+
+    /// Returns `true` if the address was parsed from a string that
+    /// mentioned an IPv6 address without square brackets.
+    /// May be used to warn the user, since this format is deprecated.
+    /// This function itself is deprecated and will be removed without further
+    /// notice when the format is no longer accepted.
+    #[deprecated]
+    pub fn is_ipv6_without_square_brackets(&self) -> bool {
+        #[allow(deprecated)]
+        self.is_ipv6_without_square_brackets
+    }
+}
+
+impl Display for Address {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.host() {
+            HostName::Ip(IpAddr::V6(ip)) => {
+                write!(f, "[{ip}]:{}", self.port())
+            }
+            _ => self.inner.fmt(f),
+        }
+    }
+}
+
+impl From<NetAddr<HostName>> for Address {
+    fn from(addr: NetAddr<HostName>) -> Self {
+        Address {
+            inner: addr,
+            #[allow(deprecated)]
+            is_ipv6_without_square_brackets: false,
+        }
+    }
+}
+
+impl TryFrom<String> for Address {
+    type Error = <Self as FromStr>::Err;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+impl From<Address> for String {
+    fn from(value: Address) -> Self {
+        value.to_string()
+    }
+}
+
+impl FromStr for Address {
+    type Err = AddrParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (host, port) = s.rsplit_once(':').ok_or(AddrParseError::PortAbsent)?;
+
+        let (host, is_ipv6_without_square_brackets) = if let Some(host) = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+        {
+            (HostName::Ip(host.parse::<Ipv6Addr>()?.into()), false)
+        } else {
+            let host = host.parse()?;
+            let is_ipv6_without_square_brackets = matches!(&host, HostName::Ip(IpAddr::V6(_)));
+            (host, is_ipv6_without_square_brackets)
+        };
+
+        let port = port.parse().map_err(|_| AddrParseError::InvalidPort)?;
+
+        Ok(Self {
+            inner: NetAddr::new(host, port),
+            #[allow(deprecated)]
+            is_ipv6_without_square_brackets,
+        })
+    }
+}
+
+impl Deref for Address {
+    type Target = NetAddr<HostName>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
 impl cyphernet::addr::Host for Address {
     fn requires_proxy(&self) -> bool {
-        self.0.requires_proxy()
+        self.inner.requires_proxy()
     }
 }
 
 impl cyphernet::addr::Addr for Address {
     fn port(&self) -> u16 {
-        self.0.port()
+        self.inner.port()
     }
 }
 
 impl From<net::SocketAddr> for Address {
     fn from(addr: net::SocketAddr) -> Self {
-        Address(NetAddr {
-            host: HostName::Ip(addr.ip()),
-            port: addr.port(),
-        })
+        Address {
+            inner: NetAddr {
+                host: HostName::Ip(addr.ip()),
+                port: addr.port(),
+            },
+            #[allow(deprecated)]
+            is_ipv6_without_square_brackets: false,
+        }
     }
 }
 
 impl From<Address> for HostName {
     fn from(addr: Address) -> Self {
-        addr.0.host
+        addr.inner.host
     }
 }
 
@@ -553,10 +722,6 @@ impl std::fmt::Display for Link {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct Session {
-    #[cfg_attr(
-        feature = "schemars",
-        schemars(with = "crate::schemars_ext::crypto::PublicKey")
-    )]
     pub nid: NodeId,
     pub link: Link,
     pub addr: Address,
@@ -576,10 +741,6 @@ impl Session {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct Seed {
     /// The Node ID.
-    #[cfg_attr(
-        feature = "schemars",
-        schemars(with = "crate::schemars_ext::crypto::PublicKey")
-    )]
     pub nid: NodeId,
     /// Known addresses for this seed.
     pub addrs: Vec<KnownAddress>,
@@ -694,16 +855,12 @@ impl From<Vec<Seed>> for Seeds {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "camelCase")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum FetchResult {
     Success {
         updated: Vec<RefUpdate>,
-        #[cfg_attr(
-            feature = "schemars",
-            schemars(with = "HashSet<crate::schemars_ext::crypto::PublicKey>")
-        )]
         namespaces: HashSet<NodeId>,
         clone: bool,
     },
@@ -913,12 +1070,15 @@ pub trait Handle: Clone + Sync + Send {
         id: RepoId,
         from: NodeId,
         timeout: time::Duration,
+        signed_references_minimum_feature_level: Option<FeatureLevel>,
     ) -> Result<FetchResult, Self::Error>;
     /// Start seeding the given repo. May update the scope. Does nothing if the
     /// repo is already seeded.
     fn seed(&mut self, id: RepoId, scope: policy::Scope) -> Result<bool, Self::Error>;
     /// Start following the given peer.
     fn follow(&mut self, id: NodeId, alias: Option<Alias>) -> Result<bool, Self::Error>;
+    /// Set the following policy to block for the given peer.
+    fn block(&mut self, id: NodeId) -> Result<bool, Self::Error>;
     /// Un-seed the given repo and delete it from storage.
     fn unseed(&mut self, id: RepoId) -> Result<bool, Self::Error>;
     /// Unfollow the given peer.
@@ -960,7 +1120,7 @@ pub trait Handle: Clone + Sync + Send {
 /// The iterator blocks for a `timeout` duration, returning [`Error::TimedOut`]
 /// if the duration is reached.
 pub struct LineIter<T> {
-    stream: BufReader<Stream>,
+    stream: BufReader<UnixStream>,
     timeout: time::Duration,
     witness: PhantomData<T>,
 }
@@ -984,7 +1144,7 @@ impl<T: DeserializeOwned> Iterator for LineIter<T> {
                         return Some(Err(Error::InvalidJson {
                             response: l.clone(),
                             error: e,
-                        }))
+                        }));
                     }
                     Ok(result) => result,
                 };
@@ -1000,9 +1160,6 @@ impl<T: DeserializeOwned> Iterator for LineIter<T> {
         }
     }
 }
-
-/// Public node & device identifier.
-pub type NodeId = PublicKey;
 
 /// Node controller.
 #[derive(Debug, Clone)]
@@ -1024,7 +1181,7 @@ impl Node {
         cmd: Command,
         timeout: time::Duration,
     ) -> Result<LineIter<T>, Error> {
-        let mut stream = Stream::connect(&self.socket)
+        let mut stream = UnixStream::connect(&self.socket)
             .map_err(|e| Error::Connect(self.socket.clone(), e.kind()))?;
         cmd.to_writer(&mut stream)?;
         Ok(LineIter {
@@ -1183,6 +1340,7 @@ impl Handle for Node {
         rid: RepoId,
         from: NodeId,
         timeout: time::Duration,
+        signed_references_minimum_feature_level: Option<FeatureLevel>,
     ) -> Result<FetchResult, Error> {
         let result = self
             .call(
@@ -1190,6 +1348,7 @@ impl Handle for Node {
                     rid,
                     nid: from,
                     timeout,
+                    signed_references_minimum_feature_level,
                 },
                 DEFAULT_TIMEOUT.max(timeout),
             )?
@@ -1201,6 +1360,13 @@ impl Handle for Node {
 
     fn follow(&mut self, nid: NodeId, alias: Option<Alias>) -> Result<bool, Error> {
         let mut lines = self.call::<Success>(Command::Follow { nid, alias }, DEFAULT_TIMEOUT)?;
+        let response = lines.next().ok_or(Error::EmptyResponse)??;
+
+        Ok(response.updated)
+    }
+
+    fn block(&mut self, nid: NodeId) -> Result<bool, Error> {
+        let mut lines = self.call::<Success>(Command::Block { nid }, DEFAULT_TIMEOUT)?;
         let response = lines.next().ok_or(Error::EmptyResponse)??;
 
         Ok(response.updated)
@@ -1349,16 +1515,23 @@ pub(crate) mod properties {
 
     impl AliasInput {
         pub fn new() -> Self {
-            let short = arbitrary::gen::<Alias>(0);
+            let short = arbitrary::r#gen::<Alias>(0);
             let long = {
                 // Ensure we have a second, unique alias
                 let mut a = short.to_string();
-                a.push_str(arbitrary::gen::<Alias>(1).as_str());
+                a.push_str(arbitrary::r#gen::<Alias>(1).as_str());
                 Alias::new(a)
             };
+
             Self {
-                short: (short, arbitrary::vec::<NodeId>(3).into_iter().collect()),
-                long: (long, arbitrary::vec::<NodeId>(2).into_iter().collect()),
+                short: (
+                    short,
+                    arbitrary::array_distinct::<3, _>().into_iter().collect(),
+                ),
+                long: (
+                    long,
+                    arbitrary::array_distinct::<2, _>().into_iter().collect(),
+                ),
             }
         }
 
@@ -1378,7 +1551,7 @@ pub(crate) mod properties {
     /// the `short` alias, both sets of results will return. For the `long`
     /// alias, only its results will return.
     ///
-    /// It is also expected that the lookup is case insensitive.
+    /// It is also expected that the lookup is case-insensitive.
     pub fn test_reverse_lookup(store: &impl AliasStore, AliasInput { short, long }: AliasInput) {
         let (short, short_ids) = short;
         let (long, long_ids) = long;
@@ -1419,7 +1592,7 @@ mod test {
     use crate::assert_matches;
 
     #[test]
-    fn test_user_agent() {
+    fn user_agent() {
         assert!(UserAgent::from_str("/radicle:1.0.0/").is_ok());
         assert!(UserAgent::from_str("/radicle:1.0.0/heartwood:0.9/").is_ok());
         assert!(UserAgent::from_str("/radicle:1.0.0/heartwood:0.9/rust:1.77/").is_ok());
@@ -1429,6 +1602,7 @@ mod test {
         assert!(UserAgent::from_str("/radicle/").is_ok());
         assert!(UserAgent::from_str("/rad/icle/").is_ok());
         assert!(UserAgent::from_str("/rad:ic/le/").is_ok());
+        assert!(UserAgent::from_str("/heartwood:1.8.0-6-gf223afd9d-dirty/").is_ok());
 
         assert!(UserAgent::from_str("/:/").is_err());
         assert!(UserAgent::from_str("//").is_err());
@@ -1440,7 +1614,7 @@ mod test {
     }
 
     #[test]
-    fn test_alias() {
+    fn alias() {
         assert!(Alias::from_str("cloudhead").is_ok());
         assert!(Alias::from_str("cloud-head").is_ok());
         assert!(Alias::from_str("cl0ud.h3ad$__").is_ok());
@@ -1455,7 +1629,23 @@ mod test {
     }
 
     #[test]
-    fn test_command_result() {
+    fn address() {
+        assert!(Address::from_str("127.0.0.1:8776").is_ok());
+        assert!(Address::from_str("[::1]:8776").is_ok());
+        assert!(Address::from_str("[::ffff:127.0.0.1]:8776").is_ok());
+        assert!(Address::from_str("localhost:8776").is_ok());
+        assert!(Address::from_str("::1:8776").is_ok()); // Backwards-compatibility
+
+        assert!(Address::from_str("").is_err());
+        assert!(Address::from_str(":").is_err());
+        assert!(Address::from_str("127.0.0.1").is_err());
+        assert!(Address::from_str("127.0.0.1:xyz").is_err());
+        assert!(Address::from_str("[invalid]:8776").is_err());
+        assert!(Address::from_str("[127.0.0.1]:8776").is_err());
+    }
+
+    #[test]
+    fn command_result() {
         #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
         struct Test {
             value: u32,
@@ -1487,7 +1677,6 @@ mod test {
             &serde_json::to_string(&CommandResult::Okay(State::Connected {
                 since: LocalTime::now(),
                 ping: Default::default(),
-                fetching: Default::default(),
                 latencies: VecDeque::default(),
                 stable: false,
             }))

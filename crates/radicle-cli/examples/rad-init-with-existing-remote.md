@@ -22,11 +22,11 @@ Then we initialize.
 ```
 $ rad init --name heartwood --description "Heartwood Protocol & Stack" --no-confirm --public
 
-Initializing public radicle 👾 repository in [..]
+Initializing public Radicle 👾 repository in [..]
 
 ✓ Repository heartwood created.
 
-Your Repository ID (RID) is rad:z2D6wQnKapY7dn5meBnbH2rUKNZbT.
+Your Repository ID (RID) is rad:z2D6wQnKapY7dn5meBnbH2rUKNZbT
 You can show it any time by running `rad .` from this directory.
 
 Your repository will be announced to the network when you start your node.

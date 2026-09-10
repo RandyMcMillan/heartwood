@@ -59,10 +59,10 @@ pub struct Spinner {
 
 impl Drop for Spinner {
     fn drop(&mut self) {
-        if let Ok(mut progress) = self.progress.lock() {
-            if let State::Running = progress.state {
-                progress.state = State::Canceled;
-            }
+        if let Ok(mut progress) = self.progress.lock()
+            && let State::Running = progress.state
+        {
+            progress.state = State::Canceled;
         }
 
         unsafe { ManuallyDrop::take(&mut self.handle) }
@@ -143,7 +143,7 @@ pub fn spinner_to(
     let progress = Arc::new(Mutex::new(Progress::new(Paint::new(message.clone()))));
 
     #[cfg(unix)]
-    let (sig_tx, sig_rx) = crossbeam_channel::unbounded();
+    let (sig_tx, sig_rx) = std::sync::mpsc::sync_channel(1);
 
     #[cfg(unix)]
     let sig_result = radicle_signals::install(sig_tx);

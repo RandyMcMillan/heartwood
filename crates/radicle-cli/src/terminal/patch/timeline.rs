@@ -53,7 +53,9 @@ struct RevisionEntry<'a> {
     timestamp: cob::Timestamp,
     /// The id of the [`Revision`].
     id: RevisionId,
-    /// The commit head of the [`Revision`].
+    /// The base commit of the [`Revision`].
+    base: git::Oid,
+    /// The head commit of the [`Revision`].
     head: git::Oid,
     /// All [`Update`]s that occurred on the [`Revision`].
     updates: Vec<Update<'a>>,
@@ -72,7 +74,7 @@ impl<'a> RevisionEntry<'a> {
             (
                 review.timestamp(),
                 Update::Reviewed {
-                    review: review.clone(),
+                    review: Box::new(review.clone()),
                 },
             )
         }));
@@ -100,6 +102,7 @@ impl<'a> RevisionEntry<'a> {
             author: Author::new(&revision.author().id, profile, verbose),
             timestamp: revision.timestamp(),
             id,
+            base: *revision.base(),
             head: revision.head(),
             updates: updates.into_iter().map(|(_, up)| up).collect(),
         }
@@ -113,7 +116,7 @@ impl<'a> RevisionEntry<'a> {
         use term::{format::*, *};
 
         let id: Label = if verbose {
-            self.id.to_string().into()
+            oid_long(self.id).into()
         } else {
             oid(self.id).into()
         };
@@ -127,13 +130,13 @@ impl<'a> RevisionEntry<'a> {
         let line = Line::spaced([icon.into(), dim("Revision").into(), id]).space();
 
         let line = line
-            .item(dim(if verbose { "with head" } else { "@" }))
+            .item(dim(if verbose { "with range" } else { "@" }))
             .space();
 
         let line = line.item(secondary(if verbose {
-            Paint::new(self.head.to_string())
+            range_long(self.base, self.head)
         } else {
-            oid(self.head)
+            range(self.base, self.head)
         }));
 
         iter::once(
@@ -154,7 +157,7 @@ impl<'a> RevisionEntry<'a> {
 /// An update in the [`Patch`]'s timeline.
 enum Update<'a> {
     /// A revision of the patch was reviewed.
-    Reviewed { review: Review },
+    Reviewed { review: Box<Review> },
     /// A revision of the patch was merged.
     Merged {
         author: Author<'a>,
@@ -169,7 +172,7 @@ impl Update<'_> {
 
         match self {
             Update::Reviewed { review } => {
-                let by = " ".repeat(if verbose { 0 } else { 13 }) + "by";
+                let by = " ".repeat(if verbose { 0 } else { 22 }) + "by";
 
                 let (symbol, verb) = match review.verdict() {
                     Some(Verdict::Accept) => (PREFIX_SUCCESS, positive("accepted")),
@@ -209,7 +212,9 @@ impl Update<'_> {
                             line.pad(
                                 2 // alignment
                                     + 2 // parens
-                                    + LENGTH_OF_SHORT_COMMIT_HASH
+                                    + LENGTH_OF_SHORT_COMMIT_HASH // base
+                                    + 2 // ..
+                                    + LENGTH_OF_SHORT_COMMIT_HASH // head
                                     + LENGTH_OF_SPACES,
                             );
                         }

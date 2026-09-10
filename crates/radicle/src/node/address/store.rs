@@ -8,8 +8,8 @@ use sqlite as sql;
 use thiserror::Error;
 
 use crate::node;
-use crate::node::address::{AddressType, KnownAddress, Node, Source};
 use crate::node::UserAgent;
+use crate::node::address::{AddressType, KnownAddress, Node, Source};
 use crate::node::{Address, Alias, AliasError, AliasStore, Database, NodeId, Penalty, Severity};
 use crate::prelude::Timestamp;
 use crate::sql::transaction;
@@ -182,9 +182,42 @@ impl Store for Database {
         stmt.bind((1, node))?;
 
         for row in stmt.into_iter() {
-            let row = row?;
-            let _typ = row.try_read::<AddressType, _>("type")?;
-            let addr = row.try_read::<Address, _>("value")?;
+            let mut row = row?;
+            let address_type = match row.try_read::<AddressType, _>("type") {
+                Ok(address_type) => address_type,
+                Err(err) => {
+                    let value = match row.take("type") {
+                        sqlite::Value::String(value) => value,
+                        value => format!("{value:?}"),
+                    };
+                    log::debug!("Failed to parse address type '{value}' for {node}: {err}");
+                    continue;
+                }
+            };
+            let addr = match row.try_read::<Address, _>("value") {
+                Ok(addr) => addr,
+                Err(err) => {
+                    let value = match row.take("type") {
+                        sqlite::Value::String(value) => value,
+                        value => format!("{value:?}"),
+                    };
+                    log::debug!("Failed to parse address '{value}' for {node}: {err}");
+                    continue;
+                }
+            };
+            match addr.address_type() {
+                None => {
+                    log::debug!("Address {addr} has unknown address type for {node}");
+                    continue;
+                }
+                Some(actual_type) if actual_type != address_type => {
+                    log::debug!(
+                        "The address '{addr}' was expected to be of type '{address_type:?}' but was found to be of type '{actual_type:?}'"
+                    );
+                    continue;
+                }
+                _ => {}
+            }
             let source = row.try_read::<Source, _>("source")?;
             let last_attempt = row
                 .read::<Option<i64>, _>("last_attempt")
@@ -299,31 +332,17 @@ impl Store for Database {
         let mut entries = Vec::new();
 
         while let Some(Ok(row)) = stmt.next() {
-            let node = row.try_read::<NodeId, _>("node")?;
-            let _typ = row.try_read::<AddressType, _>("type")?;
-            let addr = row.try_read::<Address, _>("value")?;
-            let source = row.try_read::<Source, _>("source")?;
-            let last_success = row.try_read::<Option<i64>, _>("last_success")?;
-            let last_attempt = row.try_read::<Option<i64>, _>("last_attempt")?;
-            let last_success = last_success.map(|t| LocalTime::from_millis(t as u128));
-            let last_attempt = last_attempt.map(|t| LocalTime::from_millis(t as u128));
-            let version = row.try_read::<i64, _>("version")?.try_into()?;
-            let banned = row.try_read::<i64, _>("banned")?.is_positive();
-            let penalty = row.try_read::<i64, _>("penalty")?;
-            let penalty = Penalty(penalty as u8); // Clamped at `u8::MAX`.
-
-            entries.push(AddressEntry {
-                node,
-                version,
-                penalty,
-                address: KnownAddress {
-                    addr,
-                    source,
-                    last_success,
-                    last_attempt,
-                    banned,
-                },
-            });
+            // Decode each row independently so a single corrupt entry does not poison the whole address book.
+            match AddressEntry::try_from(&row) {
+                Ok(e) => entries.push(e),
+                Err(e) => {
+                    let value = row.try_read::<&str, _>("value").unwrap_or("?");
+                    log::warn!(
+                        target: "service",
+                        "Skipping unreadable address book row (value={value:?}): {e}"
+                    );
+                }
+            }
         }
         Ok(Box::new(entries.into_iter()))
     }
@@ -492,6 +511,38 @@ where
     }
 }
 
+impl TryFrom<&sql::Row> for AddressEntry {
+    type Error = Error;
+
+    fn try_from(row: &sql::Row) -> Result<Self, Self::Error> {
+        let node = row.try_read::<NodeId, _>("node")?;
+        let _type = row.try_read::<AddressType, _>("type")?;
+        let addr = row.try_read::<Address, _>("value")?;
+        let source = row.try_read::<Source, _>("source")?;
+        let last_success = row.try_read::<Option<i64>, _>("last_success")?;
+        let last_attempt = row.try_read::<Option<i64>, _>("last_attempt")?;
+        let last_success = last_success.map(|t| LocalTime::from_millis(t as u128));
+        let last_attempt = last_attempt.map(|t| LocalTime::from_millis(t as u128));
+        let version = row.try_read::<i64, _>("version")?.try_into()?;
+        let banned = row.try_read::<i64, _>("banned")?.is_positive();
+        let penalty = row.try_read::<i64, _>("penalty")?;
+        let penalty = Penalty(penalty as u8); // Clamped at `u8::MAX`.
+
+        Ok(AddressEntry {
+            node,
+            version,
+            penalty,
+            address: KnownAddress {
+                addr,
+                source,
+                last_success,
+                last_attempt,
+                banned,
+            },
+        })
+    }
+}
+
 impl TryFrom<&sql::Value> for Source {
     type Error = sql::Error;
 
@@ -535,7 +586,10 @@ impl TryFrom<&sql::Value> for AddressType {
                 "ipv4" => Ok(AddressType::Ipv4),
                 "ipv6" => Ok(AddressType::Ipv6),
                 "dns" => Ok(AddressType::Dns),
+                #[cfg(feature = "tor")]
                 "onion" => Ok(AddressType::Onion),
+                #[cfg(feature = "i2p")]
+                "i2p" => Ok(AddressType::I2p),
                 _ => Err(err),
             },
             _ => Err(err),
@@ -549,7 +603,10 @@ impl sql::BindableWithIndex for AddressType {
             Self::Ipv4 => "ipv4".bind(stmt, i),
             Self::Ipv6 => "ipv6".bind(stmt, i),
             Self::Dns => "dns".bind(stmt, i),
+            #[cfg(feature = "tor")]
             Self::Onion => "onion".bind(stmt, i),
+            #[cfg(feature = "i2p")]
+            Self::I2p => "i2p".bind(stmt, i),
         }
     }
 }
@@ -565,17 +622,17 @@ mod test {
     use localtime::LocalTime;
 
     #[test]
-    fn test_empty() {
+    fn empty() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("cache");
-        let cache = Database::open(path).unwrap();
+        let cache = Database::open(path, crate::node::db::config::Config::default()).unwrap();
 
         assert!(cache.is_empty().unwrap());
     }
 
     #[test]
-    fn test_get_none() {
-        let alice = arbitrary::gen::<NodeId>(1);
+    fn get_none() {
+        let alice = arbitrary::r#gen::<NodeId>(1);
         let cache = Database::memory().unwrap();
         let result = cache.get(&alice).unwrap();
 
@@ -583,8 +640,8 @@ mod test {
     }
 
     #[test]
-    fn test_remove_nothing() {
-        let alice = arbitrary::gen::<NodeId>(1);
+    fn remove_nothing() {
+        let alice = arbitrary::r#gen::<NodeId>(1);
         let mut cache = Database::memory().unwrap();
         let removed = cache.remove(&alice).unwrap();
 
@@ -592,8 +649,8 @@ mod test {
     }
 
     #[test]
-    fn test_alias() {
-        let alice = arbitrary::gen::<NodeId>(1);
+    fn alias() {
+        let alice = arbitrary::r#gen::<NodeId>(1);
         let mut cache = Database::memory().unwrap();
         let features = node::Features::SEED;
         let timestamp = Timestamp::from(LocalTime::now());
@@ -631,8 +688,8 @@ mod test {
     }
 
     #[test]
-    fn test_insert_and_get() {
-        let alice = arbitrary::gen::<NodeId>(1);
+    fn insert_and_get() {
+        let alice = arbitrary::r#gen::<NodeId>(1);
         let mut cache = Database::memory().unwrap();
         let version = 2;
         let features = node::Features::SEED;
@@ -640,7 +697,7 @@ mod test {
         let ua = UserAgent::default();
 
         let ka = KnownAddress {
-            addr: net::SocketAddr::from(([4, 4, 4, 4], 8776)).into(),
+            addr: net::SocketAddr::from(([198, 18, 0, 4], 8776)).into(),
             source: Source::Peer,
             last_success: None,
             last_attempt: None,
@@ -671,8 +728,8 @@ mod test {
     }
 
     #[test]
-    fn test_insert_duplicate() {
-        let alice = arbitrary::gen::<NodeId>(1);
+    fn insert_duplicate() {
+        let alice = arbitrary::r#gen::<NodeId>(1);
         let mut cache = Database::memory().unwrap();
         let features = node::Features::SEED;
         let timestamp = LocalTime::now().into();
@@ -680,7 +737,7 @@ mod test {
         let ua = UserAgent::default();
 
         let ka = KnownAddress {
-            addr: net::SocketAddr::from(([4, 4, 4, 4], 8776)).into(),
+            addr: net::SocketAddr::from(([198, 18, 0, 4], 8776)).into(),
             source: Source::Peer,
             last_success: None,
             last_attempt: None,
@@ -700,8 +757,8 @@ mod test {
     }
 
     #[test]
-    fn test_insert_and_update() {
-        let alice = arbitrary::gen::<NodeId>(1);
+    fn insert_and_update() {
+        let alice = arbitrary::r#gen::<NodeId>(1);
         let mut cache = Database::memory().unwrap();
         let timestamp = LocalTime::now().into();
         let features = node::Features::SEED;
@@ -710,7 +767,7 @@ mod test {
         let alias1 = Alias::new("alice");
         let alias2 = Alias::new("~alice~");
         let ka = KnownAddress {
-            addr: net::SocketAddr::from(([4, 4, 4, 4], 8776)).into(),
+            addr: net::SocketAddr::from(([198, 18, 0, 4], 8776)).into(),
             source: Source::Peer,
             last_success: None,
             last_attempt: None,
@@ -775,9 +832,9 @@ mod test {
     }
 
     #[test]
-    fn test_insert_and_remove() {
-        let alice = arbitrary::gen::<NodeId>(1);
-        let bob = arbitrary::gen::<NodeId>(1);
+    fn insert_and_remove() {
+        let alice = arbitrary::r#gen::<NodeId>(1);
+        let bob = arbitrary::r#gen::<NodeId>(1);
         let mut cache = Database::memory().unwrap();
         let timestamp = LocalTime::now().into();
         let ua = UserAgent::default();
@@ -786,9 +843,9 @@ mod test {
         let bob_alias = Alias::new("bob");
 
         for addr in [
-            ([4, 4, 4, 4], 8776),
-            ([7, 7, 7, 7], 8776),
-            ([9, 9, 9, 9], 8776),
+            ([198, 18, 0, 4], 8776),
+            ([198, 18, 0, 7], 8776),
+            ([198, 18, 0, 9], 8776),
         ] {
             let ka = KnownAddress {
                 addr: net::SocketAddr::from(addr).into(),
@@ -825,7 +882,7 @@ mod test {
     }
 
     #[test]
-    fn test_entries() {
+    fn entries() {
         let ids = arbitrary::vec::<NodeId>(16);
         let mut rng = fastrand::Rng::new();
         let mut cache = Database::memory().unwrap();
@@ -867,9 +924,9 @@ mod test {
     }
 
     #[test]
-    fn test_disconnected() {
-        let alice = arbitrary::gen::<NodeId>(1);
-        let addr = arbitrary::gen::<Address>(1);
+    fn disconnected() {
+        let alice = arbitrary::r#gen::<NodeId>(1);
+        let addr = arbitrary::r#gen::<Address>(1);
         let mut cache = Database::memory().unwrap();
         let features = node::Features::SEED;
         let timestamp = Timestamp::from(LocalTime::now());
@@ -908,17 +965,17 @@ mod test {
     }
 
     #[test]
-    fn test_disconnected_ban() {
-        let alice = arbitrary::gen::<NodeId>(1);
+    fn disconnected_ban() {
+        let alice = arbitrary::r#gen::<NodeId>(1);
         let ua = UserAgent::default();
-        let ip1: net::Ipv4Addr = [8, 8, 8, 8].into();
-        let ip2: net::Ipv4Addr = [9, 9, 9, 9].into();
-        let ka1 = arbitrary::gen::<KnownAddress>(1);
+        let ip1: net::Ipv4Addr = [198, 18, 0, 8].into();
+        let ip2: net::Ipv4Addr = [198, 18, 0, 9].into();
+        let ka1 = arbitrary::r#gen::<KnownAddress>(1);
         let ka1 = KnownAddress {
             addr: Address::from(NetAddr::new(ip1.into(), 8776)),
             ..ka1
         };
-        let ka2 = arbitrary::gen::<KnownAddress>(1);
+        let ka2 = arbitrary::r#gen::<KnownAddress>(1);
         let ka2 = KnownAddress {
             addr: Address::from(NetAddr::new(ip2.into(), 8776)),
             ..ka2
@@ -972,7 +1029,55 @@ mod test {
     }
 
     #[test]
-    fn test_node_aliases() {
+    fn entries_skips_unparsable_address() {
+        let alice = arbitrary::r#gen::<NodeId>(1);
+        let bob = arbitrary::r#gen::<NodeId>(2);
+        let mut cache = Database::memory().unwrap();
+        let timestamp = Timestamp::from(LocalTime::now());
+        let ua = UserAgent::default();
+        let features = node::Features::SEED;
+        let good_addr: Address = "[2001:db8::1]:8776".parse().unwrap();
+        let good_ka = KnownAddress {
+            addr: good_addr.clone(),
+            source: Source::Peer,
+            last_success: None,
+            last_attempt: None,
+            banned: false,
+        };
+        cache
+            .insert(
+                &alice,
+                3,
+                features,
+                &Alias::new("alice"),
+                0,
+                &ua,
+                timestamp,
+                [good_ka.clone()],
+            )
+            .unwrap();
+        // Insert bob's node row via the normal path with no addresses, then
+        // smuggle in a malformed row that mimics post-migration-8 corruption.
+        cache
+            .insert(&bob, 3, features, &Alias::new("bob"), 0, &ua, timestamp, [])
+            .unwrap();
+        cache
+            .db
+            .execute(format!(
+                "INSERT INTO addresses (node, type, value, source, timestamp)
+                 VALUES ('{bob}', 'ipv6', '[]:8776', 'peer', 0)"
+            ))
+            .unwrap();
+
+        // entries() must succeed and yield alice's good row.
+        let entries = cache.entries().unwrap().collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].node, alice);
+        assert_eq!(entries[0].address, good_ka);
+    }
+
+    #[test]
+    fn node_aliases() {
         let mut db = Database::memory().unwrap();
         let input = node::properties::AliasInput::new();
         let (short, short_ids) = input.short();
@@ -980,7 +1085,7 @@ mod test {
         let features = node::Features::SEED;
         let agent = UserAgent::default();
         let timestamp = Timestamp::from(LocalTime::now());
-        let ka = arbitrary::gen::<KnownAddress>(1);
+        let ka = arbitrary::r#gen::<KnownAddress>(1);
 
         for id in short_ids {
             db.insert(id, 1, features, short, 16, &agent, timestamp, [ka.clone()])
@@ -993,5 +1098,87 @@ mod test {
         }
 
         node::properties::test_reverse_lookup(&db, input)
+    }
+
+    #[test]
+    fn skip_invalid_address_type() {
+        let alice = arbitrary::r#gen::<NodeId>(1);
+        let mut cache = Database::memory().unwrap();
+        let timestamp = Timestamp::from(LocalTime::now());
+        let ua = UserAgent::default();
+        let features = node::Features::SEED;
+        let good_addr: Address = "[2001:db8::1]:64312".parse().unwrap();
+        let good_ka = KnownAddress {
+            addr: good_addr.clone(),
+            source: Source::Peer,
+            last_success: None,
+            last_attempt: None,
+            banned: false,
+        };
+        cache
+            .insert(
+                &alice,
+                1,
+                features,
+                &Alias::new("alice"),
+                0,
+                &ua,
+                timestamp,
+                [good_ka.clone()],
+            )
+            .unwrap();
+        cache
+            .db
+            .execute(format!(
+                "INSERT INTO addresses (node, type, value, source, timestamp)
+                 VALUES ('{alice}', 'invalid-address-type', 'example.com:64312', 'peer', 0)"
+            ))
+            .unwrap();
+
+        let node = cache.get(&alice).unwrap().unwrap();
+        assert_eq!(node.addrs.len(), 1);
+        assert_eq!(node.alias, Alias::new("alice"));
+        assert_eq!(node.agent, ua);
+    }
+
+    #[test]
+    fn skip_mismatched_address_type() {
+        let alice = arbitrary::r#gen::<NodeId>(1);
+        let mut cache = Database::memory().unwrap();
+        let timestamp = Timestamp::from(LocalTime::now());
+        let ua = UserAgent::default();
+        let features = node::Features::SEED;
+        let good_addr: Address = "[2001:db8::1]:64312".parse().unwrap();
+        let good_ka = KnownAddress {
+            addr: good_addr.clone(),
+            source: Source::Peer,
+            last_success: None,
+            last_attempt: None,
+            banned: false,
+        };
+        cache
+            .insert(
+                &alice,
+                1,
+                features,
+                &Alias::new("alice"),
+                0,
+                &ua,
+                timestamp,
+                [good_ka.clone()],
+            )
+            .unwrap();
+        cache
+            .db
+            .execute(format!(
+                "INSERT INTO addresses (node, type, value, source, timestamp)
+                 VALUES ('{alice}', 'ipv4', 'example.com:64312', 'peer', 0)"
+            ))
+            .unwrap();
+
+        let node = cache.get(&alice).unwrap().unwrap();
+        assert_eq!(node.addrs.len(), 1);
+        assert_eq!(node.alias, Alias::new("alice"));
+        assert_eq!(node.agent, ua);
     }
 }

@@ -1,6 +1,5 @@
 use std::io;
-
-use crossbeam_channel as chan;
+use std::sync::mpsc;
 
 use signals_receipts::channel_notify_facility::{
     self, FinishError, InstallError, SendError, SignalsChannel as _, UninstallError,
@@ -36,10 +35,10 @@ signals_receipts::channel_notify_facility! {
 
 /// Install global signal handlers, with notifications sent to the given
 /// `notify` channel.
-pub fn install(notify: chan::Sender<Signal>) -> io::Result<()> {
+pub fn install(notify: mpsc::SyncSender<Signal>) -> io::Result<()> {
     /// The sender type must implement the facility's trait.
     #[derive(Debug)]
-    struct ChanSender(chan::Sender<Signal>);
+    struct ChanSender(mpsc::SyncSender<Signal>);
 
     /// This also does our desired conversion from signal numbers to our
     /// `Signal` representation.
@@ -57,10 +56,7 @@ pub fn install(notify: chan::Sender<Signal>) -> io::Result<()> {
     }
 
     SignalsChannel::install_with_outside_channel(ChanSender(notify)).map_err(|e| match e {
-        InstallError::AlreadyInstalled { unused_notify: _ } => io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "signal handling is already installed",
-        ),
+        InstallError::AlreadyInstalled { unused_notify: _ } => already_installed(),
         _ => io::Error::other(e), // The error type is non-exhaustive.
     })
 }

@@ -54,7 +54,7 @@ pub enum LoadError {
 /// Operations are applied to an accumulator to yield a final state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Op<A> {
-    /// Id of the entry under which this operation lives.
+    /// ID of the entry under which this operation lives.
     pub id: EntryId,
     /// The action carried out by this operation.
     pub actions: NonEmpty<A>,
@@ -122,10 +122,11 @@ impl<A> Op<A> {
     pub fn manifest_of<S>(store: &S, id: &git::Oid) -> Result<Manifest, ManifestError>
     where
         S: cob::change::Storage<
-            ObjectId = git::Oid,
-            Parent = git::Oid,
-            Signatures = crypto::ssh::ExtendedSignature,
-        >,
+                ObjectId = git::Oid,
+                Parent = git::Oid,
+                PublicKey = crypto::PublicKey,
+                Signature = crypto::Signature,
+            >,
     {
         store.manifest_of(id).map_err(|err| ManifestError {
             object: *id,
@@ -137,10 +138,11 @@ impl<A> Op<A> {
     pub fn load<S>(store: &S, id: git::Oid) -> Result<Self, LoadError>
     where
         S: cob::change::Storage<
-            ObjectId = git::Oid,
-            Parent = git::Oid,
-            Signatures = crypto::ssh::ExtendedSignature,
-        >,
+                ObjectId = git::Oid,
+                Parent = git::Oid,
+                PublicKey = crypto::PublicKey,
+                Signature = crypto::Signature,
+            >,
         for<'de> A: serde::Deserialize<'de>,
     {
         let entry = store.load(id).map_err(|err| LoadError::Load {

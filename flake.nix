@@ -2,8 +2,8 @@
   description = "Radicle";
 
   inputs = {
-    nixpkgs-unstable.url = "github:NixOS/nixpkgs/release-25.05";
-    nixpkgs-stable.url = "github:NixOS/nixpkgs/release-25.05";
+    nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs-stable.url = "github:NixOS/nixpkgs/nixos-26.05";
     nixpkgs.follows = "nixpkgs-stable";
 
     crane.url = "github:ipetkov/crane";
@@ -28,25 +28,52 @@
 
   nixConfig = {
     keepOutputs = true;
-    extra-substituters = ["https://attic.radicle.xyz/radicle"];
+    extra-substituters = ["https://attic.radicle.dev/radicle"];
     extra-trusted-public-keys = ["radicle:TruHbueGHPm9iYSq7Gq6wJApJOqddWH+CEo+fsZnf4g="];
   };
 
   outputs = {
     self,
-    nixpkgs,
+    advisory-db,
     crane,
     flake-utils,
-    advisory-db,
+    nixpkgs,
+    nixpkgs-stable,
+    nixpkgs-unstable,
     rust-overlay,
     ...
-  } @ inputs:
+  } @ inputs: let
+    version = "nix-" + (self.shortRev or self.dirtyShortRev or "unknown");
+
+    lib = nixpkgs.lib;
+
+    srcFilters = pkgs: path: type:
+      builtins.any (suffix: lib.hasSuffix suffix path) [
+        ".sql" # schemas
+        ".diff" # testing
+        ".md" # testing
+        ".adoc" # man pages
+        ".json" # testing samples
+        ".txt" # might be included with `include_str!`
+        "rad-cob-multiset" # testing external COBs
+      ]
+      ||
+      # Default filter from crane (allow .rs files)
+      ((crane.mkLib pkgs).filterCargoSources path type);
+
+    mkSrc = pkgs:
+      lib.cleanSourceWith {
+        src = ./.;
+        filter = srcFilters pkgs;
+      };
+  in
     flake-utils.lib.eachDefaultSystem (system: let
-      lib = nixpkgs.lib;
       pkgs = import nixpkgs {
         inherit system;
         overlays = [(import rust-overlay)];
       };
+
+      src = mkSrc pkgs;
 
       msrv = let
         msrv = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.rust-version;
@@ -62,27 +89,16 @@
         commonArgs = mkCommonArgs craneLib;
       };
 
-      srcFilters = path: type:
-        builtins.any (suffix: lib.hasSuffix suffix path) [
-          ".sql" # schemas
-          ".diff" # testing
-          ".md" # testing
-          ".adoc" # man pages
-          ".json" # testing samples
-          ".txt" # might be included with `include_str!`
-          "rad-cob-multiset" # testing external COBs
-        ]
-        ||
-        # Default filter from crane (allow .rs files)
-        (rustup.craneLib.filterCargoSources path type);
-
-      src = lib.cleanSourceWith {
-        src = ./.;
-        filter = srcFilters;
+      rustupDevShell = rec {
+        toolchain = rustup.toolchain.override (prev: {
+          extensions = prev.extensions ++ ["rust-analyzer"];
+        });
+        craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
+        commonArgs = mkCommonArgs craneLib;
       };
 
       basicArgs = {
-        inherit src;
+        src = mkSrc pkgs;
         pname = "Heartwood";
         strictDeps = true;
       };
@@ -100,9 +116,6 @@
             git
             installShellFiles
           ];
-          buildInputs = lib.optionals pkgs.stdenv.buildPlatform.isDarwin (with pkgs; [
-            darwin.apple_sdk.frameworks.Security
-          ]);
           nativeCheckInputs = with pkgs; [
             jq
             jujutsu
@@ -110,7 +123,7 @@
 
           env =
             {
-              RADICLE_VERSION = "nix-" + (self.shortRev or self.dirtyShortRev or "unknown");
+              RADICLE_VERSION = version;
             }
             // (
               if self ? rev || self ? dirtyRev
@@ -176,7 +189,7 @@
             grep = rec {
               generators = [
                 {
-                  word = "radicle.xyz";
+                  word = "radicle.dev";
                   files = "\\.rs$";
                   excludes = [];
                 }
@@ -213,7 +226,6 @@
                   "grep-${word}"
                   "! ${lib.getExe pkgs.ripgrep} --context=3 --fixed-strings '${word}' $@");
                 name = "Avoid '${word}' in '${files}'";
-                stages = ["pre-commit" "pre-push"];
                 pass_filenames = true;
               };
             };
@@ -221,9 +233,25 @@
             inputs.git-hooks.lib.${system}.run {
               src = ./.;
               settings.rust.check.cargoDeps = pkgs.rustPlatform.importCargoLock {lockFile = ./Cargo.lock;};
+              default_stages = [
+                "pre-commit"
+                "pre-push"
+              ];
               hooks =
                 {
                   alejandra.enable = true;
+                  typos = {
+                    enable = true;
+                    settings = {
+                      verbose = true;
+                      write = true;
+                    };
+                  };
+                  codespell = {
+                    enable = true;
+                    entry = "${lib.getExe pkgs.codespell} -w";
+                    types = ["text"];
+                  };
                   rustfmt = {
                     enable = true;
                     fail_fast = true;
@@ -306,7 +334,21 @@
               env.CARGO_PROFILE = "dev";
               cargoNextestExtraArgs = "--no-capture";
             });
-        };
+        }
+        // (
+          let
+            nixos = nixpkgs:
+              (import nixpkgs {
+                inherit system;
+                overlays = [
+                  self.overlays.default
+                ];
+              }).radicle-node.tests.nixos-run;
+          in {
+            nixos-stable = nixos nixpkgs-stable;
+            nixos-unstable = nixos nixpkgs-unstable;
+          }
+        );
 
       packages = let
         crates = buildCrates {};
@@ -328,7 +370,7 @@
           };
         };
 
-      devShells.default = rustup.craneLib.devShell {
+      devShells.default = rustupDevShell.craneLib.devShell {
         inherit (self.checks.${system}.pre-commit-check) shellHook;
         buildInputs = self.checks.${system}.pre-commit-check.enabledPackages;
 
@@ -337,14 +379,46 @@
           cargo-audit
           cargo-deny
           cargo-watch
+          cargo-msrv
           cargo-nextest
           cargo-semver-checks
+          cargo-shear
+          codespell
+          just
           ripgrep
-          rust-analyzer
           sqlite
+
+          # /simulation
+          cue
+          kubectl
+          talosctl
+          timoni
+          qemu
+          OVMF.fd
         ];
 
-        env.RUST_SRC_PATH = "${rustup.toolchain}/lib/rustlib/src/rust/library";
+        env = {
+          RUST_BACKTRACE = "full";
+          RUST_SRC_PATH = "${rustupDevShell.toolchain}/lib/rustlib/src/rust/library";
+        };
+
+        # NixOS: OVMF firmware lives in the Nix store, not /usr/share/OVMF.
+        # talosctl has hardcoded search paths, so we expose the store path for
+        # the simulation justfile to symlink into a location talosctl can find.
+        env.OVMF_FD_PATH = "${pkgs.OVMF.fd}/FV";
       };
-    });
+    })
+    // {
+      overlays = {
+        default = final: prev: {
+          radicle-node = prev.radicle-node.overrideAttrs (finalAttrs: prevAttrs: {
+            inherit version;
+            src = mkSrc final;
+            cargoDeps = final.rustPlatform.importCargoLock {
+              lockFile = ./Cargo.lock;
+            };
+          });
+        };
+      };
+    };
 }

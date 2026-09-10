@@ -9,7 +9,7 @@ pub mod string {
     use std::fmt::Display;
     use std::str::FromStr;
 
-    use serde::{de, Deserialize, Deserializer, Serializer};
+    use serde::{Deserialize, Deserializer, Serializer, de};
 
     pub fn serialize<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -31,80 +31,6 @@ pub mod string {
     }
 }
 
-/// Unlike the default `serde` instances from `localtime`, this encodes and decodes using seconds
-/// instead of milliseconds.
-pub mod localtime {
-    pub mod time {
-        use localtime::LocalTime;
-        use serde::{Deserialize, Deserializer, Serializer};
-
-        pub fn serialize<S>(value: &LocalTime, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            serializer.serialize_u64(value.as_secs())
-        }
-
-        pub fn deserialize<'de, D>(deserializer: D) -> Result<LocalTime, D::Error>
-        where
-            D: Deserializer<'de>,
-        {
-            let seconds = u64::deserialize(deserializer)?;
-
-            Ok(LocalTime::from_secs(seconds))
-        }
-    }
-
-    pub mod option {
-        pub mod time {
-            use localtime::LocalTime;
-            use serde::{Deserialize, Deserializer, Serializer};
-
-            pub fn serialize<S>(value: &Option<LocalTime>, serializer: S) -> Result<S::Ok, S::Error>
-            where
-                S: Serializer,
-            {
-                match value {
-                    Some(time) => serializer.serialize_some(&time.as_secs()),
-                    None => serializer.serialize_none(),
-                }
-            }
-
-            pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<LocalTime>, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                let option = Option::<u64>::deserialize(deserializer)?;
-                match option {
-                    Some(seconds) => Ok(Some(LocalTime::from_secs(seconds))),
-                    None => Ok(None),
-                }
-            }
-        }
-    }
-
-    pub mod duration {
-        use localtime::LocalDuration;
-        use serde::{Deserialize, Deserializer, Serializer};
-
-        pub fn serialize<S>(value: &LocalDuration, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            serializer.serialize_u64(value.as_secs())
-        }
-
-        pub fn deserialize<'de, D>(deserializer: D) -> Result<LocalDuration, D::Error>
-        where
-            D: Deserializer<'de>,
-        {
-            let seconds = u64::deserialize(deserializer)?;
-
-            Ok(LocalDuration::from_secs(seconds))
-        }
-    }
-}
-
 /// Return true if the given value is the default for that type.
 pub fn is_default<T: Default + PartialEq>(t: &T) -> bool {
     t == &T::default()
@@ -120,52 +46,25 @@ where
     Ok(T::deserialize(v).unwrap_or_default())
 }
 
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod test {
-    use super::*;
+/// Deserialize a value, but if it is `null`, return the default value.
+#[cfg(feature = "tor")]
+pub(crate) fn null_to_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    T: serde::Deserialize<'de> + Default,
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    Ok(Option::deserialize(deserializer)?.unwrap_or_default())
+}
 
-    use ::localtime::LocalTime;
+/// A helper that makes it easy to use `Option<T>` with the `serde(default)`
+/// attribute, in case a default of `Some(T::default())` is desired instead
+/// of `None`.
+pub(crate) fn some_default<T: Default>() -> Option<T> {
+    Some(T::default())
+}
 
-    #[test]
-    fn test_localtime() {
-        #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq, Eq)]
-        struct Test {
-            time: LocalTime,
-        }
-        let value = Test {
-            time: LocalTime::from_millis(1699636852107),
-        };
-
-        assert_eq!(
-            serde_json::from_str::<Test>(r#"{"time":1699636852107}"#).unwrap(),
-            value
-        );
-        assert_eq!(
-            serde_json::from_str::<Test>(serde_json::to_string(&value).unwrap().as_str()).unwrap(),
-            value
-        );
-    }
-
-    #[test]
-    // Tests serialization into seconds instead of milliseconds.
-    fn test_localtime_ext() {
-        #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq, Eq)]
-        struct Test {
-            #[serde(with = "localtime::time")]
-            time: LocalTime,
-        }
-        let value = Test {
-            time: LocalTime::from_secs(1699636852107),
-        };
-
-        assert_eq!(
-            serde_json::from_str::<Test>(r#"{"time":1699636852107}"#).unwrap(),
-            value
-        );
-        assert_eq!(
-            serde_json::from_str::<Test>(serde_json::to_string(&value).unwrap().as_str()).unwrap(),
-            value
-        );
-    }
+/// Like [`is_default`], but for use in combination with [`some_default`].
+pub(crate) fn is_some_default<T: Default + PartialEq>(t: &Option<T>) -> bool {
+    t.as_ref() == Some(&T::default())
 }

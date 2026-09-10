@@ -1,27 +1,26 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
-use gix_protocol::handshake;
+use gix_protocol::Handshake;
 use radicle::crypto::PublicKey;
-use radicle::git::{fmt::Qualified, Oid};
+use radicle::git::{Oid, fmt::Qualified};
 use radicle::identity::{Did, Doc, DocError};
 
-use radicle::prelude::Verified;
 use radicle::storage;
 use radicle::storage::git::Repository;
-use radicle::storage::refs::RefsAt;
+use radicle::storage::refs::{FeatureLevel, RefsAt};
 use radicle::storage::{
-    git::Validation, Remote, RemoteId, RemoteRepository, Remotes, ValidateRepository, Validations,
+    Remote, RemoteId, RemoteRepository, Remotes, ValidateRepository, Validations, git::Validation,
 };
 
-use crate::git;
 use crate::git::packfile::Keepfile;
 use crate::git::refs::{Applied, Update};
 use crate::git::repository;
-use crate::sigrefs::SignedRefsAt;
+use crate::sigrefs::SignedRefs;
 use crate::stage;
 use crate::stage::ProtocolStage;
-use crate::{refs, sigrefs, transport, Handle};
+use crate::{Allowed, git};
+use crate::{Handle, refs, sigrefs, transport};
 
 /// The data size limit, 5Mb, while fetching the special refs,
 /// i.e. `rad/id` and `rad/sigrefs`.
@@ -68,7 +67,7 @@ pub mod error {
         #[error(transparent)]
         Resolve(#[from] repository::error::Resolve),
         #[error(transparent)]
-        Refs(#[from] radicle::storage::refs::Error),
+        Refs(#[from] radicle::storage::refs::sigrefs::read::error::Read),
         #[error(transparent)]
         RemoteRefs(#[from] sigrefs::error::RemoteRefs),
         #[error("failed to get remote namespaces: {0}")]
@@ -87,16 +86,24 @@ pub mod error {
         Resolve(#[from] git::repository::error::Resolve),
         #[error(transparent)]
         Verified(#[from] radicle::identity::DocError),
+        #[error("failed to verify `refs/rad/id`: {0}")]
+        Graph(#[source] radicle::git::raw::Error),
     }
 }
 
 type IdentityTips = BTreeMap<PublicKey, Oid>;
 type SigrefTips = BTreeMap<PublicKey, Oid>;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FetchLimit {
     pub special: u64,
     pub refs: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Config {
+    pub limit: FetchLimit,
+    pub level_min: FeatureLevel,
 }
 
 impl Default for FetchLimit {
@@ -214,7 +221,7 @@ impl FetchState {
     pub(super) fn run_stage<R, S, F>(
         &mut self,
         handle: &mut Handle<R, S>,
-        handshake: &handshake::Outcome,
+        handshake: &Handshake,
         step: &F,
     ) -> Result<BTreeSet<PublicKey>, error::Step>
     where
@@ -225,13 +232,13 @@ impl FetchState {
         let refs = match step.ls_refs() {
             Some(refs) => handle
                 .transport
-                .ls_refs(refs.into(), handshake)?
+                .ls_refs(refs, handshake)?
                 .into_iter()
                 .filter_map(|r| step.ref_filter(r))
                 .collect::<Vec<_>>(),
             None => vec![],
         };
-        log::trace!(target: "fetch", "Received refs {refs:?}");
+        log::trace!("Received refs {refs:#?}");
         step.pre_validate(&refs)?;
 
         let wants_haves = step.wants_haves(handle.repository(), &refs)?;
@@ -242,7 +249,7 @@ impl FetchState {
                     .fetch(wants_haves, handle.interrupt.clone(), handshake)?;
             self.keepfiles.extend(keepfile);
         } else {
-            log::trace!(target: "fetch", "Nothing to fetch")
+            log::trace!("Nothing to fetch")
         };
 
         let mut fetched = BTreeSet::new();
@@ -288,7 +295,7 @@ impl FetchState {
     fn run_special_refs<R, S>(
         &mut self,
         handle: &mut Handle<R, S>,
-        handshake: &handshake::Outcome,
+        handshake: &Handshake,
         delegates: BTreeSet<PublicKey>,
         threshold: usize,
         limit: &FetchLimit,
@@ -299,7 +306,7 @@ impl FetchState {
         R: AsRef<Repository>,
         S: transport::ConnectionStream,
     {
-        match refs_at {
+        let remotes: Vec<_> = match refs_at {
             Some(refs_at) => {
                 let sigrefs_at = stage::SigrefsAt {
                     remote,
@@ -308,16 +315,34 @@ impl FetchState {
                     blocked: handle.blocked.clone(),
                     limit: limit.special,
                 };
-                log::trace!(target: "fetch", "{sigrefs_at:?}");
+                log::trace!("{sigrefs_at:?}");
                 self.run_stage(handle, handshake, &sigrefs_at)?;
-                let remotes = refs_at.iter().map(|r| &r.remote);
 
-                let signed_refs = sigrefs::RemoteRefs::load(&self.as_cached(handle), remotes)?;
-                Ok(signed_refs)
+                refs_at.iter().map(|r| &r.remote).cloned().collect()
             }
             None => {
-                let followed = handle.allowed();
-                log::trace!(target: "fetch", "Followed nodes {followed:?}");
+                let mut followed = handle.allowed();
+
+                if let Allowed::Followed { remotes } = &mut followed {
+                    // The initial identity document is addressed by the repository ID
+                    // and was fetched with the canonical identity history. Include its
+                    // founder so a fresh clone can resolve the identity COB root even
+                    // if the founder is not a delegate anymore.
+                    let repo = handle.repository();
+                    let blob = repo
+                        .backend
+                        .find_blob((*repo.id).into())
+                        .map_err(DocError::from)
+                        .map_err(error::Canonical::Verified)?;
+
+                    let root = Doc::from_blob(&blob).map_err(error::Canonical::Verified)?;
+                    if root.delegates().len() != 1 {
+                        return Err(error::Canonical::Verified(DocError::Missing).into());
+                    }
+                    remotes.insert(PublicKey::from(*root.delegates().first()));
+                }
+
+                log::trace!("Followed nodes {followed:?}");
                 let special_refs = stage::SpecialRefs {
                     blocked: handle.blocked.clone(),
                     remote,
@@ -326,16 +351,17 @@ impl FetchState {
                     threshold,
                     limit: limit.special,
                 };
-                log::trace!(target: "fetch", "{special_refs:?}");
+                log::trace!("{special_refs:?}");
                 let fetched = self.run_stage(handle, handshake, &special_refs)?;
 
-                let signed_refs = sigrefs::RemoteRefs::load(
-                    &self.as_cached(handle),
-                    fetched.iter().chain(delegates.iter()),
-                )?;
-                Ok(signed_refs)
+                fetched.iter().chain(delegates.iter()).cloned().collect()
             }
-        }
+        };
+
+        Ok(remotes
+            .into_iter()
+            .map(|remote| (remote, self.as_cached(handle).load(&remote)))
+            .collect())
     }
 
     /// The finalization of the protocol exchange is as follows:
@@ -357,8 +383,8 @@ impl FetchState {
     pub(super) fn run<R, S>(
         mut self,
         handle: &mut Handle<R, S>,
-        handshake: &handshake::Outcome,
-        limit: FetchLimit,
+        handshake: &Handshake,
+        config: Config,
         remote: PublicKey,
         refs_at: Option<Vec<RefsAt>>,
     ) -> Result<FetchResult, error::Protocol>
@@ -375,10 +401,10 @@ impl FetchState {
             handshake,
             &stage::CanonicalId {
                 remote,
-                limit: limit.special,
+                limit: config.limit.special,
             },
         )?;
-        log::debug!(target: "fetch", "Fetched rad/id ({}ms)", start.elapsed().as_millis());
+        log::debug!("Fetched rad/id ({}ms)", start.elapsed().as_millis());
 
         // N.b. The error case here should not happen. In the case of
         // a `clone` we have asked for refs/rad/id and ensured it was
@@ -399,7 +425,7 @@ impl FetchState {
             .map(|did| PublicKey::from(*did))
             .collect::<BTreeSet<_>>();
 
-        log::trace!(target: "fetch", "Identity delegates {delegates:?}");
+        log::trace!("Identity delegates {delegates:?}");
 
         // The local peer does not need to count towards the threshold
         // since they must be valid already.
@@ -413,27 +439,22 @@ impl FetchState {
             handshake,
             delegates.clone(),
             threshold,
-            &limit,
+            &config.limit,
             remote,
             refs_at,
         )?;
+
         log::debug!(
-            target: "fetch",
             "Fetched data for {} remote(s) ({}ms)",
             signed_refs.len(),
             start.elapsed().as_millis()
         );
 
-        let data_refs = stage::DataRefs {
-            remote,
-            remotes: signed_refs,
-            limit: limit.refs,
-        };
-        self.run_stage(handle, handshake, &data_refs)?;
+        let data_refs = stage::DataRefs::new(signed_refs);
+        let fetched = self.run_stage(handle, handshake, &data_refs)?;
         log::debug!(
-            target: "fetch",
             "Fetched data refs for {} remotes ({}ms)",
-            data_refs.remotes.len(),
+            fetched.len(),
             start.elapsed().as_millis()
         );
 
@@ -441,9 +462,9 @@ impl FetchState {
         // We're finished fetching on this side, and all that's left
         // is validation.
         match handle.transport.done() {
-            Ok(()) => log::debug!(target: "fetch", "Sent done signal to remote {remote}"),
+            Ok(()) => log::debug!("Sent done signal to remote {remote}"),
             Err(err) => {
-                log::warn!(target: "fetch", "Attempted to send done to remote {remote}: {err}")
+                log::debug!("Failed to signal EOF to {remote}: {err}")
             }
         }
 
@@ -451,7 +472,8 @@ impl FetchState {
         // remotes from the tips, thus not updating the production Git
         // repository.
         let mut failures = sigrefs::Validations::default();
-        let signed_refs = data_refs.remotes;
+
+        let signed_refs = data_refs.into_inner();
 
         // We may prune fetched remotes, so we keep track of
         // non-pruned, fetched remotes here.
@@ -470,22 +492,20 @@ impl FetchState {
 
         // TODO(finto): this might read better if it got its own
         // private function.
-        for remote in signed_refs.keys() {
-            if handle.is_blocked(remote) {
-                log::trace!(target: "fetch", "Skipping blocked remote {remote}");
+        for (remote, refs) in signed_refs {
+            if handle.is_blocked(&remote) {
+                log::trace!("Skipping blocked remote {remote}");
                 continue;
             }
 
-            let remote = sigrefs::DelegateStatus::empty(*remote, &delegates)
-                .load(&self.as_cached(handle))?;
-            match remote {
-                sigrefs::DelegateStatus::NonDelegate { remote, data: None } => {
-                    log::debug!(target: "fetch", "Pruning non-delegate {remote} tips, missing 'rad/sigrefs'");
+            match (refs, delegates.contains(&remote)) {
+                (Ok(None), false) => {
+                    log::debug!("Pruning non-delegate {remote} tips, missing 'rad/sigrefs'");
                     failures.push(sigrefs::Validation::MissingRadSigRefs(remote));
                     self.prune(&remote);
                 }
-                sigrefs::DelegateStatus::Delegate { remote, data: None } => {
-                    log::warn!(target: "fetch", "Pruning delegate {remote} tips, missing 'rad/sigrefs'");
+                (Ok(None), true) => {
+                    log::debug!("Pruning delegate {remote} tips, missing 'rad/sigrefs'");
                     failures.push(sigrefs::Validation::MissingRadSigRefs(remote));
                     self.prune(&remote);
                     // This delegate has removed their `rad/sigrefs`.
@@ -496,29 +516,79 @@ impl FetchState {
                     valid_delegates.remove(&remote);
                     failed_delegates.insert(remote);
                 }
-                sigrefs::DelegateStatus::NonDelegate {
-                    remote,
-                    data: Some(sigrefs),
-                } => {
-                    if let Some(SignedRefsAt { at, .. }) =
-                        SignedRefsAt::load(remote, handle.repository())?
-                    {
-                        // Prune non-delegates if they're behind or
-                        // diverged. A diverged case is non-fatal for
-                        // delegates.
-                        if matches!(
-                            repository::ancestry(handle.repository(), at, sigrefs.at)?,
-                            repository::Ancestry::Behind | repository::Ancestry::Diverged
-                        ) {
-                            self.prune(&remote);
-                            continue;
+                (Err(err), _) => {
+                    log::debug!("Pruning {remote} tips due to: {err}");
+                    self.prune(&remote);
+                    valid_delegates.remove(&remote);
+                    failed_delegates.insert(remote);
+                    failures.push(sigrefs::Validation::Read {
+                        remote,
+                        source: err,
+                    });
+                }
+                (Ok(Some(refs)), delegate) if refs.feature_level() < config.level_min => {
+                    log::debug!(
+                        "Pruning {remote} tips due to insufficient feature level '{}' < '{}'",
+                        refs.feature_level(),
+                        config.level_min
+                    );
+
+                    failures.push(sigrefs::Validation::InsufficientFeatureLevel {
+                        remote,
+                        actual: refs.feature_level(),
+                        minimum: config.level_min,
+                    });
+
+                    if delegate {
+                        valid_delegates.remove(&remote);
+                        failed_delegates.insert(remote);
+                    }
+
+                    self.prune(&remote);
+                }
+                (Ok(Some(refs)), false) => {
+                    let level_reachable = refs.feature_level();
+
+                    match SignedRefs::load(remote, handle.repository()) {
+                        Ok(Some(SignedRefs { at, .. })) => {
+                            // Prune non-delegates if they're behind or
+                            // diverged. A diverged case is non-fatal for
+                            // delegates.
+                            if matches!(
+                                repository::ancestry(handle.repository(), at, refs.at)?,
+                                repository::Ancestry::Behind | repository::Ancestry::Diverged
+                            ) {
+                                self.prune(&remote);
+                                continue;
+                            }
+                        }
+                        Err(radicle::storage::refs::sigrefs::read::error::Read::Downgrade {
+                            levels,
+                            actual,
+                            ..
+                        }) => {
+                            let level_required = levels.max();
+                            if level_reachable >= level_required {
+                                log::info!(
+                                    "Non-delegate {remote} has downgraded history, currently stuck at '{actual}', expects to be upgraded to '{level_required}' and will be upgraded to '{level_reachable}'."
+                                )
+                            } else {
+                                log::debug!(
+                                    "Non-delegate {remote} has downgraded history, currently stuck at '{actual}', expects to be upgraded to '{level_required}' but only level '{level_reachable}' was advertised."
+                                );
+                                self.prune(&remote);
+                                continue;
+                            }
+                        }
+                        Err(err) => return Err(error::Protocol::Refs(err)),
+                        Ok(None) => {
+                            // We see signed references for this non-delegate for the first time.
                         }
                     }
 
                     let cache = self.as_cached(handle);
-                    if let Some(warns) = sigrefs::validate(&cache, sigrefs)?.as_mut() {
+                    if let Some(warns) = sigrefs::validate(&cache, refs)?.as_mut() {
                         log::debug!(
-                            target: "fetch",
                             "Pruning non-delegate {remote} tips, due to validation failures"
                         );
                         self.prune(&remote);
@@ -527,32 +597,56 @@ impl FetchState {
                         remotes.insert(remote);
                     }
                 }
-                sigrefs::DelegateStatus::Delegate {
-                    remote,
-                    data: Some(sigrefs),
-                } => {
-                    if let Some(SignedRefsAt { at, .. }) =
-                        SignedRefsAt::load(remote, handle.repository())?
-                    {
-                        let ancestry = repository::ancestry(handle.repository(), at, sigrefs.at)?;
-                        if matches!(ancestry, repository::Ancestry::Behind) {
-                            log::trace!(target: "fetch", "Advertised `rad/sigrefs` {} is behind {at} for {remote}", sigrefs.at);
-                            self.prune(&remote);
-                            continue;
-                        } else if matches!(ancestry, repository::Ancestry::Diverged) {
-                            return Err(error::Protocol::Diverged {
-                                remote,
-                                current: at,
-                                received: sigrefs.at,
-                            });
+                (Ok(Some(refs)), true) => {
+                    let level_reachable = refs.feature_level();
+
+                    match SignedRefs::load(remote, handle.repository()) {
+                        Ok(Some(SignedRefs { at, .. })) => {
+                            let ancestry = repository::ancestry(handle.repository(), at, refs.at)?;
+                            if matches!(ancestry, repository::Ancestry::Behind) {
+                                log::trace!(
+                                    "Advertised `rad/sigrefs` {} is behind {at} for {remote}",
+                                    refs.at
+                                );
+                                self.prune(&remote);
+                                continue;
+                            } else if matches!(ancestry, repository::Ancestry::Diverged) {
+                                return Err(error::Protocol::Diverged {
+                                    remote,
+                                    current: at,
+                                    received: refs.at,
+                                });
+                            }
+                        }
+                        Err(radicle::storage::refs::sigrefs::read::error::Read::Downgrade {
+                            levels,
+                            actual,
+                            ..
+                        }) => {
+                            let level_required = levels.max();
+                            if level_reachable >= level_required {
+                                log::info!(
+                                    "Delegate {remote} has downgraded history, currently stuck at '{actual}', expects to be upgraded to '{level_required}' and will be upgraded to '{level_reachable}'."
+                                )
+                            } else {
+                                log::info!(
+                                    "Delegate {remote} has downgraded history, currently stuck at '{actual}', expects to be upgraded to '{level_required}' but only level '{level_reachable}' was advertised."
+                                );
+                                self.prune(&remote);
+                                continue;
+                            }
+                        }
+                        Err(err) => return Err(error::Protocol::Refs(err)),
+                        Ok(None) => {
+                            // We see signed references for this delegate for the first time.
                         }
                     }
 
                     let cache = self.as_cached(handle);
                     let mut fails =
-                        sigrefs::validate(&cache, sigrefs)?.unwrap_or(Validations::default());
+                        sigrefs::validate(&cache, refs)?.unwrap_or(Validations::default());
                     if !fails.is_empty() {
-                        log::warn!(target: "fetch", "Pruning delegate {remote} tips, due to validation failures");
+                        log::debug!("Pruning delegate {remote} tips, due to validation failures");
                         self.prune(&remote);
                         valid_delegates.remove(&remote);
                         failed_delegates.insert(remote);
@@ -561,11 +655,17 @@ impl FetchState {
                         valid_delegates.insert(remote);
                         remotes.insert(remote);
                     }
+
+                    if level_reachable < FeatureLevel::LATEST {
+                        log::warn!(
+                            "Delegate {remote} is on feature level '{level_reachable}' which is lower than '{}', they should consider upgrading Radicle.",
+                            FeatureLevel::LATEST
+                        )
+                    }
                 }
             }
         }
         log::debug!(
-            target: "fetch",
             "Validated {} remote(s) ({}ms)",
             remotes.len(),
             start.elapsed().as_millis()
@@ -581,7 +681,7 @@ impl FetchState {
                     .into_values()
                     .flat_map(|ups| ups.into_iter()),
             )?;
-            log::debug!(target: "fetch", "Applied updates ({}ms)", start.elapsed().as_millis());
+            log::debug!("Applied updates ({}ms)", start.elapsed().as_millis());
             Ok(FetchResult::Success {
                 applied,
                 remotes,
@@ -589,7 +689,6 @@ impl FetchState {
             })
         } else {
             log::debug!(
-                target: "fetch",
                 "Fetch failed: {} failure(s) ({}ms)",
                 failures.len(),
                 start.elapsed().as_millis()
@@ -639,19 +738,57 @@ where
         self.handle.verified(head)
     }
 
+    /// Resolve the verified [`Doc`], by choosing a `refs/rad/id` head to
+    /// resolve from.
+    ///
+    /// There are two candidate namespaces:
+    ///
+    ///   1. Of the fetching node.
+    ///   2. Of the node being fetched from.
+    ///
+    /// Both might be unset, in this case [`None`] is returned.
+    ///
+    /// If exactly one of the two is set, it is used.
+    ///
+    /// Otherwise, the ahead/behind relationship between the two candidates
+    /// is checked, and (2.) is used if it is ahead of (1.).
     pub fn canonical(&self) -> Result<Option<Doc>, error::Canonical> {
         let tip = self.refname_to_id(refs::REFS_RAD_ID.clone())?;
         let cached_tip = self.canonical_rad_id();
 
-        tip.or(cached_tip)
-            .map(|tip| self.verified(tip).map_err(error::Canonical::from))
-            .transpose()
+        let oid = match (tip, cached_tip) {
+            (None, None) => {
+                return Ok(None);
+            }
+            (Some(oid), None) | (None, Some(oid)) => oid,
+            (Some(repository), Some(cached)) => {
+                let repo = self.handle.repository();
+                match repo
+                    .backend
+                    .graph_ahead_behind(repository.into(), cached.into())
+                {
+                    Ok((ahead, behind)) => match (ahead, behind) {
+                        (0, _) => cached,
+                        _ => repository,
+                    },
+                    Err(err) if err.code() == radicle::git::raw::ErrorCode::NotFound => repository,
+                    Err(err) => {
+                        return Err(error::Canonical::Graph(err));
+                    }
+                }
+            }
+        };
+
+        self.verified(oid).map(Some).map_err(error::Canonical::from)
     }
 
-    pub fn load(&self, remote: &PublicKey) -> Result<Option<SignedRefsAt>, sigrefs::error::Load> {
+    pub fn load(
+        &self,
+        remote: &PublicKey,
+    ) -> Result<Option<SignedRefs>, radicle::storage::refs::sigrefs::read::error::Read> {
         match self.state.sigrefs.get(remote) {
-            None => SignedRefsAt::load(*remote, self.handle.repository()),
-            Some(tip) => SignedRefsAt::load_at(*tip, *remote, self.handle.repository()).map(Some),
+            None => SignedRefs::load(*remote, self.handle.repository()),
+            Some(tip) => SignedRefs::load_at(*tip, *remote, self.handle.repository()),
         }
     }
 
@@ -671,7 +808,7 @@ where
         self.handle.repository().remote(remote)
     }
 
-    fn remotes(&self) -> Result<Remotes<Verified>, storage::refs::Error> {
+    fn remotes(&self) -> Result<Remotes, storage::refs::Error> {
         self.state
             .sigrefs
             .keys()
@@ -698,7 +835,7 @@ where
         let mut has_sigrefs = false;
 
         // Check all repository references, making sure they are present in the signed refs map.
-        for (refname, oid) in self.state.refs.references_of(&remote.id) {
+        for (refname, oid) in self.state.refs.references_of(&remote.id()) {
             // Skip validation of the signed refs branch, as it is not part of `Remote`.
             if refname == storage::refs::SIGREFS_BRANCH.to_ref_string() {
                 has_sigrefs = true;
@@ -707,6 +844,7 @@ where
             if let Some(signed_oid) = signed.remove(&refname) {
                 if oid != signed_oid {
                     validations.push(Validation::MismatchedRef {
+                        remote: remote.id(),
                         refname,
                         expected: signed_oid,
                         actual: oid,
@@ -718,7 +856,7 @@ where
         }
 
         if !has_sigrefs {
-            validations.push(Validation::MissingRadSigRefs(remote.id));
+            validations.push(Validation::MissingRadSigRefs(remote.id()));
         }
 
         // The refs that are left in the map, are ones that were signed, but are not
@@ -726,7 +864,7 @@ where
         for (name, _) in signed.into_iter() {
             validations.push(Validation::MissingRef {
                 refname: name,
-                remote: remote.id,
+                remote: remote.id(),
             });
         }
 

@@ -1,17 +1,13 @@
-#![allow(clippy::or_fun_call)]
-#![allow(clippy::collapsible_else_if)]
-
 mod args;
 
 pub use args::Args;
-pub(crate) use args::ABOUT;
 
 use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::env;
 use std::str::FromStr;
 
-use anyhow::{anyhow, bail, Context as _};
+use anyhow::{Context as _, anyhow, bail};
 use serde_json as json;
 
 use radicle::crypto::ssh;
@@ -20,11 +16,11 @@ use radicle::git::fmt::RefString;
 use radicle::git::raw;
 use radicle::git::raw::ErrorExt as _;
 use radicle::identity::project::ProjectName;
-use radicle::identity::{Doc, RepoId, Visibility};
+use radicle::identity::{Doc, RepoId, Visibility, doc::GetPayload as _};
 use radicle::node::events::UploadPack;
-use radicle::node::{Event, Handle, NodeId, DEFAULT_SUBSCRIBE_TIMEOUT};
-use radicle::storage::ReadStorage as _;
-use radicle::{profile, Node};
+use radicle::node::{DEFAULT_SUBSCRIBE_TIMEOUT, Event, Handle, NodeId};
+use radicle::storage::{ReadRepository, ReadStorage as _};
+use radicle::{Node, profile};
 
 use crate::commands;
 use crate::git;
@@ -35,17 +31,17 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
     let profile = ctx.profile()?;
     let cwd = env::current_dir()?;
     let path = args.path.as_deref().unwrap_or(cwd.as_path());
-    let repo = match git::Repository::open(path) {
+    let repo = match raw::Repository::open(path) {
         Ok(r) => r,
         Err(e) if e.is_not_found() => {
             anyhow::bail!("a Git repository was not found at the given path")
         }
         Err(e) => return Err(e.into()),
     };
+
     if let Ok((remote, _)) = git::rad_remote(&repo) {
-        if let Some(remote) = remote.url() {
-            bail!("repository is already initialized with remote {remote}");
-        }
+        let remote = remote.url()?;
+        bail!("repository is already initialized with remote {remote}");
     }
 
     if let Some(rid) = args.existing {
@@ -55,7 +51,7 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
     }
 }
 
-pub fn init(repo: git::Repository, args: Args, profile: &profile::Profile) -> anyhow::Result<()> {
+pub fn init(repo: raw::Repository, args: Args, profile: &profile::Profile) -> anyhow::Result<()> {
     let path = dunce::canonicalize(repo.workdir().unwrap_or_else(|| repo.path()))?;
     let interactive = args.interactive();
     let visibility = args.visibility();
@@ -64,7 +60,9 @@ pub fn init(repo: git::Repository, args: Args, profile: &profile::Profile) -> an
     let default_branch = match find_default_branch(&repo) {
         Err(err @ DefaultBranchError::Head) => {
             term::error(err);
-            term::hint("try `git checkout <default branch>` or set `git config set --local init.defaultBranch <default branch>`");
+            term::hint(
+                "try `git checkout <default branch>` or set `git config set --local init.defaultBranch <default branch>`",
+            );
             anyhow::bail!("aborting `rad init`")
         }
         Err(err @ DefaultBranchError::NoHead) => {
@@ -77,7 +75,7 @@ pub fn init(repo: git::Repository, args: Args, profile: &profile::Profile) -> an
     };
 
     term::headline(format!(
-        "Initializing{}radicle 👾 repository in {}..",
+        "Initializing{}Radicle 👾 repository in {}..",
         match visibility {
             Some(ref visibility) => term::format::spaced(term::format::visibility(visibility)),
             None => term::format::default(" ").into(),
@@ -135,8 +133,8 @@ pub fn init(repo: git::Repository, args: Args, profile: &profile::Profile) -> an
     };
 
     let signer = term::signer(profile)?;
-    let mut node = radicle::Node::new(profile.socket());
-    let mut spinner = term::spinner("Initializing...");
+    let mut node = radicle::Node::new(profile.socket_from_env());
+    let mut spinner = term::spinner("Initializing…");
     let mut push_cmd = String::from("git push");
 
     match radicle::rad::init(
@@ -149,11 +147,15 @@ pub fn init(repo: git::Repository, args: Args, profile: &profile::Profile) -> an
         &profile.storage,
     ) {
         Ok((rid, doc, _)) => {
-            let proj = doc.project()?;
+            let proj = doc.project().transpose().ok().flatten();
 
             spinner.message(format!(
                 "Repository {} created.",
-                term::format::highlight(proj.name())
+                term::format::highlight(
+                    proj.as_ref()
+                        .map(|project| project.name().to_string())
+                        .unwrap_or_else(|| rid.to_string())
+                )
             ));
             spinner.finish();
 
@@ -170,30 +172,30 @@ pub fn init(repo: git::Repository, args: Args, profile: &profile::Profile) -> an
                 }
             }
 
-            if args.set_upstream || git::branch_remote(&repo, proj.default_branch()).is_err() {
-                // Setup eg. `master` -> `rad/master`
+            if args.set_upstream || git::branch_remote(&repo, &branch).is_err() {
+                // Setup, e.g. `master` -> `rad/master`
                 radicle::git::set_upstream(
                     &repo,
                     &*radicle::rad::REMOTE_NAME,
-                    proj.default_branch(),
-                    radicle::git::refs::workdir::branch(proj.default_branch()),
+                    &branch,
+                    radicle::git::refs::workdir::branch(&branch),
                 )?;
             } else {
                 push_cmd = format!("git push {} {branch}", *radicle::rad::REMOTE_NAME);
             }
 
             if args.setup_signing {
-                // Setup radicle signing key.
+                // Set up Radicle signing key.
                 self::setup_signing(profile.id(), &repo, interactive)?;
             }
 
             term::blank();
             term::info!(
-                "Your Repository ID {} is {}.",
+                "Your Repository ID {} is {}",
                 term::format::dim("(RID)"),
                 term::format::highlight(rid.urn())
             );
-            let directory = if path == env::current_dir()? {
+            let directory = if path == dunce::canonicalize(env::current_dir()?)? {
                 "this directory".to_owned()
             } else {
                 term::format::tertiary(path.display()).to_string()
@@ -210,7 +212,9 @@ pub fn init(repo: git::Repository, args: Args, profile: &profile::Profile) -> an
                 term::warning(format!(
                     "There was an error announcing your repository to the network: {e}"
                 ));
-                term::warning("Try again with `rad sync --announce`, or check your logs with `rad node logs`.");
+                term::warning(
+                    "Try again with `rad sync --announce`, or check your logs with `rad node logs`.",
+                );
                 term::blank();
             }
             term::info!("To push changes, run {}.", term::format::command(push_cmd));
@@ -225,13 +229,12 @@ pub fn init(repo: git::Repository, args: Args, profile: &profile::Profile) -> an
 }
 
 pub fn init_existing(
-    working: git::Repository,
+    working: raw::Repository,
     rid: RepoId,
     args: Args,
     profile: &profile::Profile,
 ) -> anyhow::Result<()> {
     let stored = profile.storage.repository(rid)?;
-    let project = stored.project()?;
     let url = radicle::git::Url::from(rid);
     let interactive = args.interactive();
 
@@ -240,21 +243,24 @@ pub fn init_existing(
         &working,
         &radicle::rad::REMOTE_NAME,
         &url,
-        &url.clone().with_namespace(profile.public_key),
+        &url.clone().with_namespace(*profile.id()),
     )?;
 
     if args.set_upstream {
-        // Setup eg. `master` -> `rad/master`
-        radicle::git::set_upstream(
-            &working,
-            &*radicle::rad::REMOTE_NAME,
-            project.default_branch(),
-            radicle::git::refs::workdir::branch(project.default_branch()),
-        )?;
+        match stored.identity_doc()?.default_branch_name() {
+            Err(_) => {
+                term::warning("Failed to set upstream.");
+            }
+            Ok(branch) => {
+                // Setup, e.g. `master` -> `rad/master`
+                let merge = radicle::git::refs::workdir::branch(&branch);
+                radicle::git::set_upstream(&working, &*radicle::rad::REMOTE_NAME, branch, merge)?;
+            }
+        }
     }
 
     if args.setup_signing {
-        // Setup radicle signing key.
+        // Set up Radicle signing key.
         self::setup_signing(profile.id(), &working, interactive)?;
     }
 
@@ -446,7 +452,8 @@ pub fn announce(
                 term::blank();
                 term::info!(
                     "You are not connected to any peers. Your repository will be announced as soon as \
-                    your node establishes a connection with the network.");
+                    your node establishes a connection with the network."
+                );
                 term::info!("Check for peer connections with `rad node status`.");
                 term::blank();
             }
@@ -482,10 +489,10 @@ pub fn announce(
     Ok(())
 }
 
-/// Setup radicle key as commit signing key in repository.
+/// Set up Radicle key as commit signing key in repository.
 pub fn setup_signing(
     node_id: &NodeId,
-    repo: &git::Repository,
+    repo: &raw::Repository,
     interactive: Interactive,
 ) -> anyhow::Result<()> {
     const SIGNERS: &str = ".gitsigners";
@@ -496,13 +503,13 @@ pub fn setup_signing(
     let key = ssh::fmt::fingerprint(node_id);
     let yes = if !git::is_signing_configured(path)? {
         term::headline(format!(
-            "Configuring radicle signing key {}...",
+            "Configuring Radicle signing key {}…",
             term::format::tertiary(key)
         ));
         true
     } else if interactive.yes() {
         term::confirm(format!(
-            "Configure radicle signing key {} in {}?",
+            "Configure Radicle signing key {} in {}?",
             term::format::tertiary(key),
             term::format::tertiary(config.display()),
         ))
@@ -563,17 +570,17 @@ enum DefaultBranchError {
 }
 
 fn find_default_branch(repo: &raw::Repository) -> Result<String, DefaultBranchError> {
-    match find_init_default_branch(repo).ok().flatten() {
+    match find_init_default_branch(repo).ok() {
         Some(refname) => Ok(refname),
         None => Ok(find_repository_head(repo)?),
     }
 }
 
-fn find_init_default_branch(repo: &raw::Repository) -> Result<Option<String>, raw::Error> {
+fn find_init_default_branch(repo: &raw::Repository) -> Result<String, raw::Error> {
     let config = repo.config().and_then(|mut c| c.snapshot())?;
     let default_branch = config.get_str("init.defaultbranch")?;
     let branch = repo.find_branch(default_branch, raw::BranchType::Local)?;
-    Ok(branch.into_reference().shorthand().map(ToOwned::to_owned))
+    Ok(branch.into_reference().shorthand()?.to_owned())
 }
 
 fn find_repository_head(repo: &raw::Repository) -> Result<String, DefaultBranchError> {
@@ -582,6 +589,7 @@ fn find_repository_head(repo: &raw::Repository) -> Result<String, DefaultBranchE
         Err(e) => Err(DefaultBranchError::Git(e)),
         Ok(head) => head
             .shorthand()
+            .ok()
             .filter(|refname| *refname != "HEAD")
             .ok_or(DefaultBranchError::Head)
             .map(|refname| refname.to_owned()),

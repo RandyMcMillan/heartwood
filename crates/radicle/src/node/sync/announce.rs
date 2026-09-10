@@ -125,7 +125,7 @@ impl Announcer {
     /// Complete the [`Announcer`] process returning a [`AnnouncerResult`].
     ///
     /// If the target for the [`Announcer`] has been reached, then the result
-    /// will be [`AnnouncerResult::Success`], otherwise, it will be
+    /// will be [`AnnouncerResult::Success`]; otherwise, it will be
     /// [`AnnouncerResult::TimedOut`].
     pub fn timed_out(self) -> AnnouncerResult {
         match self.is_target_reached() {
@@ -144,7 +144,7 @@ impl Announcer {
 
     /// Check if the [`Announcer`] can continue synchronizing with more nodes.
     /// If there are no more nodes, then [`NoNodes`] is returned in the
-    /// [`ControlFlow::Break`], otherwise the [`Announcer`] is returned as-is in
+    /// [`ControlFlow::Break`]; otherwise, the [`Announcer`] is returned as-is in
     /// the [`ControlFlow::Continue`].
     // TODO(finto): I'm not sure this is needed with the change to the target
     // logic. Since we can reach the replication factor OR the preferred seeds,
@@ -270,7 +270,7 @@ pub struct AnnouncerConfig {
 }
 
 impl AnnouncerConfig {
-    /// Setup a private network `AnnouncerConfig`, populating the
+    /// Set up a private network `AnnouncerConfig`, populating the
     /// [`AnnouncerConfig`]'s preferred seeds with the allowed set from the
     /// [`PrivateNetwork`].
     ///
@@ -291,7 +291,7 @@ impl AnnouncerConfig {
         }
     }
 
-    /// Setup a public `AnnouncerConfig`.
+    /// Set up a public `AnnouncerConfig`.
     ///
     /// `preferred_seeds` is the target set of preferred seeds that [`Announcer`] should
     /// attempt to synchronize with.
@@ -586,7 +586,7 @@ mod test {
 
     #[test]
     fn all_synced_nodes_are_preferred_seeds() {
-        let local = arbitrary::gen::<NodeId>(0);
+        let local = arbitrary::r#gen::<NodeId>(0);
         let seeds = arbitrary::set::<NodeId>(5..=5);
 
         // All preferred seeds, no regular seeds in unsynced
@@ -642,7 +642,7 @@ mod test {
 
     #[test]
     fn preferred_seeds_already_synced() {
-        let local = arbitrary::gen::<NodeId>(0);
+        let local = arbitrary::r#gen::<NodeId>(0);
         let seeds = arbitrary::set::<NodeId>(6..=6);
 
         let preferred_seeds = seeds.iter().take(2).copied().collect::<BTreeSet<_>>();
@@ -668,13 +668,18 @@ mod test {
 
     #[test]
     fn announcer_reached_min_replication_target() {
-        let local = arbitrary::gen::<NodeId>(0);
-        let seeds = arbitrary::set::<NodeId>(10..=10);
-        let unsynced = seeds.iter().skip(3).copied().collect::<BTreeSet<_>>();
-        let preferred_seeds = seeds.iter().take(2).copied().collect::<BTreeSet<_>>();
+        let ids = arbitrary::array_distinct::<6, _>();
+        let local = ids[0];
+        let unsynced = ids[1..4].iter().cloned().collect::<BTreeSet<_>>();
+        let preferred_seeds = ids[4..].iter().cloned().collect::<BTreeSet<_>>();
+
+        let replicas = ReplicationFactor::must_reach(3);
+
+        assert!(replicas.lower_bound() <= unsynced.len() + preferred_seeds.len());
+
         let config = AnnouncerConfig::public(
             local,
-            ReplicationFactor::must_reach(3),
+            replicas,
             preferred_seeds.clone(),
             BTreeSet::new(),
             unsynced.clone(),
@@ -729,17 +734,23 @@ mod test {
 
     #[test]
     fn announcer_reached_max_replication_target() {
-        let local = arbitrary::gen::<NodeId>(0);
-        let seeds = arbitrary::set::<NodeId>(10..=10);
-        let unsynced = seeds.iter().skip(3).copied().collect::<BTreeSet<_>>();
-        let preferred_seeds = seeds.iter().take(2).copied().collect::<BTreeSet<_>>();
+        const UPPER: usize = 6;
+
+        let ids = arbitrary::array_distinct::<10, _>();
+        let local = ids[0];
+        let unsynced = ids[1..7].iter().copied().collect::<BTreeSet<_>>();
+        let preferred_seeds = ids[7..].iter().copied().collect::<BTreeSet<_>>();
+
         let config = AnnouncerConfig::public(
             local,
-            ReplicationFactor::range(3, 6),
+            ReplicationFactor::range(3, UPPER),
             preferred_seeds.clone(),
             BTreeSet::new(),
             unsynced.clone(),
         );
+
+        assert!(config.replicas.upper_bound().unwrap() <= unsynced.len());
+
         let mut announcer = Announcer::new(config).unwrap();
         let to_sync = announcer.to_sync();
         assert_eq!(to_sync, unsynced.union(&preferred_seeds).copied().collect());
@@ -769,14 +780,14 @@ mod test {
             success.as_ref().unwrap().outcome(),
             SuccessfulOutcome::MaxReplicationFactor {
                 preferred: 0,
-                synced: 6,
+                synced: UPPER,
             }
         )
     }
 
     #[test]
     fn announcer_preferred_seeds_or_replica_factor() {
-        let local = arbitrary::gen::<NodeId>(0);
+        let local = arbitrary::r#gen::<NodeId>(0);
         let seeds = arbitrary::set::<NodeId>(10..=10);
         let unsynced = seeds.iter().skip(2).copied().collect::<BTreeSet<_>>();
         let preferred_seeds = seeds.iter().take(2).copied().collect::<BTreeSet<_>>();
@@ -840,10 +851,15 @@ mod test {
 
     #[test]
     fn announcer_reached_preferred_seeds() {
-        let local = arbitrary::gen::<NodeId>(0);
         let seeds = arbitrary::set::<NodeId>(10..=10);
-        let unsynced = seeds.iter().skip(2).copied().collect::<BTreeSet<_>>();
-        let preferred_seeds = seeds.iter().take(2).copied().collect::<BTreeSet<_>>();
+        let local = seeds.iter().next().copied().unwrap();
+        let unsynced = seeds.iter().skip(3).copied().collect::<BTreeSet<_>>();
+        let preferred_seeds = seeds
+            .iter()
+            .skip(1)
+            .take(2)
+            .copied()
+            .collect::<BTreeSet<_>>();
         let config = AnnouncerConfig::public(
             local,
             ReplicationFactor::must_reach(11),
@@ -887,7 +903,7 @@ mod test {
 
     #[test]
     fn announcer_timed_out() {
-        let local = arbitrary::gen::<NodeId>(0);
+        let local = arbitrary::r#gen::<NodeId>(0);
         let seeds = arbitrary::set::<NodeId>(10..=10);
         let unsynced = seeds.iter().skip(2).copied().collect::<BTreeSet<_>>();
         let preferred_seeds = seeds.iter().take(2).copied().collect::<BTreeSet<_>>();
@@ -948,7 +964,7 @@ mod test {
 
     #[test]
     fn announcer_adapts_target_to_reach() {
-        let local = arbitrary::gen::<NodeId>(0);
+        let local = arbitrary::r#gen::<NodeId>(0);
         // Only 3 nodes available
         let unsynced = arbitrary::set::<NodeId>(3..=3)
             .into_iter()
@@ -968,7 +984,7 @@ mod test {
 
     #[test]
     fn announcer_with_replication_factor_zero_and_preferred_seeds() {
-        let local = arbitrary::gen::<NodeId>(0);
+        let local = arbitrary::r#gen::<NodeId>(0);
         let seeds = arbitrary::set::<NodeId>(5..=5);
 
         let preferred_seeds = seeds.iter().take(2).copied().collect::<BTreeSet<_>>();
@@ -1010,11 +1026,11 @@ mod test {
 
     #[test]
     fn announcer_synced_with_unknown_node() {
-        let local = arbitrary::gen::<NodeId>(0);
+        let local = arbitrary::r#gen::<NodeId>(0);
         let seeds = arbitrary::set::<NodeId>(5..=5);
 
         let unsynced = seeds.iter().take(3).copied().collect::<BTreeSet<_>>();
-        let unknown_node = arbitrary::gen::<NodeId>(100); // Node not in any set
+        let unknown_node = arbitrary::r#gen::<NodeId>(100); // Node not in any set
 
         let config = AnnouncerConfig::public(
             local,
@@ -1054,7 +1070,7 @@ mod test {
 
     #[test]
     fn synced_with_same_node_multiple_times() {
-        let local = arbitrary::gen::<NodeId>(0);
+        let local = arbitrary::r#gen::<NodeId>(0);
         let unsynced = arbitrary::set::<NodeId>(3..=3)
             .into_iter()
             .collect::<BTreeSet<_>>();
@@ -1122,7 +1138,7 @@ mod test {
 
     #[test]
     fn timed_out_after_reaching_success() {
-        let local = arbitrary::gen::<NodeId>(0);
+        let local = arbitrary::r#gen::<NodeId>(0);
         let unsynced = arbitrary::set::<NodeId>(3..=3)
             .into_iter()
             .collect::<BTreeSet<_>>();
@@ -1170,7 +1186,7 @@ mod test {
     fn construct_only_preferred_seeds_provided() {
         // Test: preferred_seeds non-empty, synced and unsynced empty
         // Expected: preferred seeds should be moved to to_sync, constructor succeeds
-        let local = arbitrary::gen::<NodeId>(0);
+        let local = arbitrary::r#gen::<NodeId>(0);
         let preferred_seeds = arbitrary::set::<NodeId>(2..=2)
             .into_iter()
             .collect::<BTreeSet<_>>();
@@ -1193,10 +1209,10 @@ mod test {
 
     #[test]
     fn construct_node_appears_in_multiple_input_sets() {
-        let local = arbitrary::gen::<NodeId>(0);
-        let alice = arbitrary::gen::<NodeId>(1);
-        let bob = arbitrary::gen::<NodeId>(2);
-        let eve = arbitrary::gen::<NodeId>(3);
+        let local = arbitrary::r#gen::<NodeId>(0);
+        let alice = arbitrary::r#gen::<NodeId>(1);
+        let bob = arbitrary::r#gen::<NodeId>(2);
+        let eve = arbitrary::r#gen::<NodeId>(3);
 
         // alice will appear in synced and unsynced
         let synced = [alice].iter().copied().collect::<BTreeSet<_>>();
@@ -1230,7 +1246,7 @@ mod test {
 
     #[test]
     fn cannot_construct_announcer() {
-        let local = arbitrary::gen::<NodeId>(0);
+        let local = arbitrary::r#gen::<NodeId>(0);
         let seeds = arbitrary::set::<NodeId>(10..=10);
         let synced = seeds.iter().take(3).copied().collect::<BTreeSet<_>>();
         let unsynced = seeds.iter().skip(3).copied().collect::<BTreeSet<_>>();
@@ -1301,7 +1317,7 @@ mod test {
 
     #[test]
     fn invariant_progress_should_match_state() {
-        let local = arbitrary::gen::<NodeId>(0);
+        let local = arbitrary::r#gen::<NodeId>(0);
         let seeds = arbitrary::set::<NodeId>(6..=6);
 
         // Set up: 2 already synced, 4 unsynced initially
@@ -1375,7 +1391,7 @@ mod test {
 
     #[test]
     fn local_node_in_preferred_seeds() {
-        let local = arbitrary::gen::<NodeId>(0);
+        let local = arbitrary::r#gen::<NodeId>(0);
         let other_seeds = arbitrary::set::<NodeId>(5..=5);
 
         // Include local node in preferred seeds
@@ -1416,7 +1432,7 @@ mod test {
 
     #[test]
     fn local_node_in_synced_set() {
-        let local = arbitrary::gen::<NodeId>(0);
+        let local = arbitrary::r#gen::<NodeId>(0);
         let other_seeds = arbitrary::set::<NodeId>(5..=5);
 
         // Include local node in synced set
@@ -1451,7 +1467,7 @@ mod test {
 
     #[test]
     fn local_node_in_unsynced_set() {
-        let local = arbitrary::gen::<NodeId>(0);
+        let local = arbitrary::r#gen::<NodeId>(0);
         let other_seeds = arbitrary::set::<NodeId>(5..=5);
 
         let synced = other_seeds.iter().take(2).copied().collect::<BTreeSet<_>>();
@@ -1492,7 +1508,7 @@ mod test {
 
     #[test]
     fn local_node_in_multiple_sets() {
-        let local = arbitrary::gen::<NodeId>(0);
+        let local = arbitrary::r#gen::<NodeId>(0);
         let other_seeds = arbitrary::set::<NodeId>(5..=5);
 
         // Include local node in ALL sets
@@ -1554,8 +1570,8 @@ mod test {
 
     #[test]
     fn synced_with_local_node_is_ignored() {
-        let local = arbitrary::gen::<NodeId>(0);
-        let unsynced = arbitrary::set::<NodeId>(3..=3).into_iter().collect();
+        let local = arbitrary::r#gen::<NodeId>(0);
+        let unsynced = BTreeSet::from_iter(arbitrary::set::<NodeId>(3..=3));
 
         let config = AnnouncerConfig::public(
             local,
@@ -1596,7 +1612,7 @@ mod test {
 
     #[test]
     fn local_node_only_in_all_sets_results_in_no_seeds_error() {
-        let local = arbitrary::gen::<NodeId>(0);
+        let local = arbitrary::r#gen::<NodeId>(0);
 
         // Create sets that contain ONLY the local node
         let preferred_seeds = [local].iter().copied().collect::<BTreeSet<_>>();

@@ -5,11 +5,11 @@ Alice creates a repository and Bob clones it.
 ``` ~alice
 $ rad init --name heartwood --description "radicle heartwood protocol & stack" --no-confirm --public
 
-Initializing public radicle 👾 repository in [..]
+Initializing public Radicle 👾 repository in [..]
 
 ✓ Repository heartwood created.
 
-Your Repository ID (RID) is rad:zhbMU4DUXrzB8xT6qAJh6yZ7bFMK.
+Your Repository ID (RID) is rad:zhbMU4DUXrzB8xT6qAJh6yZ7bFMK
 You can show it any time by running `rad .` from this directory.
 
 ✓ Repository successfully announced to the network.
@@ -22,7 +22,7 @@ To push changes, run `git push`.
 
 ``` ~bob
 $ rad clone rad:zhbMU4DUXrzB8xT6qAJh6yZ7bFMK
-✓ Seeding policy updated for rad:zhbMU4DUXrzB8xT6qAJh6yZ7bFMK with scope 'all'
+✓ Seeding policy updated for rad:zhbMU4DUXrzB8xT6qAJh6yZ7bFMK with scope 'followed'
 Fetching rad:zhbMU4DUXrzB8xT6qAJh6yZ7bFMK from the network, found 1 potential seed(s).
 ✓ Target met: 1 seed(s)
 ✓ Creating checkout in ./heartwood..
@@ -97,21 +97,22 @@ Alice pulls the update.
 
 ``` ~alice
 $ rad patch show 55b9721
-╭─────────────────────────────────────────────────────────╮
-│ Title    Bob's patch                                    │
-│ Patch    55b9721ed7f6bfec38f43729e9b6631c5dc812fb       │
-│ Author   bob z6Mkt67…v4N1tRk                            │
-│ Head     cad2666a8a2250e4dee175ed5044be2c251ff08b       │
-│ Base     [..                                          ] │
-│ Commits  ahead 2, behind 0                              │
-│ Status   open                                           │
-├─────────────────────────────────────────────────────────┤
-│ cad2666 Bob's commit #2                                 │
-│ bdcdb30 Bob's commit #1                                 │
-├─────────────────────────────────────────────────────────┤
-│ ● Revision 55b9721 @ bdcdb30 by bob z6Mkt67…v4N1tRk now │
-│ ↑ Revision f91e056 @ cad2666 by bob z6Mkt67…v4N1tRk now │
-╰─────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────╮
+│ Title    Bob's patch                                             │
+│ Patch    55b9721ed7f6bfec38f43729e9b6631c5dc812fb                │
+│ Author   bob z6Mkt67…v4N1tRk                                     │
+│ Head     cad2666a8a2250e4dee175ed5044be2c251ff08b                │
+│ Base     [..                                          ]          │
+│ Target   master                                                  │
+│ Commits  ahead 2, behind 0                                       │
+│ Status   open                                                    │
+├──────────────────────────────────────────────────────────────────┤
+│ cad2666 Bob's commit #2                                          │
+│ bdcdb30 Bob's commit #1                                          │
+├──────────────────────────────────────────────────────────────────┤
+│ ● Revision 55b9721 @ [..   ]..bdcdb30 by bob z6Mkt67…v4N1tRk now │
+│ ↑ Revision f91e056 @ [..   ]..cad2666 by bob z6Mkt67…v4N1tRk now │
+╰──────────────────────────────────────────────────────────────────╯
 $ git ls-remote rad
 f2de534b5e81d7c6e2dcaf58c3dd91573c0a0354	HEAD
 f2de534b5e81d7c6e2dcaf58c3dd91573c0a0354	refs/heads/master

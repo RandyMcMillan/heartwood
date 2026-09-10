@@ -1,17 +1,16 @@
 pub mod args;
 
-use radicle::{prelude::*, Node};
+use radicle::{Node, prelude::*};
 
 use crate::terminal as term;
 
 pub use args::Args;
-pub(crate) use args::ABOUT;
 
-pub fn run(options: Args, ctx: impl term::Context) -> anyhow::Result<()> {
+pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
     let profile = ctx.profile()?;
-    let mut node = radicle::Node::new(profile.socket());
+    let mut node = radicle::Node::new(profile.socket_from_env());
 
-    for rid in options.rids {
+    for rid in args.rids {
         delete(rid, &mut node, &profile)?;
     }
 

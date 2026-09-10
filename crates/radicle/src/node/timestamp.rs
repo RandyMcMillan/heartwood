@@ -76,11 +76,7 @@ impl TryFrom<u64> for Timestamp {
     type Error = u64;
 
     fn try_from(u: u64) -> Result<Self, u64> {
-        if u <= *Self::MAX {
-            Ok(Self(u))
-        } else {
-            Err(u)
-        }
+        if u <= *Self::MAX { Ok(Self(u)) } else { Err(u) }
     }
 }
 
@@ -129,7 +125,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_timestamp_max() {
+    fn timestamp_max() {
         assert_eq!(i64::try_from(*Timestamp::MAX), Ok(i64::MAX));
     }
 }
