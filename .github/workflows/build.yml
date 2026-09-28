@@ -1,6 +1,6 @@
 name: build
 on:
-  push: { branches: [ '*' ] }
+  push: { branches: [ '*', '*/**' ] }
   workflow_dispatch:
 concurrency:
   group: ${{ github.sha }}
