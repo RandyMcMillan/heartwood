@@ -1,0 +1,23 @@
+[package]
+name = "qcheck"
+version = "1.0.0"
+authors = ["Andrew Gallant <jamslam@gmail.com>"]
+description = "Automatic property based testing with shrinking."
+documentation = "https://docs.rs/qcheck"
+homepage = "https://github.com/cloudhead/qcheck"
+repository = "https://github.com/cloudhead/qcheck"
+readme = "README.md"
+keywords = ["testing", "quickcheck", "property", "shrinking", "fuzz"]
+categories = ["development-tools::testing"]
+license = "Unlicense OR MIT"
+exclude = ["/Makefile", "/ctags.rust", "/session.vim"]
+edition = "2021"
+
+[lib]
+name = "qcheck"
+
+[dependencies]
+rand = { version = "0.8", default-features = false, features = ["getrandom", "small_rng"] }
+
+[dev-dependencies]
+qcheck-macros = { version = "1", path = "../qcheck-macros" }
