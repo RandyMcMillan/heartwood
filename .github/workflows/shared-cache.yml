@@ -1,0 +1,43 @@
+name: shared-cache
+on:
+  push: { branches: [ '*', '*/**' ] }
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.sha }}-shared-cache
+  cancel-in-progress: true
+
+jobs:
+  cache:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest      # arm64
+          - ubuntu-24.04-arm  # arm64
+          - ubuntu-latest     # x64
+          - windows-11-arm    # arm64
+          - windows-latest    # x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 512
+          fetch-tags: true
+          filter: 'tree:0'
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/cache@v5
+        with:
+          path: ~/.cargo
+          key: ${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-cargo-home
+      - uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-cargo-target
+      - run: rm -rf .cargo/*
+        shell: bash
+      - run: ./scripts/commit-vendor.sh --recursive
+      - run: git diff
+      - run: cargo build --workspace --verbose ##--all-features
