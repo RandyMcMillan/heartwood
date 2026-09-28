@@ -145,6 +145,11 @@ verify-tool tool package_name="":
 install-hooks:
     @SUCCESS="{{SUCCESS}}" NORMAL="{{NORMAL}}" scripts/just/install-hooks.sh "{{hook-script}}" "{{hooks}}"
 
+# Install the git remote helper
+[group('install')]
+install-git-remote-rad: (verify-tool "cargo")
+    @{{cargo_cmd}} install --bin git-remote-rad --path ./crates/radicle-remote-helper
+
 # Check for missing or changed hooks
 [group('hooks')]
 check-hooks:

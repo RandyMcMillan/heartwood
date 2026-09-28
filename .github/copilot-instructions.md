@@ -33,6 +33,7 @@ Useful run commands:
 - `cargo run -p radicle-cli --bin rad -- <args>`
 - `cargo run -p radicle-node -- <args>`
 - `cargo run -p radicle-remote-helper --bin git-remote-rad -- <args>`
+- `just install-git-remote-rad` — install the `git-remote-rad` helper from `crates/radicle-remote-helper`.
 
 ## High-level architecture
 
