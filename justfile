@@ -2,6 +2,7 @@ hooks := "pre-commit pre-push post-checkout commit-msg"
 hook-script := "scripts/git-hook-template.sh"
 
 cargo_cmd := env_var_or_default("CARGO_CMD", "cargo")
+source_date_epoch := `git log -1 --pretty=%ct HEAD`
 
 WARN := "⚠️ " + YELLOW + BOLD
 SUCCESS := "✅ " + GREEN + BOLD
@@ -148,15 +149,15 @@ install-hooks:
 # Install the git remote helper
 [group('install')]
 install-git-remote-rad: (verify-tool "cargo")
-    @{{cargo_cmd}} install --bin git-remote-rad --path ./crates/radicle-remote-helper
+    @SOURCE_DATE_EPOCH="{{source_date_epoch}}" {{cargo_cmd}} install --bin git-remote-rad --path ./crates/radicle-remote-helper
 
 # Install all workspace binaries
 [group('install')]
 install-binaries: (verify-tool "cargo")
-    @{{cargo_cmd}} install --bin rad --path ./crates/radicle-cli
-    @{{cargo_cmd}} install --bin radicle-node --path ./crates/radicle-node
-    @{{cargo_cmd}} install --bin git-remote-rad --path ./crates/radicle-remote-helper
-    @{{cargo_cmd}} install --bin radicle-schemars --path ./crates/radicle-schemars
+    @SOURCE_DATE_EPOCH="{{source_date_epoch}}" {{cargo_cmd}} install --bin rad --path ./crates/radicle-cli
+    @SOURCE_DATE_EPOCH="{{source_date_epoch}}" {{cargo_cmd}} install --bin radicle-node --path ./crates/radicle-node
+    @SOURCE_DATE_EPOCH="{{source_date_epoch}}" {{cargo_cmd}} install --bin git-remote-rad --path ./crates/radicle-remote-helper
+    @SOURCE_DATE_EPOCH="{{source_date_epoch}}" {{cargo_cmd}} install --bin radicle-schemars --path ./crates/radicle-schemars
 
 # Check for missing or changed hooks
 [group('hooks')]
