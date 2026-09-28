@@ -51,6 +51,9 @@ jobs:
           path: windows/bin/*/*.msi
       - if: runner.os != 'Windows'
         run: cargo test  --workspace --verbose --all-features -- --nocapture
+      - if: runner.os == 'Linux'
+        name: Run radicle-node peer e2e tests
+        run: cargo test -p radicle-node --lib e2e -- --nocapture
       - if: runner.os == 'Windows'
         run: cargo test  --workspace --verbose --all-features -- --nocapture
         env:
