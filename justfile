@@ -150,6 +150,14 @@ install-hooks:
 install-git-remote-rad: (verify-tool "cargo")
     @{{cargo_cmd}} install --bin git-remote-rad --path ./crates/radicle-remote-helper
 
+# Install all workspace binaries
+[group('install')]
+install-binaries: (verify-tool "cargo")
+    @{{cargo_cmd}} install --bin rad --path ./crates/radicle-cli
+    @{{cargo_cmd}} install --bin radicle-node --path ./crates/radicle-node
+    @{{cargo_cmd}} install --bin git-remote-rad --path ./crates/radicle-remote-helper
+    @{{cargo_cmd}} install --bin radicle-schemars --path ./crates/radicle-schemars
+
 # Check for missing or changed hooks
 [group('hooks')]
 check-hooks:
