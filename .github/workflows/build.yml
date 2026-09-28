@@ -1,12 +1,15 @@
 name: build
 on:
-  push: { branches: [ '*' ] }
+  workflow_run:
+    workflows: [ shared-cache ]
+    types: [ completed ]
   workflow_dispatch:
 concurrency:
-  group: ${{ github.sha }}
+  group: ${{ github.event.workflow_run.head_sha || github.sha }}
   cancel-in-progress: true
 jobs:
   build:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -24,6 +27,7 @@ jobs:
           fetch-depth: 512
           fetch-tags: true
           filter: 'tree:0'
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/cache@v5
         with:
