@@ -57,7 +57,7 @@ commit_one() {
     return 0
   fi
 
-  git commit -m "vendor: add $label" -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+  git commit -m "vendor: add $label"
   git push origin HEAD
 }
 
