@@ -13,6 +13,16 @@ the repository.
   outside `vendor/`.
 - The working tree was checked for any untracked vendored crates.
 
+## Verification commands
+
+```sh
+git ls-files --others --exclude-standard vendor
+rg '^\s*git\s*=' vendor --glob '**/Cargo.toml'
+rg '^\s*path\s*=\s*"\.\./' vendor --glob '**/Cargo.toml'
+rg '^\s*path\s*=\s*"/' vendor --glob '**/Cargo.toml'
+rg '^\s*path\s*=\s*"\.\./\.\./' vendor --glob '**/Cargo.toml'
+```
+
 ## Result
 
 - No vendored crate declares a `git` dependency source.
