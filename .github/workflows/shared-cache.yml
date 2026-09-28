@@ -1,6 +1,6 @@
 name: shared-cache
 on:
-  workflow_call:
+  push: { branches: [ '*', '*/**' ] }
   workflow_dispatch:
 
 concurrency:
