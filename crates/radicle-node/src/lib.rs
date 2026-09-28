@@ -27,5 +27,8 @@ pub const VERSION: Version = Version {
     name: env!("CARGO_PKG_NAME"),
     commit: env!("GIT_HEAD"),
     version: env!("RADICLE_VERSION"),
-    timestamp: option_env!("SOURCE_DATE_EPOCH").unwrap_or("0"),
+    timestamp: match option_env!("SOURCE_DATE_EPOCH") {
+        Some(timestamp) => timestamp,
+        None => "0",
+    },
 };
