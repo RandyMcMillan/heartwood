@@ -36,4 +36,6 @@ jobs:
         with:
           path: target
           key: ${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-cargo-target
+      - run: ./scripts/commit-vendor.sh --recursive
+      - run: git diff
       - run: cargo build --workspace --verbose --all-features
