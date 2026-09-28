@@ -40,4 +40,4 @@ jobs:
         shell: bash
       - run: ./scripts/commit-vendor.sh --recursive
       - run: git diff
-      - run: cargo build --workspace --verbose ##--all-features
+      - run: cargo build --workspace --verbose --all-features
