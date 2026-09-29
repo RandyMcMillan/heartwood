@@ -23,6 +23,8 @@ class HeartwoodStore: ObservableObject {
     @Published var repoSeedCounts: [String: UInt64] = [:]
     @Published var repoRemotes: [String: [HeartwoodRemote]] = [:]
     @Published var repoBranches: [String: [HeartwoodRef]] = [:]
+    @Published var notificationCount: UInt64 = 0
+    @Published var notificationCountsByRepo: [HeartwoodNotificationCount] = []
     @Published var errorMessage: String?
     @Published var isLoading: Bool = false
 
@@ -54,6 +56,8 @@ class HeartwoodStore: ObservableObject {
             seedPolicies = (try? heartwoodSeedPolicies()) ?? []
             followPolicies = (try? heartwoodFollowPolicies()) ?? []
             nodeSessions = (try? heartwoodNodeSessions()) ?? []
+            notificationCount = (try? heartwoodNotificationCount()) ?? 0
+            notificationCountsByRepo = (try? heartwoodNotificationCountsByRepo()) ?? []
 
             repoSeedCounts.removeAll()
             repoRemotes.removeAll()
@@ -361,6 +365,10 @@ struct ContentView: View {
 
                     if !store.nodeSessions.isEmpty {
                         sessionsCard(sessions: store.nodeSessions)
+                    }
+
+                    if store.notificationCount > 0 {
+                        notificationCard
                     }
 
                     if store.hasProfile && store.repositories.isEmpty {
@@ -875,6 +883,49 @@ struct ContentView: View {
                     Text("Repository not found")
                         .font(.subheadline)
                         .foregroundStyle(primaryText.opacity(0.62))
+                }
+            }
+        }
+    }
+
+    private var notificationCard: some View {
+        glassCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Notifications", systemImage: "bell")
+                    .font(.headline)
+                    .foregroundStyle(accentText)
+
+                HStack(spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("\(store.notificationCount)")
+                            .font(.title3.weight(.bold).monospacedDigit())
+                            .foregroundStyle(accentText)
+                        Text("Total")
+                            .font(.caption)
+                            .foregroundStyle(primaryText.opacity(0.62))
+                    }
+                    Spacer()
+                }
+
+                if !store.notificationCountsByRepo.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("By Repository")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(primaryText.opacity(0.62))
+                        ForEach(store.notificationCountsByRepo.prefix(5), id: \.rid) { item in
+                            HStack {
+                                Text(item.rid)
+                                    .font(.caption2)
+                                    .foregroundStyle(primaryText.opacity(0.84))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer()
+                                Text("\(item.count)")
+                                    .font(.caption2.weight(.semibold).monospacedDigit())
+                                    .foregroundStyle(accentText)
+                            }
+                        }
+                    }
                 }
             }
         }

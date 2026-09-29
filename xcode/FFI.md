@@ -97,6 +97,14 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 - [x] Add Swift remote count and branch list badges in repository cards
 - [x] Add tests for invalid RID handling
 
+## Phase 12: Protocol gap — notifications
+
+- [x] Add `heartwoodNotificationCount()` returning `u64`
+- [x] Add `heartwoodNotificationCountsByRepo()` returning `[HeartwoodNotificationCount { rid, count }]`
+- [x] Reads from `profile.notifications_mut()` (read methods available on `Store<T>`)
+- [x] Add Swift notification card with total count and per-repo breakdown
+- [x] Add tests for shape
+
 ## Suggested implementation order
 
 1. Metadata and normalization helpers

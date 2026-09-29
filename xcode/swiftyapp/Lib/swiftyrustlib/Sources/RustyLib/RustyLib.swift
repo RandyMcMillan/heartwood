@@ -830,6 +830,72 @@ public func FfiConverterTypeHeartwoodNodeStatus_lower(_ value: HeartwoodNodeStat
 }
 
 
+public struct HeartwoodNotificationCount {
+    public var rid: String
+    public var count: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(rid: String, count: UInt64) {
+        self.rid = rid
+        self.count = count
+    }
+}
+
+
+
+extension HeartwoodNotificationCount: Equatable, Hashable {
+    public static func ==(lhs: HeartwoodNotificationCount, rhs: HeartwoodNotificationCount) -> Bool {
+        if lhs.rid != rhs.rid {
+            return false
+        }
+        if lhs.count != rhs.count {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(rid)
+        hasher.combine(count)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHeartwoodNotificationCount: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HeartwoodNotificationCount {
+        return
+            try HeartwoodNotificationCount(
+                rid: FfiConverterString.read(from: &buf), 
+                count: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HeartwoodNotificationCount, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.rid, into: &buf)
+        FfiConverterUInt64.write(value.count, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHeartwoodNotificationCount_lift(_ buf: RustBuffer) throws -> HeartwoodNotificationCount {
+    return try FfiConverterTypeHeartwoodNotificationCount.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHeartwoodNotificationCount_lower(_ value: HeartwoodNotificationCount) -> RustBuffer {
+    return FfiConverterTypeHeartwoodNotificationCount.lower(value)
+}
+
+
 public struct HeartwoodPatchCounts {
     public var `open`: UInt64
     public var draft: UInt64
@@ -1849,6 +1915,31 @@ fileprivate struct FfiConverterSequenceTypeHeartwoodFollowPolicy: FfiConverterRu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeHeartwoodNotificationCount: FfiConverterRustBuffer {
+    typealias SwiftType = [HeartwoodNotificationCount]
+
+    public static func write(_ value: [HeartwoodNotificationCount], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeHeartwoodNotificationCount.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [HeartwoodNotificationCount] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [HeartwoodNotificationCount]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeHeartwoodNotificationCount.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeHeartwoodRef: FfiConverterRustBuffer {
     typealias SwiftType = [HeartwoodRef]
 
@@ -2041,6 +2132,18 @@ public func heartwoodNodeSessions()throws  -> [HeartwoodSession] {
 public func heartwoodNodeStatus()throws  -> HeartwoodNodeStatus {
     return try  FfiConverterTypeHeartwoodNodeStatus.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_node_status($0
+    )
+})
+}
+public func heartwoodNotificationCount()throws  -> UInt64 {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_notification_count($0
+    )
+})
+}
+public func heartwoodNotificationCountsByRepo()throws  -> [HeartwoodNotificationCount] {
+    return try  FfiConverterSequenceTypeHeartwoodNotificationCount.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_notification_counts_by_repo($0
     )
 })
 }
@@ -2243,6 +2346,12 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_node_status() != 6548) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_notification_count() != 38100) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_notification_counts_by_repo() != 47640) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_paths() != 35544) {

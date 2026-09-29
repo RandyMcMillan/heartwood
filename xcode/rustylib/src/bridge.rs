@@ -612,3 +612,37 @@ pub fn repository_branches(rid: &str) -> Result<Vec<HeartwoodRef>, HeartwoodErro
         })
         .collect())
 }
+
+#[derive(Debug, uniffi::Record)]
+pub struct HeartwoodNotificationCount {
+    pub rid: String,
+    pub count: u64,
+}
+
+pub fn notification_count() -> Result<u64, HeartwoodError> {
+    let profile = load_profile()?;
+    let notifications = profile
+        .notifications_mut()
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let count = notifications
+        .count()
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    Ok(count as u64)
+}
+
+pub fn notification_counts_by_repo() -> Result<Vec<HeartwoodNotificationCount>, HeartwoodError> {
+    let profile = load_profile()?;
+    let notifications = profile
+        .notifications_mut()
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let items = notifications
+        .counts_by_repo()
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?
+        .filter_map(|r| r.ok())
+        .map(|(rid, count)| HeartwoodNotificationCount {
+            rid: rid.to_string(),
+            count: count as u64,
+        })
+        .collect::<Vec<_>>();
+    Ok(items)
+}

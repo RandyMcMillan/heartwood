@@ -6,9 +6,9 @@ mod bridge;
 
 pub use bridge::{
     HeartwoodError, HeartwoodFollowPolicy, HeartwoodIssueCounts, HeartwoodNodeInfo,
-    HeartwoodNodeStatus, HeartwoodPatchCounts, HeartwoodPaths, HeartwoodProjectInfo,
-    HeartwoodRef, HeartwoodRemote, HeartwoodRepositoryInfo, HeartwoodRoutingSummary,
-    HeartwoodSeedPolicy, HeartwoodSession,
+    HeartwoodNodeStatus, HeartwoodNotificationCount, HeartwoodPatchCounts, HeartwoodPaths,
+    HeartwoodProjectInfo, HeartwoodRef, HeartwoodRemote, HeartwoodRepositoryInfo,
+    HeartwoodRoutingSummary, HeartwoodSeedPolicy, HeartwoodSession,
 };
 
 uniffi::setup_scaffolding!();
@@ -207,6 +207,16 @@ pub fn heartwood_repository_remotes(rid: String) -> Result<Vec<bridge::Heartwood
 #[uniffi::export]
 pub fn heartwood_repository_branches(rid: String) -> Result<Vec<bridge::HeartwoodRef>, bridge::HeartwoodError> {
     bridge::repository_branches(&rid)
+}
+
+#[uniffi::export]
+pub fn heartwood_notification_count() -> Result<u64, bridge::HeartwoodError> {
+    bridge::notification_count()
+}
+
+#[uniffi::export]
+pub fn heartwood_notification_counts_by_repo() -> Result<Vec<bridge::HeartwoodNotificationCount>, bridge::HeartwoodError> {
+    bridge::notification_counts_by_repo()
 }
 
 #[cfg(test)]
@@ -579,5 +589,22 @@ mod tests {
                 || matches!(result, Err(bridge::HeartwoodError::InvalidRepoId(_))),
             "invalid rid should be accepted (noop) or fail with profile/repo error"
         );
+    }
+
+    #[test]
+    fn test_notification_count_shape() {
+        if let Ok(count) = heartwood_notification_count() {
+            // u64 is always valid
+            let _ = count;
+        }
+    }
+
+    #[test]
+    fn test_notification_counts_by_repo_shape() {
+        if let Ok(counts) = heartwood_notification_counts_by_repo() {
+            for c in counts {
+                assert!(!c.rid.is_empty());
+            }
+        }
     }
 }
