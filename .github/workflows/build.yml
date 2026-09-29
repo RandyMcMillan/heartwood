@@ -60,3 +60,9 @@ jobs:
           RUST_BACKTRACE: full
           RUST_LOG: trace
           RUST_TEST_THREADS: 1
+      - if: runner.os == 'macOS'
+        name: Build xcode Rust bridge
+        run: cd xcode && make rust
+      - if: runner.os == 'macOS'
+        name: Build xcode iOS app
+        run: cd xcode && make app
