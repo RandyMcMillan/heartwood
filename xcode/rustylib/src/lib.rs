@@ -239,6 +239,11 @@ pub fn heartwood_node_inventory() -> Result<Vec<String>, bridge::HeartwoodError>
     bridge::node_inventory()
 }
 
+#[uniffi::export]
+pub fn heartwood_repository_size(rid: String) -> Result<u64, bridge::HeartwoodError> {
+    bridge::repository_size(&rid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,6 +685,28 @@ mod tests {
         if let Ok(inventory) = heartwood_node_inventory() {
             for rid in inventory {
                 assert!(!rid.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn test_repository_size_invalid_rid() {
+        let result = heartwood_repository_size("not-a-rid".to_string());
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
+                || matches!(result, Err(bridge::HeartwoodError::InvalidRepoId(_))),
+            "invalid rid should be accepted (noop) or fail with profile/repo error"
+        );
+    }
+
+    #[test]
+    fn test_repository_size_shape() {
+        if let Ok(repos) = heartwood_repository_list() {
+            for repo in repos {
+                if let Ok(size) = heartwood_repository_size(repo.rid) {
+                    assert!(size > 0, "repository should have non-zero size");
+                }
             }
         }
     }

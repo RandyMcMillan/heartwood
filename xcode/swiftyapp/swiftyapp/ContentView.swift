@@ -24,6 +24,7 @@ class HeartwoodStore: ObservableObject {
     @Published var repoRemotes: [String: [HeartwoodRemote]] = [:]
     @Published var repoBranches: [String: [HeartwoodRef]] = [:]
     @Published var repoLogs: [String: [HeartwoodCommit]] = [:]
+    @Published var repoSizes: [String: UInt64] = [:]
     @Published var nodeInventory: [String] = []
     @Published var notificationCount: UInt64 = 0
     @Published var notificationCountsByRepo: [HeartwoodNotificationCount] = []
@@ -66,6 +67,7 @@ class HeartwoodStore: ObservableObject {
             repoRemotes.removeAll()
             repoBranches.removeAll()
             repoLogs.removeAll()
+            repoSizes.removeAll()
             for repo in repositories {
                 if let count = try? heartwoodRepositorySeedCount(rid: repo.rid) {
                     repoSeedCounts[repo.rid] = count
@@ -78,6 +80,9 @@ class HeartwoodStore: ObservableObject {
                 }
                 if let log = try? heartwoodRepositoryLog(rid: repo.rid, limit: 5) {
                     repoLogs[repo.rid] = log
+                }
+                if let size = try? heartwoodRepositorySize(rid: repo.rid) {
+                    repoSizes[repo.rid] = size
                 }
             }
         } catch let error as HeartwoodError {
@@ -771,6 +776,11 @@ struct ContentView: View {
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(primaryText)
                             Spacer()
+                            if let size = store.repoSizes[repo.rid] {
+                                Text(formatBytes(size))
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(primaryText.opacity(0.62))
+                            }
                             Text(repo.visibility)
                                 .font(.caption.weight(.semibold))
                                 .padding(.horizontal, 8)
@@ -1229,6 +1239,12 @@ struct ContentView: View {
 
     private var cardBackground: Color {
         colorScheme == .dark ? .white.opacity(0.05) : .white.opacity(0.76)
+    }
+
+    private func formatBytes(_ bytes: UInt64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: Int64(bytes))
     }
 }
 

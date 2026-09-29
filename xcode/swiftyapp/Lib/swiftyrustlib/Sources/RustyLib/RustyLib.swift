@@ -2376,6 +2376,13 @@ public func heartwoodRepositorySeedCount(rid: String)throws  -> UInt64 {
     )
 })
 }
+public func heartwoodRepositorySize(rid: String)throws  -> UInt64 {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_repository_size(
+        FfiConverterString.lower(rid),$0
+    )
+})
+}
 public func heartwoodRoutingSummary()throws  -> HeartwoodRoutingSummary {
     return try  FfiConverterTypeHeartwoodRoutingSummary.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_routing_summary($0
@@ -2551,6 +2558,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_repository_seed_count() != 49650) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_repository_size() != 3445) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_routing_summary() != 40651) {

@@ -723,3 +723,27 @@ pub fn node_inventory() -> Result<Vec<String>, HeartwoodError> {
         .collect::<Vec<_>>();
     Ok(inventory)
 }
+
+pub fn repository_size(rid: &str) -> Result<u64, HeartwoodError> {
+    let profile = load_profile()?;
+    let rid = RepoId::from_str(rid)
+        .map_err(|err| HeartwoodError::InvalidRepoId(err.to_string()))?;
+    let path = profile.storage.path_of(&rid);
+
+    fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
+        let mut size = 0u64;
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if metadata.is_dir() {
+                size += dir_size(&entry.path())?;
+            } else {
+                size += metadata.len();
+            }
+        }
+        Ok(size)
+    }
+
+    let size = dir_size(&path).map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    Ok(size)
+}

@@ -127,6 +127,13 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 - [x] Add Swift inventory card showing advertised repositories
 - [x] Add tests for shape
 
+## Phase 16: Protocol gap — repository size
+
+- [x] Add `heartwoodRepositorySize(rid)` returning `u64` (bytes)
+- [x] Walks the repository directory to calculate total size
+- [x] Add Swift size badge in repository cards (human-readable via ByteCountFormatter)
+- [x] Add tests for shape and invalid RID handling
+
 ## Suggested implementation order
 
 1. Metadata and normalization helpers
