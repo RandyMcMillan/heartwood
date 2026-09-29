@@ -7,7 +7,7 @@ use radicle::node::{self, Alias, NodeId};
 use radicle::node::{Handle, routing::Store as RoutingStore};
 use radicle::prelude::RepoId;
 use radicle::profile;
-use radicle::storage::{ReadStorage, RepositoryInfo, SignedRefsInfo};
+use radicle::storage::{ReadRepository, ReadStorage, RemoteRepository, RepositoryInfo, SignedRefsInfo};
 
 #[derive(Debug, uniffi::Record)]
 pub struct HeartwoodPaths {
@@ -542,4 +542,73 @@ pub fn repository_seed_count(rid: &str) -> Result<u64, HeartwoodError> {
         .count(&rid)
         .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
     Ok(count as u64)
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct HeartwoodRemote {
+    pub nid: String,
+    pub refs: Vec<HeartwoodRef>,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct HeartwoodRef {
+    pub name: String,
+    pub oid: String,
+}
+
+pub fn repository_remotes(rid: &str) -> Result<Vec<HeartwoodRemote>, HeartwoodError> {
+    let profile = load_profile()?;
+    let rid = RepoId::from_str(rid)
+        .map_err(|err| HeartwoodError::InvalidRepoId(err.to_string()))?;
+    let repo = profile
+        .storage
+        .repository(rid)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+
+    let remotes = RemoteRepository::remotes(&repo)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+
+    let mut result = Vec::new();
+    for (nid, _remote) in remotes {
+        let refs = repo
+            .references_of(&nid)
+            .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+        let refs = refs
+            .iter()
+            .map(|(name, oid)| HeartwoodRef {
+                name: name.to_string(),
+                oid: oid.to_string(),
+            })
+            .collect();
+        result.push(HeartwoodRemote {
+            nid: nid.to_string(),
+            refs,
+        });
+    }
+
+    Ok(result)
+}
+
+pub fn repository_branches(rid: &str) -> Result<Vec<HeartwoodRef>, HeartwoodError> {
+    let profile = load_profile()?;
+    let rid = RepoId::from_str(rid)
+        .map_err(|err| HeartwoodError::InvalidRepoId(err.to_string()))?;
+    let repo = profile
+        .storage
+        .repository(rid)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+
+    let pattern = <&radicle::git::fmt::refspec::PatternStr>::try_from("refs/heads/*")
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let refs = repo
+        .references_glob(pattern)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+
+    Ok(refs
+        .into_iter()
+        .map(|(name, oid)| HeartwoodRef {
+            name: name.to_string(),
+            oid: oid.to_string(),
+        })
+        .collect())
 }

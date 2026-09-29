@@ -89,6 +89,14 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 - [x] Add Swift sessions card and per-repo seed count badge
 - [x] Add tests for shape and invalid input handling
 
+## Phase 11: Protocol gap — repository remotes and branches
+
+- [x] Add `heartwoodRepositoryRemotes(rid)` returning `[HeartwoodRemote { nid, refs: [{name, oid}] }]`
+- [x] Add `heartwoodRepositoryBranches(rid)` returning `[HeartwoodRef { name, oid }]`
+- [x] Uses `RemoteRepository::remotes()` and `ReadRepository::references_glob()`
+- [x] Add Swift remote count and branch list badges in repository cards
+- [x] Add tests for invalid RID handling
+
 ## Suggested implementation order
 
 1. Metadata and normalization helpers

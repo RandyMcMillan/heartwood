@@ -1084,6 +1084,138 @@ public func FfiConverterTypeHeartwoodProjectInfo_lower(_ value: HeartwoodProject
 }
 
 
+public struct HeartwoodRef {
+    public var name: String
+    public var oid: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, oid: String) {
+        self.name = name
+        self.oid = oid
+    }
+}
+
+
+
+extension HeartwoodRef: Equatable, Hashable {
+    public static func ==(lhs: HeartwoodRef, rhs: HeartwoodRef) -> Bool {
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.oid != rhs.oid {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(name)
+        hasher.combine(oid)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHeartwoodRef: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HeartwoodRef {
+        return
+            try HeartwoodRef(
+                name: FfiConverterString.read(from: &buf), 
+                oid: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HeartwoodRef, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.oid, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHeartwoodRef_lift(_ buf: RustBuffer) throws -> HeartwoodRef {
+    return try FfiConverterTypeHeartwoodRef.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHeartwoodRef_lower(_ value: HeartwoodRef) -> RustBuffer {
+    return FfiConverterTypeHeartwoodRef.lower(value)
+}
+
+
+public struct HeartwoodRemote {
+    public var nid: String
+    public var refs: [HeartwoodRef]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(nid: String, refs: [HeartwoodRef]) {
+        self.nid = nid
+        self.refs = refs
+    }
+}
+
+
+
+extension HeartwoodRemote: Equatable, Hashable {
+    public static func ==(lhs: HeartwoodRemote, rhs: HeartwoodRemote) -> Bool {
+        if lhs.nid != rhs.nid {
+            return false
+        }
+        if lhs.refs != rhs.refs {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(nid)
+        hasher.combine(refs)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHeartwoodRemote: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HeartwoodRemote {
+        return
+            try HeartwoodRemote(
+                nid: FfiConverterString.read(from: &buf), 
+                refs: FfiConverterSequenceTypeHeartwoodRef.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HeartwoodRemote, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.nid, into: &buf)
+        FfiConverterSequenceTypeHeartwoodRef.write(value.refs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHeartwoodRemote_lift(_ buf: RustBuffer) throws -> HeartwoodRemote {
+    return try FfiConverterTypeHeartwoodRemote.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHeartwoodRemote_lower(_ value: HeartwoodRemote) -> RustBuffer {
+    return FfiConverterTypeHeartwoodRemote.lower(value)
+}
+
+
 public struct HeartwoodRepositoryInfo {
     public var rid: String
     public var head: String?
@@ -1717,6 +1849,56 @@ fileprivate struct FfiConverterSequenceTypeHeartwoodFollowPolicy: FfiConverterRu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeHeartwoodRef: FfiConverterRustBuffer {
+    typealias SwiftType = [HeartwoodRef]
+
+    public static func write(_ value: [HeartwoodRef], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeHeartwoodRef.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [HeartwoodRef] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [HeartwoodRef]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeHeartwoodRef.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeHeartwoodRemote: FfiConverterRustBuffer {
+    typealias SwiftType = [HeartwoodRemote]
+
+    public static func write(_ value: [HeartwoodRemote], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeHeartwoodRemote.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [HeartwoodRemote] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [HeartwoodRemote]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeHeartwoodRemote.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeHeartwoodRepositoryInfo: FfiConverterRustBuffer {
     typealias SwiftType = [HeartwoodRepositoryInfo]
 
@@ -1899,6 +2081,13 @@ public func heartwoodRepository(rid: String)throws  -> HeartwoodRepositoryInfo? 
     )
 })
 }
+public func heartwoodRepositoryBranches(rid: String)throws  -> [HeartwoodRef] {
+    return try  FfiConverterSequenceTypeHeartwoodRef.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_repository_branches(
+        FfiConverterString.lower(rid),$0
+    )
+})
+}
 public func heartwoodRepositoryIssueCounts(rid: String)throws  -> HeartwoodIssueCounts? {
     return try  FfiConverterOptionTypeHeartwoodIssueCounts.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_repository_issue_counts(
@@ -1915,6 +2104,13 @@ public func heartwoodRepositoryList()throws  -> [HeartwoodRepositoryInfo] {
 public func heartwoodRepositoryPatchCounts(rid: String)throws  -> HeartwoodPatchCounts? {
     return try  FfiConverterOptionTypeHeartwoodPatchCounts.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_repository_patch_counts(
+        FfiConverterString.lower(rid),$0
+    )
+})
+}
+public func heartwoodRepositoryRemotes(rid: String)throws  -> [HeartwoodRemote] {
+    return try  FfiConverterSequenceTypeHeartwoodRemote.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_repository_remotes(
         FfiConverterString.lower(rid),$0
     )
 })
@@ -2067,6 +2263,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_rustylib_checksum_func_heartwood_repository() != 58935) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_rustylib_checksum_func_heartwood_repository_branches() != 60987) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_rustylib_checksum_func_heartwood_repository_issue_counts() != 42917) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2074,6 +2273,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_repository_patch_counts() != 22642) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_repository_remotes() != 41429) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_repository_seed_count() != 49650) {

@@ -21,6 +21,8 @@ class HeartwoodStore: ObservableObject {
     @Published var followPolicies: [HeartwoodFollowPolicy] = []
     @Published var nodeSessions: [HeartwoodSession] = []
     @Published var repoSeedCounts: [String: UInt64] = [:]
+    @Published var repoRemotes: [String: [HeartwoodRemote]] = [:]
+    @Published var repoBranches: [String: [HeartwoodRef]] = [:]
     @Published var errorMessage: String?
     @Published var isLoading: Bool = false
 
@@ -54,9 +56,17 @@ class HeartwoodStore: ObservableObject {
             nodeSessions = (try? heartwoodNodeSessions()) ?? []
 
             repoSeedCounts.removeAll()
+            repoRemotes.removeAll()
+            repoBranches.removeAll()
             for repo in repositories {
                 if let count = try? heartwoodRepositorySeedCount(rid: repo.rid) {
                     repoSeedCounts[repo.rid] = count
+                }
+                if let remotes = try? heartwoodRepositoryRemotes(rid: repo.rid) {
+                    repoRemotes[repo.rid] = remotes
+                }
+                if let branches = try? heartwoodRepositoryBranches(rid: repo.rid) {
+                    repoBranches[repo.rid] = branches
                 }
             }
         } catch let error as HeartwoodError {
@@ -771,6 +781,31 @@ struct ContentView: View {
                                 }
                             }
                             .font(.caption2)
+                            .foregroundStyle(primaryText.opacity(0.52))
+                        }
+
+                        if let branches = store.repoBranches[repo.rid], !branches.isEmpty {
+                            HStack(spacing: 8) {
+                                Image(systemName: "arrow.triangle.branch")
+                                ForEach(branches.prefix(3), id: \.name) { branch in
+                                    Text(branch.name)
+                                        .font(.caption2.monospaced())
+                                        .lineLimit(1)
+                                }
+                                if branches.count > 3 {
+                                    Text("+\(branches.count - 3)")
+                                        .font(.caption2)
+                                }
+                            }
+                            .foregroundStyle(primaryText.opacity(0.52))
+                        }
+
+                        if let remotes = store.repoRemotes[repo.rid], !remotes.isEmpty {
+                            HStack(spacing: 8) {
+                                Image(systemName: "network")
+                                Text("\(remotes.count) remote\(remotes.count == 1 ? "" : "s")")
+                                    .font(.caption2)
+                            }
                             .foregroundStyle(primaryText.opacity(0.52))
                         }
                     }
