@@ -18,7 +18,7 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 ## Phase 2: Build a Rust bridge layer
 
 - [x] Keep `xcode/rustylib` as the UniFFI entrypoint
-- [ ] Add a dedicated internal bridge module or helper crate for Heartwood-facing logic
+- [x] Add a dedicated internal bridge module or helper crate for Heartwood-facing logic
 - [x] Reuse existing Heartwood crates instead of reimplementing logic in the bridge
 - [x] Prefer simple UniFFI types: strings, records, enums, optionals, lists, and explicit errors
 - [x] Avoid exposing opaque Rust internals directly unless a handle type is clearly justified
@@ -33,10 +33,10 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 
 ## Phase 4: Add stateful and interactive APIs
 
-- [ ] Identify the minimal set of safe write operations needed by the Swift app
-- [ ] Add explicit input validation for every mutating call
-- [ ] Map Rust errors into stable UniFFI errors
-- [ ] Add tests for success and failure paths
+- [x] Identify the minimal set of safe write operations needed by the Swift app
+- [x] Add explicit input validation for every mutating call
+- [x] Map Rust errors into stable UniFFI errors
+- [x] Add tests for success and failure paths
 
 ## Phase 5: Refresh Swift bindings and app usage
 
