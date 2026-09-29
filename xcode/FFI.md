@@ -29,7 +29,7 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 - [x] Expose repository ID and node ID parsing/normalization helpers
 - [x] Add repository summary/read APIs
 - [x] Add node summary/status APIs
-- [ ] Add tests for each exported function
+- [x] Add tests for each exported function
 
 ## Phase 4: Add stateful and interactive APIs
 
@@ -41,7 +41,7 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 ## Phase 5: Refresh Swift bindings and app usage
 
 - [x] Regenerate UniFFI Swift bindings from the Rust interface
-- [ ] Add a small Swift façade over the generated bindings
+- [x] Add a small Swift façade over the generated bindings
 - [x] Replace demo UI calls in `swiftyapp/ContentView.swift`
 - [x] Keep the app compiling after each bridge addition
 
@@ -50,7 +50,7 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 - [x] Run `cd xcode && make rust`
 - [x] Run `cd xcode && make app`
 - [x] Verify the generated bindings contract checks still pass
-- [ ] Add or update CI so the bridge build stays covered
+- [x] Add or update CI so the bridge build stays covered
 - [x] Ensure generated artifacts are rebuilt, not edited manually
 
 ## Suggested implementation order
