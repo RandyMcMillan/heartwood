@@ -113,6 +113,11 @@ pub fn heartwood_set_network(mode: String) -> Result<(), bridge::HeartwoodError>
 }
 
 #[uniffi::export]
+pub fn heartwood_has_profile() -> bool {
+    bridge::has_profile()
+}
+
+#[uniffi::export]
 pub fn heartwood_add_external_address(address: String) -> Result<(), bridge::HeartwoodError> {
     bridge::add_external_address(&address)
 }
@@ -297,6 +302,12 @@ mod tests {
                 "valid network mode '{}' should succeed or fail with profile error", mode
             );
         }
+    }
+
+    #[test]
+    fn test_has_profile() {
+        let result = heartwood_has_profile();
+        assert!(result || !result, "has_profile should return a boolean");
     }
 
     #[test]

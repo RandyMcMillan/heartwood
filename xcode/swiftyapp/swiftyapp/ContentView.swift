@@ -142,6 +142,10 @@ class HeartwoodStore: ObservableObject {
             errorMessage = error.localizedDescription
         }
     }
+
+    var hasProfile: Bool {
+        heartwoodHasProfile()
+    }
 }
 
 struct ContentView: View {
@@ -217,6 +221,19 @@ struct ContentView: View {
                                         .font(.title3)
                                         .foregroundStyle(accentFill.opacity(0.7))
                                 }
+                            }
+                        }
+                    }
+
+                    if !store.hasProfile {
+                        glassCard {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Label("No Profile", systemImage: "person.crop.circle.badge.xmark")
+                                    .font(.headline)
+                                    .foregroundStyle(accentText)
+                                Text("No Heartwood profile was found on this device. Use the radicle CLI to create one before using this app.")
+                                    .font(.subheadline)
+                                    .foregroundStyle(primaryText.opacity(0.84))
                             }
                         }
                     }

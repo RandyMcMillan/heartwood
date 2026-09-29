@@ -72,6 +72,10 @@ pub fn load_profile() -> Result<profile::Profile, HeartwoodError> {
     profile::Profile::load().map_err(|err| HeartwoodError::Profile(err.to_string()))
 }
 
+pub fn has_profile() -> bool {
+    profile::Profile::load().is_ok()
+}
+
 pub fn profile_paths(profile: &profile::Profile) -> HeartwoodPaths {
     HeartwoodPaths {
         home: profile.home().path().display().to_string(),
