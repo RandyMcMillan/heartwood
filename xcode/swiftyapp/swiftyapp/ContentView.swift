@@ -143,6 +143,38 @@ class HeartwoodStore: ObservableObject {
         }
     }
 
+    func addConnectAddress(_ value: String) {
+        do {
+            try heartwoodAddConnectAddress(address: value)
+            load()
+        } catch let error as HeartwoodError {
+            switch error {
+            case .InvalidAddress(let msg):
+                errorMessage = msg
+            default:
+                errorMessage = error.localizedDescription
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func removeConnectAddress(_ value: String) {
+        do {
+            try heartwoodRemoveConnectAddress(address: value)
+            load()
+        } catch let error as HeartwoodError {
+            switch error {
+            case .InvalidAddress(let msg):
+                errorMessage = msg
+            default:
+                errorMessage = error.localizedDescription
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     var hasProfile: Bool {
         heartwoodHasProfile()
     }
@@ -152,6 +184,7 @@ struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var store = HeartwoodStore()
     @State private var newAddress = ""
+    @State private var newConnectAddress = ""
     @State private var lookupRid = ""
     @State private var lookedUpRepo: HeartwoodRepositoryInfo?
 
@@ -415,7 +448,41 @@ struct ContentView: View {
                 }
 
                 if !node.connectAddresses.isEmpty {
-                    infoRow(label: "Connect", value: node.connectAddresses.joined(separator: ", "))
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Connect")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(primaryText.opacity(0.62))
+                        ForEach(node.connectAddresses, id: \.self) { addr in
+                            HStack {
+                                Text(addr)
+                                    .font(.subheadline)
+                                    .foregroundStyle(primaryText.opacity(0.92))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer()
+                                Button {
+                                    store.removeConnectAddress(addr)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundStyle(accentFill.opacity(0.7))
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    TextField("nodeId@host:port", text: $newConnectAddress)
+                        .font(.subheadline)
+                        .textFieldStyle(.roundedBorder)
+                    Button {
+                        store.addConnectAddress(newConnectAddress)
+                        newConnectAddress = ""
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .foregroundStyle(accentFill)
+                    }
+                    .disabled(newConnectAddress.isEmpty)
                 }
             }
         }

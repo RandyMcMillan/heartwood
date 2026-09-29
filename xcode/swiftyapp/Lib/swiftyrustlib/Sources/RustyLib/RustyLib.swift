@@ -1115,6 +1115,12 @@ fileprivate struct FfiConverterSequenceTypeHeartwoodRepositoryInfo: FfiConverter
         return seq
     }
 }
+public func heartwoodAddConnectAddress(address: String)throws  {try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_add_connect_address(
+        FfiConverterString.lower(address),$0
+    )
+}
+}
 public func heartwoodAddExternalAddress(address: String)throws  {try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_add_external_address(
         FfiConverterString.lower(address),$0
@@ -1156,6 +1162,12 @@ public func heartwoodPing() -> String {
     uniffi_rustylib_fn_func_heartwood_ping($0
     )
 })
+}
+public func heartwoodRemoveConnectAddress(address: String)throws  {try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_remove_connect_address(
+        FfiConverterString.lower(address),$0
+    )
+}
 }
 public func heartwoodRemoveExternalAddress(address: String)throws  {try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_remove_external_address(
@@ -1251,6 +1263,9 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_rustylib_checksum_func_heartwood_add_connect_address() != 49131) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_rustylib_checksum_func_heartwood_add_external_address() != 40825) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1270,6 +1285,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_ping() != 43370) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_remove_connect_address() != 16985) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_remove_external_address() != 28540) {

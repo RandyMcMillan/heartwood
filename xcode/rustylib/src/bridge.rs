@@ -244,3 +244,38 @@ pub fn remove_external_address(address: &str) -> Result<(), HeartwoodError> {
         .map_err(|err| HeartwoodError::ConfigWrite(err.to_string()))?;
     Ok(())
 }
+
+fn parse_connect_address(input: &str) -> Result<node::config::ConnectAddress, HeartwoodError> {
+    let (nid, addr) = input
+        .rsplit_once('@')
+        .ok_or_else(|| HeartwoodError::InvalidAddress("expected nodeId@host:port".to_string()))?;
+    let nid = NodeId::from_str(nid)
+        .map_err(|err| HeartwoodError::InvalidAddress(err.to_string()))?;
+    let addr = node::Address::from_str(addr)
+        .map_err(|err| HeartwoodError::InvalidAddress(err.to_string()))?;
+    Ok(node::config::ConnectAddress::from((nid, addr)))
+}
+
+pub fn add_connect_address(input: &str) -> Result<(), HeartwoodError> {
+    let profile = load_profile()?;
+    let connect = parse_connect_address(input)?;
+    let mut config = profile.config.clone();
+    if !config.node.connect.contains(&connect) {
+        config.node.connect.insert(connect);
+    }
+    config
+        .write(profile.home().config().as_path())
+        .map_err(|err| HeartwoodError::ConfigWrite(err.to_string()))?;
+    Ok(())
+}
+
+pub fn remove_connect_address(input: &str) -> Result<(), HeartwoodError> {
+    let profile = load_profile()?;
+    let connect = parse_connect_address(input)?;
+    let mut config = profile.config.clone();
+    config.node.connect.shift_remove(&connect);
+    config
+        .write(profile.home().config().as_path())
+        .map_err(|err| HeartwoodError::ConfigWrite(err.to_string()))?;
+    Ok(())
+}
