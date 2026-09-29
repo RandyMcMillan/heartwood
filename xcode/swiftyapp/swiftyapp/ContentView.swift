@@ -237,6 +237,15 @@ struct ContentView: View {
 
                 Spacer()
 
+                Button {
+                    store.load()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.title2)
+                        .foregroundStyle(accentFill)
+                }
+                .disabled(store.isLoading)
+
                 Image(colorScheme == .dark ? "RustOrb" : "RustOrbLight")
                     .resizable()
                     .scaledToFit()
@@ -270,6 +279,8 @@ struct ContentView: View {
         .padding(.bottom, 4)
     }
 
+    @State private var editingAlias = ""
+
     private func nodeCard(node: HeartwoodNodeInfo) -> some View {
         glassCard {
             VStack(alignment: .leading, spacing: 10) {
@@ -277,7 +288,24 @@ struct ContentView: View {
                     .font(.headline)
                     .foregroundStyle(accentText)
 
-                infoRow(label: "Alias", value: node.alias)
+                HStack(spacing: 8) {
+                    Text("Alias")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(primaryText.opacity(0.62))
+                        .frame(width: 72, alignment: .leading)
+                    TextField(node.alias, text: $editingAlias)
+                        .font(.subheadline)
+                        .textFieldStyle(.roundedBorder)
+                    Button {
+                        store.setAlias(editingAlias)
+                        editingAlias = ""
+                    } label: {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(accentFill)
+                    }
+                    .disabled(editingAlias.isEmpty)
+                }
+
                 infoRow(label: "Node ID", value: node.nodeId)
                 infoRow(label: "User Agent", value: node.userAgent)
 
