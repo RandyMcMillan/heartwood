@@ -31,7 +31,7 @@ class HeartwoodStore: ObservableObject {
             switch error {
             case .Profile(let msg), .Storage(let msg), .InvalidRepoId(let msg),
                  .InvalidAlias(let msg), .InvalidRelay(let msg), .InvalidNetwork(let msg),
-                 .ConfigWrite(let msg):
+                 .ConfigWrite(let msg), .InvalidAddress(let msg):
                 errorMessage = msg
             }
         } catch {

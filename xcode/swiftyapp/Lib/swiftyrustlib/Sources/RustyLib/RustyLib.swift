@@ -864,6 +864,8 @@ public enum HeartwoodError {
     )
     case ConfigWrite(String
     )
+    case InvalidAddress(String
+    )
 }
 
 
@@ -899,6 +901,9 @@ public struct FfiConverterTypeHeartwoodError: FfiConverterRustBuffer {
             try FfiConverterString.read(from: &buf)
             )
         case 7: return .ConfigWrite(
+            try FfiConverterString.read(from: &buf)
+            )
+        case 8: return .InvalidAddress(
             try FfiConverterString.read(from: &buf)
             )
 
@@ -945,6 +950,11 @@ public struct FfiConverterTypeHeartwoodError: FfiConverterRustBuffer {
         
         case let .ConfigWrite(v1):
             writeInt(&buf, Int32(7))
+            FfiConverterString.write(v1, into: &buf)
+            
+        
+        case let .InvalidAddress(v1):
+            writeInt(&buf, Int32(8))
             FfiConverterString.write(v1, into: &buf)
             
         }
@@ -1081,6 +1091,12 @@ fileprivate struct FfiConverterSequenceTypeHeartwoodRepositoryInfo: FfiConverter
         return seq
     }
 }
+public func heartwoodAddExternalAddress(address: String)throws  {try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_add_external_address(
+        FfiConverterString.lower(address),$0
+    )
+}
+}
 public func heartwoodAnswer() -> UInt32 {
     return try!  FfiConverterUInt32.lift(try! rustCall() {
     uniffi_rustylib_fn_func_heartwood_answer($0
@@ -1110,6 +1126,12 @@ public func heartwoodPing() -> String {
     uniffi_rustylib_fn_func_heartwood_ping($0
     )
 })
+}
+public func heartwoodRemoveExternalAddress(address: String)throws  {try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_remove_external_address(
+        FfiConverterString.lower(address),$0
+    )
+}
 }
 public func heartwoodRepository(rid: String)throws  -> HeartwoodRepositoryInfo? {
     return try  FfiConverterOptionTypeHeartwoodRepositoryInfo.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
@@ -1199,6 +1221,9 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_rustylib_checksum_func_heartwood_add_external_address() != 40825) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_rustylib_checksum_func_heartwood_answer() != 4271) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1212,6 +1237,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_ping() != 43370) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_remove_external_address() != 28540) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_repository() != 58935) {

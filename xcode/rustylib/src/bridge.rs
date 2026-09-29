@@ -64,6 +64,8 @@ pub enum HeartwoodError {
     InvalidNetwork(String),
     #[error("config write error: {0}")]
     ConfigWrite(String),
+    #[error("invalid address: {0}")]
+    InvalidAddress(String),
 }
 
 pub fn load_profile() -> Result<profile::Profile, HeartwoodError> {
@@ -207,6 +209,32 @@ pub fn set_network(mode: &str) -> Result<(), HeartwoodError> {
     };
     let mut config = profile.config.clone();
     config.node.network = network;
+    config
+        .write(profile.home().config().as_path())
+        .map_err(|err| HeartwoodError::ConfigWrite(err.to_string()))?;
+    Ok(())
+}
+
+pub fn add_external_address(address: &str) -> Result<(), HeartwoodError> {
+    let profile = load_profile()?;
+    let addr = node::Address::from_str(address)
+        .map_err(|err| HeartwoodError::InvalidAddress(err.to_string()))?;
+    let mut config = profile.config.clone();
+    if !config.node.external_addresses.contains(&addr) {
+        config.node.external_addresses.push(addr);
+    }
+    config
+        .write(profile.home().config().as_path())
+        .map_err(|err| HeartwoodError::ConfigWrite(err.to_string()))?;
+    Ok(())
+}
+
+pub fn remove_external_address(address: &str) -> Result<(), HeartwoodError> {
+    let profile = load_profile()?;
+    let addr = node::Address::from_str(address)
+        .map_err(|err| HeartwoodError::InvalidAddress(err.to_string()))?;
+    let mut config = profile.config.clone();
+    config.node.external_addresses.retain(|a| a != &addr);
     config
         .write(profile.home().config().as_path())
         .map_err(|err| HeartwoodError::ConfigWrite(err.to_string()))?;
