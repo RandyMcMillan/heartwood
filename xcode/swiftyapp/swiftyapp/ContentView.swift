@@ -25,6 +25,8 @@ class HeartwoodStore: ObservableObject {
     @Published var repoBranches: [String: [HeartwoodRef]] = [:]
     @Published var repoLogs: [String: [HeartwoodCommit]] = [:]
     @Published var repoSizes: [String: UInt64] = [:]
+    @Published var repoIssues: [String: [HeartwoodIssue]] = [:]
+    @Published var repoPatchesList: [String: [HeartwoodPatch]] = [:]
     @Published var nodeInventory: [String] = []
     @Published var notificationCount: UInt64 = 0
     @Published var notificationCountsByRepo: [HeartwoodNotificationCount] = []
@@ -68,6 +70,8 @@ class HeartwoodStore: ObservableObject {
             repoBranches.removeAll()
             repoLogs.removeAll()
             repoSizes.removeAll()
+            repoIssues.removeAll()
+            repoPatchesList.removeAll()
             for repo in repositories {
                 if let count = try? heartwoodRepositorySeedCount(rid: repo.rid) {
                     repoSeedCounts[repo.rid] = count
@@ -83,6 +87,12 @@ class HeartwoodStore: ObservableObject {
                 }
                 if let size = try? heartwoodRepositorySize(rid: repo.rid) {
                     repoSizes[repo.rid] = size
+                }
+                if let issues = try? heartwoodRepositoryIssues(rid: repo.rid, limit: 3) {
+                    repoIssues[repo.rid] = issues
+                }
+                if let patches = try? heartwoodRepositoryPatchesList(rid: repo.rid, limit: 3) {
+                    repoPatchesList[repo.rid] = patches
                 }
             }
         } catch let error as HeartwoodError {
@@ -880,6 +890,52 @@ struct ContentView: View {
                                             .font(.caption2.monospaced())
                                             .foregroundStyle(primaryText.opacity(0.68))
                                         Text(commit.message)
+                                            .font(.caption2)
+                                            .foregroundStyle(primaryText.opacity(0.84))
+                                            .lineLimit(1)
+                                        Spacer()
+                                    }
+                                }
+                            }
+                        }
+
+                        if let issues = store.repoIssues[repo.rid], !issues.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Issues")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(primaryText.opacity(0.62))
+                                ForEach(issues, id: \.id) { issue in
+                                    HStack(spacing: 8) {
+                                        Text(issue.state)
+                                            .font(.caption2.weight(.semibold))
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(accentFill.opacity(colorScheme == .dark ? 0.18 : 0.12), in: Capsule())
+                                            .foregroundStyle(accentText)
+                                        Text(issue.title)
+                                            .font(.caption2)
+                                            .foregroundStyle(primaryText.opacity(0.84))
+                                            .lineLimit(1)
+                                        Spacer()
+                                    }
+                                }
+                            }
+                        }
+
+                        if let patches = store.repoPatchesList[repo.rid], !patches.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Patches")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(primaryText.opacity(0.62))
+                                ForEach(patches, id: \.id) { patch in
+                                    HStack(spacing: 8) {
+                                        Text(patch.state)
+                                            .font(.caption2.weight(.semibold))
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(accentFill.opacity(colorScheme == .dark ? 0.18 : 0.12), in: Capsule())
+                                            .foregroundStyle(accentText)
+                                        Text(patch.title)
                                             .font(.caption2)
                                             .foregroundStyle(primaryText.opacity(0.84))
                                             .lineLimit(1)

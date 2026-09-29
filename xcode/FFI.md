@@ -134,6 +134,14 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 - [x] Add Swift size badge in repository cards (human-readable via ByteCountFormatter)
 - [x] Add tests for shape and invalid RID handling
 
+## Phase 17: Protocol gap — issue and patch lists
+
+- [x] Add `heartwoodRepositoryIssues(rid, limit)` returning `[HeartwoodIssue { id, title, state }]`
+- [x] Add `heartwoodRepositoryPatchesList(rid, limit)` returning `[HeartwoodPatch { id, title, state }]`
+- [x] Uses `Issues::all()` and `Patches::all()` with read-only access
+- [x] Add Swift issue/patch lists in repository cards
+- [x] Add tests for invalid RID handling
+
 ## Suggested implementation order
 
 1. Metadata and normalization helpers

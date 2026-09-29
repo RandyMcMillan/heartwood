@@ -5,10 +5,10 @@ use radicle::storage::ReadStorage;
 mod bridge;
 
 pub use bridge::{
-    HeartwoodCommit, HeartwoodError, HeartwoodFollowPolicy, HeartwoodIssueCounts, HeartwoodNodeInfo,
-    HeartwoodNodeStatus, HeartwoodNotificationCount, HeartwoodPatchCounts, HeartwoodPaths,
-    HeartwoodProjectInfo, HeartwoodRef, HeartwoodRemote, HeartwoodRepositoryInfo,
-    HeartwoodRoutingSummary, HeartwoodSeedPolicy, HeartwoodSession,
+    HeartwoodCommit, HeartwoodError, HeartwoodFollowPolicy, HeartwoodIssue, HeartwoodIssueCounts,
+    HeartwoodNodeInfo, HeartwoodNodeStatus, HeartwoodNotificationCount, HeartwoodPatch,
+    HeartwoodPatchCounts, HeartwoodPaths, HeartwoodProjectInfo, HeartwoodRef, HeartwoodRemote,
+    HeartwoodRepositoryInfo, HeartwoodRoutingSummary, HeartwoodSeedPolicy, HeartwoodSession,
 };
 
 uniffi::setup_scaffolding!();
@@ -242,6 +242,16 @@ pub fn heartwood_node_inventory() -> Result<Vec<String>, bridge::HeartwoodError>
 #[uniffi::export]
 pub fn heartwood_repository_size(rid: String) -> Result<u64, bridge::HeartwoodError> {
     bridge::repository_size(&rid)
+}
+
+#[uniffi::export]
+pub fn heartwood_repository_issues(rid: String, limit: u32) -> Result<Vec<bridge::HeartwoodIssue>, bridge::HeartwoodError> {
+    bridge::repository_issues(&rid, limit)
+}
+
+#[uniffi::export]
+pub fn heartwood_repository_patches_list(rid: String, limit: u32) -> Result<Vec<bridge::HeartwoodPatch>, bridge::HeartwoodError> {
+    bridge::repository_patches(&rid, limit)
 }
 
 #[cfg(test)]
@@ -709,5 +719,27 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_repository_issues_invalid_rid() {
+        let result = heartwood_repository_issues("not-a-rid".to_string(), 10);
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
+                || matches!(result, Err(bridge::HeartwoodError::InvalidRepoId(_))),
+            "invalid rid should be accepted (noop) or fail with profile/repo error"
+        );
+    }
+
+    #[test]
+    fn test_repository_patches_list_invalid_rid() {
+        let result = heartwood_repository_patches_list("not-a-rid".to_string(), 10);
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
+                || matches!(result, Err(bridge::HeartwoodError::InvalidRepoId(_))),
+            "invalid rid should be accepted (noop) or fail with profile/repo error"
+        );
     }
 }

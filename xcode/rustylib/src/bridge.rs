@@ -747,3 +747,79 @@ pub fn repository_size(rid: &str) -> Result<u64, HeartwoodError> {
     let size = dir_size(&path).map_err(|err| HeartwoodError::Storage(err.to_string()))?;
     Ok(size)
 }
+
+#[derive(Debug, uniffi::Record)]
+pub struct HeartwoodIssue {
+    pub id: String,
+    pub title: String,
+    pub state: String,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct HeartwoodPatch {
+    pub id: String,
+    pub title: String,
+    pub state: String,
+}
+
+pub fn repository_issues(rid: &str, limit: u32) -> Result<Vec<HeartwoodIssue>, HeartwoodError> {
+    let profile = load_profile()?;
+    let rid = RepoId::from_str(rid)
+        .map_err(|err| HeartwoodError::InvalidRepoId(err.to_string()))?;
+    let repo = profile
+        .storage
+        .repository(rid)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+
+    let issues = radicle::cob::issue::Issues::open(&repo, radicle::cob::store::access::ReadOnly)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+
+    let items = issues
+        .all()
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?
+        .filter_map(|r| r.ok())
+        .take(limit as usize)
+        .map(|(id, issue)| HeartwoodIssue {
+            id: id.to_string(),
+            title: issue.title().to_string(),
+            state: match issue.state() {
+                radicle::cob::issue::State::Open => "open".to_string(),
+                radicle::cob::issue::State::Closed { .. } => "closed".to_string(),
+            },
+        })
+        .collect::<Vec<_>>();
+
+    Ok(items)
+}
+
+pub fn repository_patches(rid: &str, limit: u32) -> Result<Vec<HeartwoodPatch>, HeartwoodError> {
+    let profile = load_profile()?;
+    let rid = RepoId::from_str(rid)
+        .map_err(|err| HeartwoodError::InvalidRepoId(err.to_string()))?;
+    let repo = profile
+        .storage
+        .repository(rid)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+
+    let patches = radicle::cob::patch::Patches::open(&repo, radicle::cob::store::access::ReadOnly)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+
+    let items = patches
+        .all()
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?
+        .filter_map(|r| r.ok())
+        .take(limit as usize)
+        .map(|(id, patch)| HeartwoodPatch {
+            id: id.to_string(),
+            title: patch.title().to_string(),
+            state: match patch.state() {
+                radicle::cob::patch::State::Draft => "draft".to_string(),
+                radicle::cob::patch::State::Open { .. } => "open".to_string(),
+                radicle::cob::patch::State::Archived => "archived".to_string(),
+                radicle::cob::patch::State::Merged { .. } => "merged".to_string(),
+            },
+        })
+        .collect::<Vec<_>>();
+
+    Ok(items)
+}
