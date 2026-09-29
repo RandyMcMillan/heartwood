@@ -5,9 +5,9 @@ use radicle::storage::ReadStorage;
 mod bridge;
 
 pub use bridge::{
-    HeartwoodError, HeartwoodIssueCounts, HeartwoodNodeInfo, HeartwoodNodeStatus,
-    HeartwoodPatchCounts, HeartwoodPaths, HeartwoodProjectInfo, HeartwoodRepositoryInfo,
-    HeartwoodRoutingSummary,
+    HeartwoodError, HeartwoodFollowPolicy, HeartwoodIssueCounts, HeartwoodNodeInfo,
+    HeartwoodNodeStatus, HeartwoodPatchCounts, HeartwoodPaths, HeartwoodProjectInfo,
+    HeartwoodRepositoryInfo, HeartwoodRoutingSummary, HeartwoodSeedPolicy,
 };
 
 uniffi::setup_scaffolding!();
@@ -166,6 +166,26 @@ pub fn heartwood_repository_issue_counts(rid: String) -> Result<Option<bridge::H
 #[uniffi::export]
 pub fn heartwood_repository_patch_counts(rid: String) -> Result<Option<bridge::HeartwoodPatchCounts>, bridge::HeartwoodError> {
     bridge::repository_patch_counts(&rid)
+}
+
+#[uniffi::export]
+pub fn heartwood_seed_policies() -> Result<Vec<bridge::HeartwoodSeedPolicy>, bridge::HeartwoodError> {
+    bridge::seed_policies()
+}
+
+#[uniffi::export]
+pub fn heartwood_follow_policies() -> Result<Vec<bridge::HeartwoodFollowPolicy>, bridge::HeartwoodError> {
+    bridge::follow_policies()
+}
+
+#[uniffi::export]
+pub fn heartwood_is_seeding(rid: String) -> Result<bool, bridge::HeartwoodError> {
+    bridge::is_seeding(&rid)
+}
+
+#[uniffi::export]
+pub fn heartwood_is_following(nid: String) -> Result<bool, bridge::HeartwoodError> {
+    bridge::is_following(&nid)
 }
 
 #[cfg(test)]
@@ -451,6 +471,48 @@ mod tests {
                 || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
                 || matches!(result, Err(bridge::HeartwoodError::InvalidRepoId(_))),
             "invalid rid should be accepted (noop) or fail with profile/repo error"
+        );
+    }
+
+    #[test]
+    fn test_seed_policies_shape() {
+        if let Ok(policies) = heartwood_seed_policies() {
+            for p in policies {
+                assert!(!p.rid.is_empty());
+                assert!(matches!(p.policy.as_str(), "allow" | "block"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_follow_policies_shape() {
+        if let Ok(policies) = heartwood_follow_policies() {
+            for p in policies {
+                assert!(!p.nid.is_empty());
+                assert!(matches!(p.policy.as_str(), "allow" | "block"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_is_seeding_invalid_rid() {
+        let result = heartwood_is_seeding("not-a-rid".to_string());
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
+                || matches!(result, Err(bridge::HeartwoodError::InvalidRepoId(_))),
+            "invalid rid should be accepted (noop) or fail with profile/repo error"
+        );
+    }
+
+    #[test]
+    fn test_is_following_invalid_nid() {
+        let result = heartwood_is_following("not-a-nid".to_string());
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
+                || matches!(result, Err(bridge::HeartwoodError::InvalidAddress(_))),
+            "invalid nid should be accepted (noop) or fail with profile/address error"
         );
     }
 }

@@ -418,3 +418,83 @@ pub fn repository_patch_counts(rid: &str) -> Result<Option<HeartwoodPatchCounts>
         total: counts.total() as u64,
     }))
 }
+
+#[derive(Debug, uniffi::Record)]
+pub struct HeartwoodSeedPolicy {
+    pub rid: String,
+    pub policy: String,
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct HeartwoodFollowPolicy {
+    pub nid: String,
+    pub alias: Option<String>,
+    pub policy: String,
+}
+
+pub fn seed_policies() -> Result<Vec<HeartwoodSeedPolicy>, HeartwoodError> {
+    let profile = load_profile()?;
+    let policies = profile
+        .policies_mut()
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let items = policies
+        .seed_policies()
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?
+        .filter_map(|r| r.ok())
+        .map(|p| HeartwoodSeedPolicy {
+            rid: p.rid.to_string(),
+            policy: match p.policy {
+                radicle::node::policy::SeedingPolicy::Allow { .. } => "allow".to_string(),
+                radicle::node::policy::SeedingPolicy::Block => "block".to_string(),
+            },
+            scope: p.policy.scope().map(|s| s.to_string()),
+        })
+        .collect::<Vec<_>>();
+    Ok(items)
+}
+
+pub fn follow_policies() -> Result<Vec<HeartwoodFollowPolicy>, HeartwoodError> {
+    let profile = load_profile()?;
+    let policies = profile
+        .policies_mut()
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let items = policies
+        .follow_policies()
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?
+        .filter_map(|r| r.ok())
+        .map(|p| HeartwoodFollowPolicy {
+            nid: p.nid.to_string(),
+            alias: p.alias.map(|a| a.to_string()),
+            policy: match p.policy {
+                radicle::node::policy::Policy::Allow => "allow".to_string(),
+                radicle::node::policy::Policy::Block => "block".to_string(),
+            },
+        })
+        .collect::<Vec<_>>();
+    Ok(items)
+}
+
+pub fn is_seeding(rid: &str) -> Result<bool, HeartwoodError> {
+    let profile = load_profile()?;
+    let rid = RepoId::from_str(rid)
+        .map_err(|err| HeartwoodError::InvalidRepoId(err.to_string()))?;
+    let policies = profile
+        .policies_mut()
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    policies
+        .is_seeding(&rid)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))
+}
+
+pub fn is_following(nid: &str) -> Result<bool, HeartwoodError> {
+    let profile = load_profile()?;
+    let nid = NodeId::from_str(nid)
+        .map_err(|err| HeartwoodError::InvalidAddress(err.to_string()))?;
+    let policies = profile
+        .policies_mut()
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    policies
+        .is_following(&nid)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))
+}

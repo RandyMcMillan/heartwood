@@ -17,6 +17,8 @@ class HeartwoodStore: ObservableObject {
     @Published var repositories: [HeartwoodRepositoryInfo] = []
     @Published var repoIssueCounts: [String: HeartwoodIssueCounts] = [:]
     @Published var repoPatchCounts: [String: HeartwoodPatchCounts] = [:]
+    @Published var seedPolicies: [HeartwoodSeedPolicy] = []
+    @Published var followPolicies: [HeartwoodFollowPolicy] = []
     @Published var errorMessage: String?
     @Published var isLoading: Bool = false
 
@@ -44,6 +46,9 @@ class HeartwoodStore: ObservableObject {
                     repoPatchCounts[repo.rid] = patches
                 }
             }
+
+            seedPolicies = (try? heartwoodSeedPolicies()) ?? []
+            followPolicies = (try? heartwoodFollowPolicies()) ?? []
         } catch let error as HeartwoodError {
             switch error {
             case .Profile(let msg), .Storage(let msg), .InvalidRepoId(let msg),
@@ -349,6 +354,14 @@ struct ContentView: View {
 
                     if !store.repositories.isEmpty {
                         repositoriesCard(repos: store.repositories)
+                    }
+
+                    if !store.seedPolicies.isEmpty {
+                        seedPoliciesCard(policies: store.seedPolicies)
+                    }
+
+                    if !store.followPolicies.isEmpty {
+                        followPoliciesCard(policies: store.followPolicies)
                     }
 
                     lookupCard
@@ -807,6 +820,81 @@ struct ContentView: View {
                     Text("Repository not found")
                         .font(.subheadline)
                         .foregroundStyle(primaryText.opacity(0.62))
+                }
+            }
+        }
+    }
+
+    private func seedPoliciesCard(policies: [HeartwoodSeedPolicy]) -> some View {
+        glassCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Seeding Policies", systemImage: "leaf")
+                    .font(.headline)
+                    .foregroundStyle(accentText)
+
+                ForEach(policies, id: \.rid) { policy in
+                    HStack {
+                        Text(policy.rid)
+                            .font(.subheadline)
+                            .foregroundStyle(primaryText)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Text(policy.policy)
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(accentFill.opacity(colorScheme == .dark ? 0.18 : 0.12), in: Capsule())
+                            .foregroundStyle(accentText)
+                        if let scope = policy.scope {
+                            Text(scope)
+                                .font(.caption2)
+                                .foregroundStyle(primaryText.opacity(0.62))
+                        }
+                    }
+                    if policy.rid != policies.last?.rid {
+                        Divider()
+                            .overlay(accentFill.opacity(colorScheme == .dark ? 0.22 : 0.16))
+                    }
+                }
+            }
+        }
+    }
+
+    private func followPoliciesCard(policies: [HeartwoodFollowPolicy]) -> some View {
+        glassCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Following", systemImage: "person.2")
+                    .font(.headline)
+                    .foregroundStyle(accentText)
+
+                ForEach(policies, id: \.nid) { policy in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(policy.alias ?? policy.nid)
+                                .font(.subheadline)
+                                .foregroundStyle(primaryText)
+                                .lineLimit(1)
+                            if policy.alias != nil {
+                                Text(policy.nid)
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(primaryText.opacity(0.52))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                        }
+                        Spacer()
+                        Text(policy.policy)
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(accentFill.opacity(colorScheme == .dark ? 0.18 : 0.12), in: Capsule())
+                            .foregroundStyle(accentText)
+                    }
+                    if policy.nid != policies.last?.nid {
+                        Divider()
+                            .overlay(accentFill.opacity(colorScheme == .dark ? 0.22 : 0.16))
+                    }
                 }
             }
         }

@@ -70,6 +70,16 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 - [x] Add per-repo issue/patch count badges in Swift repository cards
 - [x] Add tests for invalid RID handling
 
+## Phase 9: Protocol gap — policy read access
+
+- [x] Add `heartwoodSeedPolicies()` returning `[HeartwoodSeedPolicy { rid, policy, scope }]`
+- [x] Add `heartwoodFollowPolicies()` returning `[HeartwoodFollowPolicy { nid, alias, policy }]`
+- [x] Add `heartwoodIsSeeding(rid)` boolean
+- [x] Add `heartwoodIsFollowing(nid)` boolean
+- [x] Reads from `profile.policies_mut()` (read methods available on `Store<T>`)
+- [x] Add Swift cards for seeding policies and followed nodes
+- [x] Add tests for shape and invalid input handling
+
 ## Suggested implementation order
 
 1. Metadata and normalization helpers
