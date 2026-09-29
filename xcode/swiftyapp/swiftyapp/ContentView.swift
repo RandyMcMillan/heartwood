@@ -309,6 +309,19 @@ struct ContentView: View {
                         pathsCard(paths: node.paths)
                     }
 
+                    if store.hasProfile && store.repositories.isEmpty {
+                        glassCard {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Label("Repositories", systemImage: "archivebox")
+                                    .font(.headline)
+                                    .foregroundStyle(accentText)
+                                Text("No repositories found.")
+                                    .font(.subheadline)
+                                    .foregroundStyle(primaryText.opacity(0.84))
+                            }
+                        }
+                    }
+
                     if !store.repositories.isEmpty {
                         repositoriesCard(repos: store.repositories)
                     }
@@ -321,6 +334,14 @@ struct ContentView: View {
             }
             .refreshable {
                 store.load()
+            }
+
+            if store.isLoading {
+                Color.black.opacity(0.15)
+                    .ignoresSafeArea()
+                ProgressView()
+                    .scaleEffect(1.5)
+                    .tint(accentFill)
             }
         }
         .onAppear(perform: store.load)
