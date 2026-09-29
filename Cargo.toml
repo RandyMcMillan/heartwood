@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "xcode/rustylib"]
 resolver = "2"
 
 [workspace.package]
