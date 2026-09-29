@@ -29,7 +29,9 @@ class HeartwoodStore: ObservableObject {
             errorMessage = nil
         } catch let error as HeartwoodError {
             switch error {
-            case .Profile(let msg), .Storage(let msg), .InvalidRepoId(let msg):
+            case .Profile(let msg), .Storage(let msg), .InvalidRepoId(let msg),
+                 .InvalidAlias(let msg), .InvalidRelay(let msg), .InvalidNetwork(let msg),
+                 .ConfigWrite(let msg):
                 errorMessage = msg
             }
         } catch {
@@ -55,6 +57,54 @@ class HeartwoodStore: ObservableObject {
 
     func normalizedAlias(_ input: String) -> String? {
         normalizeAlias(input: input)
+    }
+
+    func setAlias(_ value: String) {
+        do {
+            try heartwoodSetAlias(newAlias: value)
+            load()
+        } catch let error as HeartwoodError {
+            switch error {
+            case .InvalidAlias(let msg):
+                errorMessage = msg
+            default:
+                errorMessage = error.localizedDescription
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func setRelay(_ value: String) {
+        do {
+            try heartwoodSetRelay(mode: value)
+            load()
+        } catch let error as HeartwoodError {
+            switch error {
+            case .InvalidRelay(let msg):
+                errorMessage = msg
+            default:
+                errorMessage = error.localizedDescription
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func setNetwork(_ value: String) {
+        do {
+            try heartwoodSetNetwork(mode: value)
+            load()
+        } catch let error as HeartwoodError {
+            switch error {
+            case .InvalidNetwork(let msg):
+                errorMessage = msg
+            default:
+                errorMessage = error.localizedDescription
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 }
 
@@ -197,8 +247,37 @@ struct ContentView: View {
                 infoRow(label: "Alias", value: node.alias)
                 infoRow(label: "Node ID", value: node.nodeId)
                 infoRow(label: "User Agent", value: node.userAgent)
-                infoRow(label: "Network", value: node.network)
-                infoRow(label: "Relay", value: node.relay)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Network")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(primaryText.opacity(0.62))
+                    Picker("Network", selection: .init(
+                        get: { node.network },
+                        set: { store.setNetwork($0) }
+                    )) {
+                        Text("Main").tag("main")
+                        Text("Test").tag("test")
+                    }
+                    .pickerStyle(.segmented)
+                    .tint(accentFill)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Relay")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(primaryText.opacity(0.62))
+                    Picker("Relay", selection: .init(
+                        get: { node.relay },
+                        set: { store.setRelay($0) }
+                    )) {
+                        Text("Always").tag("always")
+                        Text("Never").tag("never")
+                        Text("Auto").tag("auto")
+                    }
+                    .pickerStyle(.segmented)
+                    .tint(accentFill)
+                }
 
                 if !node.externalAddresses.isEmpty {
                     infoRow(label: "External", value: node.externalAddresses.joined(separator: ", "))

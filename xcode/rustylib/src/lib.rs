@@ -97,6 +97,21 @@ pub fn normalize_alias(input: String) -> Option<String> {
     bridge::normalize_alias(&input)
 }
 
+#[uniffi::export]
+pub fn heartwood_set_alias(new_alias: String) -> Result<(), bridge::HeartwoodError> {
+    bridge::set_alias(&new_alias)
+}
+
+#[uniffi::export]
+pub fn heartwood_set_relay(mode: String) -> Result<(), bridge::HeartwoodError> {
+    bridge::set_relay(&mode)
+}
+
+#[uniffi::export]
+pub fn heartwood_set_network(mode: String) -> Result<(), bridge::HeartwoodError> {
+    bridge::set_network(&mode)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +231,55 @@ mod tests {
                     "none" | "present" | "needsMigration"
                 ));
             }
+        }
+    }
+
+    #[test]
+    fn test_set_alias_invalid() {
+        let result = heartwood_set_alias("".to_string());
+        assert!(
+            matches!(result, Err(bridge::HeartwoodError::InvalidAlias(_))),
+            "empty alias should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_set_relay_invalid() {
+        let result = heartwood_set_relay("fast".to_string());
+        assert!(
+            matches!(result, Err(bridge::HeartwoodError::InvalidRelay(_))),
+            "invalid relay mode should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_set_network_invalid() {
+        let result = heartwood_set_network("prod".to_string());
+        assert!(
+            matches!(result, Err(bridge::HeartwoodError::InvalidNetwork(_))),
+            "invalid network mode should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_set_relay_valid() {
+        for mode in ["always", "never", "auto"] {
+            let result = heartwood_set_relay(mode.to_string());
+            assert!(
+                result.is_ok() || matches!(result, Err(bridge::HeartwoodError::Profile(_))),
+                "valid relay mode '{}' should succeed or fail with profile error", mode
+            );
+        }
+    }
+
+    #[test]
+    fn test_set_network_valid() {
+        for mode in ["main", "test"] {
+            let result = heartwood_set_network(mode.to_string());
+            assert!(
+                result.is_ok() || matches!(result, Err(bridge::HeartwoodError::Profile(_))),
+                "valid network mode '{}' should succeed or fail with profile error", mode
+            );
         }
     }
 }

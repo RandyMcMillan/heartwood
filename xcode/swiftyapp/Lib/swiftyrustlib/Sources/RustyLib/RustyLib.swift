@@ -856,6 +856,14 @@ public enum HeartwoodError {
     )
     case InvalidRepoId(String
     )
+    case InvalidAlias(String
+    )
+    case InvalidRelay(String
+    )
+    case InvalidNetwork(String
+    )
+    case ConfigWrite(String
+    )
 }
 
 
@@ -879,6 +887,18 @@ public struct FfiConverterTypeHeartwoodError: FfiConverterRustBuffer {
             try FfiConverterString.read(from: &buf)
             )
         case 3: return .InvalidRepoId(
+            try FfiConverterString.read(from: &buf)
+            )
+        case 4: return .InvalidAlias(
+            try FfiConverterString.read(from: &buf)
+            )
+        case 5: return .InvalidRelay(
+            try FfiConverterString.read(from: &buf)
+            )
+        case 6: return .InvalidNetwork(
+            try FfiConverterString.read(from: &buf)
+            )
+        case 7: return .ConfigWrite(
             try FfiConverterString.read(from: &buf)
             )
 
@@ -905,6 +925,26 @@ public struct FfiConverterTypeHeartwoodError: FfiConverterRustBuffer {
         
         case let .InvalidRepoId(v1):
             writeInt(&buf, Int32(3))
+            FfiConverterString.write(v1, into: &buf)
+            
+        
+        case let .InvalidAlias(v1):
+            writeInt(&buf, Int32(4))
+            FfiConverterString.write(v1, into: &buf)
+            
+        
+        case let .InvalidRelay(v1):
+            writeInt(&buf, Int32(5))
+            FfiConverterString.write(v1, into: &buf)
+            
+        
+        case let .InvalidNetwork(v1):
+            writeInt(&buf, Int32(6))
+            FfiConverterString.write(v1, into: &buf)
+            
+        
+        case let .ConfigWrite(v1):
+            writeInt(&buf, Int32(7))
             FfiConverterString.write(v1, into: &buf)
             
         }
@@ -1084,6 +1124,24 @@ public func heartwoodRepositoryList()throws  -> [HeartwoodRepositoryInfo] {
     )
 })
 }
+public func heartwoodSetAlias(newAlias: String)throws  {try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_set_alias(
+        FfiConverterString.lower(newAlias),$0
+    )
+}
+}
+public func heartwoodSetNetwork(mode: String)throws  {try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_set_network(
+        FfiConverterString.lower(mode),$0
+    )
+}
+}
+public func heartwoodSetRelay(mode: String)throws  {try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_set_relay(
+        FfiConverterString.lower(mode),$0
+    )
+}
+}
 public func heartwoodVersion() -> String {
     return try!  FfiConverterString.lift(try! rustCall() {
     uniffi_rustylib_fn_func_heartwood_version($0
@@ -1160,6 +1218,15 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_repository_list() != 26992) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_set_alias() != 50113) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_set_network() != 47236) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_set_relay() != 6716) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_version() != 58832) {

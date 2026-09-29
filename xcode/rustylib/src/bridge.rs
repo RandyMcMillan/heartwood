@@ -56,6 +56,14 @@ pub enum HeartwoodError {
     Storage(String),
     #[error("invalid repo id: {0}")]
     InvalidRepoId(String),
+    #[error("invalid alias: {0}")]
+    InvalidAlias(String),
+    #[error("invalid relay mode: {0}")]
+    InvalidRelay(String),
+    #[error("invalid network mode: {0}")]
+    InvalidNetwork(String),
+    #[error("config write error: {0}")]
+    ConfigWrite(String),
 }
 
 pub fn load_profile() -> Result<profile::Profile, HeartwoodError> {
@@ -160,4 +168,47 @@ pub fn normalize_node_id(input: &str) -> Option<String> {
 
 pub fn normalize_alias(input: &str) -> Option<String> {
     Alias::from_str(input).ok().map(|alias| alias.to_string())
+}
+
+pub fn set_alias(new_alias: &str) -> Result<(), HeartwoodError> {
+    let profile = load_profile()?;
+    let alias = Alias::from_str(new_alias)
+        .map_err(|err| HeartwoodError::InvalidAlias(err.to_string()))?;
+    let mut config = profile.config.clone();
+    config.node.alias = alias;
+    config
+        .write(profile.home().config().as_path())
+        .map_err(|err| HeartwoodError::ConfigWrite(err.to_string()))?;
+    Ok(())
+}
+
+pub fn set_relay(mode: &str) -> Result<(), HeartwoodError> {
+    let profile = load_profile()?;
+    let relay = match mode {
+        "always" => node::config::Relay::Always,
+        "never" => node::config::Relay::Never,
+        "auto" => node::config::Relay::Auto,
+        _ => return Err(HeartwoodError::InvalidRelay(mode.to_string())),
+    };
+    let mut config = profile.config.clone();
+    config.node.relay = relay;
+    config
+        .write(profile.home().config().as_path())
+        .map_err(|err| HeartwoodError::ConfigWrite(err.to_string()))?;
+    Ok(())
+}
+
+pub fn set_network(mode: &str) -> Result<(), HeartwoodError> {
+    let profile = load_profile()?;
+    let network = match mode {
+        "main" => node::config::Network::Main,
+        "test" => node::config::Network::Test,
+        _ => return Err(HeartwoodError::InvalidNetwork(mode.to_string())),
+    };
+    let mut config = profile.config.clone();
+    config.node.network = network;
+    config
+        .write(profile.home().config().as_path())
+        .map_err(|err| HeartwoodError::ConfigWrite(err.to_string()))?;
+    Ok(())
 }
