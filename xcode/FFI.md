@@ -153,6 +153,15 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 7. CI coverage and stabilization
 8. Node runtime status and routing summary
 9. COB read access (issues and patches)
+10. Policy read access (seeding and following)
+11. Network sessions and per-repo seed count
+12. Repository remotes and branches
+13. Notifications
+14. Alias lookup
+15. Repository commit log
+16. Node inventory
+17. Repository size
+18. Issue and patch lists
 
 ## Notes
 
@@ -160,3 +169,12 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 - Favor read-only APIs before write APIs.
 - Treat generated UniFFI and Xcode outputs as derived artifacts.
 - Use this file as the running checklist for the Xcode FFI work.
+
+## Remaining advanced gaps (not yet implemented)
+
+- Repository creation/init (`rad init` equivalent)
+- Network operations (clone, fetch, sync — require running node daemon)
+- Node daemon control (start/stop — not feasible on iOS)
+- SSH key management (`rad auth` equivalent)
+- COB write operations (create/edit issues and patches — requires signer)
+- Repository deletion/cleanup
