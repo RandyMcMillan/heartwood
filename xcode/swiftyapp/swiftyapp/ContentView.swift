@@ -39,6 +39,10 @@ class HeartwoodStore: ObservableObject {
         }
     }
 
+    func dismissError() {
+        errorMessage = nil
+    }
+
     func repository(byRid rid: String) -> HeartwoodRepositoryInfo? {
         do {
             return try heartwoodRepository(rid: rid)
@@ -196,13 +200,23 @@ struct ContentView: View {
 
                     if let error = store.errorMessage {
                         glassCard {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Label("Error", systemImage: "exclamationmark.triangle.fill")
-                                    .font(.headline)
-                                    .foregroundStyle(accentText)
-                                Text(error)
-                                    .font(.subheadline)
-                                    .foregroundStyle(primaryText.opacity(0.84))
+                            HStack(alignment: .top, spacing: 12) {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Label("Error", systemImage: "exclamationmark.triangle.fill")
+                                        .font(.headline)
+                                        .foregroundStyle(accentText)
+                                    Text(error)
+                                        .font(.subheadline)
+                                        .foregroundStyle(primaryText.opacity(0.84))
+                                }
+                                Spacer()
+                                Button {
+                                    store.dismissError()
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.title3)
+                                        .foregroundStyle(accentFill.opacity(0.7))
+                                }
                             }
                         }
                     }
@@ -221,6 +235,9 @@ struct ContentView: View {
                     bridgeCard
                 }
                 .padding(20)
+            }
+            .refreshable {
+                store.load()
             }
         }
         .onAppear(perform: store.load)
