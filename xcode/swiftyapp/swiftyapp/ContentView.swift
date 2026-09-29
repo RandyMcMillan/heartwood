@@ -106,11 +106,44 @@ class HeartwoodStore: ObservableObject {
             errorMessage = error.localizedDescription
         }
     }
+
+    func addExternalAddress(_ value: String) {
+        do {
+            try heartwoodAddExternalAddress(address: value)
+            load()
+        } catch let error as HeartwoodError {
+            switch error {
+            case .InvalidAddress(let msg):
+                errorMessage = msg
+            default:
+                errorMessage = error.localizedDescription
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func removeExternalAddress(_ value: String) {
+        do {
+            try heartwoodRemoveExternalAddress(address: value)
+            load()
+        } catch let error as HeartwoodError {
+            switch error {
+            case .InvalidAddress(let msg):
+                errorMessage = msg
+            default:
+                errorMessage = error.localizedDescription
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
 }
 
 struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var store = HeartwoodStore()
+    @State private var newAddress = ""
 
     var body: some View {
         ZStack {
@@ -280,7 +313,39 @@ struct ContentView: View {
                 }
 
                 if !node.externalAddresses.isEmpty {
-                    infoRow(label: "External", value: node.externalAddresses.joined(separator: ", "))
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("External")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(primaryText.opacity(0.62))
+                        ForEach(node.externalAddresses, id: \.self) { addr in
+                            HStack {
+                                Text(addr)
+                                    .font(.subheadline)
+                                    .foregroundStyle(primaryText.opacity(0.92))
+                                Spacer()
+                                Button {
+                                    store.removeExternalAddress(addr)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundStyle(accentFill.opacity(0.7))
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    TextField("host:port", text: $newAddress)
+                        .font(.subheadline)
+                        .textFieldStyle(.roundedBorder)
+                    Button {
+                        store.addExternalAddress(newAddress)
+                        newAddress = ""
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .foregroundStyle(accentFill)
+                    }
+                    .disabled(newAddress.isEmpty)
                 }
 
                 if !node.connectAddresses.isEmpty {
