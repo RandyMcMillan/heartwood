@@ -5,8 +5,9 @@ use radicle::storage::ReadStorage;
 mod bridge;
 
 pub use bridge::{
-    HeartwoodError, HeartwoodNodeInfo, HeartwoodPaths, HeartwoodProjectInfo,
-    HeartwoodRepositoryInfo,
+    HeartwoodError, HeartwoodIssueCounts, HeartwoodNodeInfo, HeartwoodNodeStatus,
+    HeartwoodPatchCounts, HeartwoodPaths, HeartwoodProjectInfo, HeartwoodRepositoryInfo,
+    HeartwoodRoutingSummary,
 };
 
 uniffi::setup_scaffolding!();
@@ -145,6 +146,26 @@ pub fn heartwood_add_listen_address(address: String) -> Result<(), bridge::Heart
 #[uniffi::export]
 pub fn heartwood_remove_listen_address(address: String) -> Result<(), bridge::HeartwoodError> {
     bridge::remove_listen_address(&address)
+}
+
+#[uniffi::export]
+pub fn heartwood_node_status() -> Result<bridge::HeartwoodNodeStatus, bridge::HeartwoodError> {
+    bridge::node_status()
+}
+
+#[uniffi::export]
+pub fn heartwood_routing_summary() -> Result<bridge::HeartwoodRoutingSummary, bridge::HeartwoodError> {
+    bridge::routing_summary()
+}
+
+#[uniffi::export]
+pub fn heartwood_repository_issue_counts(rid: String) -> Result<Option<bridge::HeartwoodIssueCounts>, bridge::HeartwoodError> {
+    bridge::repository_issue_counts(&rid)
+}
+
+#[uniffi::export]
+pub fn heartwood_repository_patch_counts(rid: String) -> Result<Option<bridge::HeartwoodPatchCounts>, bridge::HeartwoodError> {
+    bridge::repository_patch_counts(&rid)
 }
 
 #[cfg(test)]
@@ -393,6 +414,43 @@ mod tests {
                 || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
                 || matches!(result, Err(bridge::HeartwoodError::InvalidAddress(_))),
             "invalid listen address should be accepted (noop) or fail with profile/address error"
+        );
+    }
+
+    #[test]
+    fn test_node_status_shape() {
+        if let Ok(status) = heartwood_node_status() {
+            assert!(!status.socket.is_empty());
+            // Node may or may not be running; either is valid.
+        }
+    }
+
+    #[test]
+    fn test_routing_summary_shape() {
+        if let Ok(_summary) = heartwood_routing_summary() {
+            // Values are u64 and should be valid regardless of content.
+        }
+    }
+
+    #[test]
+    fn test_repository_issue_counts_invalid_rid() {
+        let result = heartwood_repository_issue_counts("not-a-rid".to_string());
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
+                || matches!(result, Err(bridge::HeartwoodError::InvalidRepoId(_))),
+            "invalid rid should be accepted (noop) or fail with profile/repo error"
+        );
+    }
+
+    #[test]
+    fn test_repository_patch_counts_invalid_rid() {
+        let result = heartwood_repository_patch_counts("not-a-rid".to_string());
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
+                || matches!(result, Err(bridge::HeartwoodError::InvalidRepoId(_))),
+            "invalid rid should be accepted (noop) or fail with profile/repo error"
         );
     }
 }

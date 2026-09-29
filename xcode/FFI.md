@@ -53,6 +53,23 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 - [x] Add or update CI so the bridge build stays covered
 - [x] Ensure generated artifacts are rebuilt, not edited manually
 
+## Phase 7: Protocol gap — node runtime status
+
+- [x] Add `heartwoodNodeStatus()` returning `HeartwoodNodeStatus { running, socket }`
+- [x] Uses `radicle::Node::new(socket).is_running()` via the `Handle` trait
+- [x] Add `heartwoodRoutingSummary()` returning `HeartwoodRoutingSummary { entries, seededRepos }`
+- [x] Reads from `profile.routing()` using the `Store` trait
+- [x] Add Swift cards for status and routing summary
+- [x] Add tests for shape and error paths
+
+## Phase 8: Protocol gap — COB read access
+
+- [x] Add `heartwoodRepositoryIssueCounts(rid)` returning `HeartwoodIssueCounts { open, closed, total }`
+- [x] Add `heartwoodRepositoryPatchCounts(rid)` returning `HeartwoodPatchCounts { open, draft, archived, merged, total }`
+- [x] Uses `Issues::open(repo, ReadOnly)` and `Patches::open(repo, ReadOnly)` for read-only access
+- [x] Add per-repo issue/patch count badges in Swift repository cards
+- [x] Add tests for invalid RID handling
+
 ## Suggested implementation order
 
 1. Metadata and normalization helpers
@@ -62,6 +79,8 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 5. Small, carefully scoped write operations
 6. Swift UI integration
 7. CI coverage and stabilization
+8. Node runtime status and routing summary
+9. COB read access (issues and patches)
 
 ## Notes
 

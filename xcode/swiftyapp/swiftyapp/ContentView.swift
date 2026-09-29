@@ -12,7 +12,11 @@ class HeartwoodStore: ObservableObject {
     @Published var version: String = ""
     @Published var commit: String = ""
     @Published var nodeInfo: HeartwoodNodeInfo?
+    @Published var nodeStatus: HeartwoodNodeStatus?
+    @Published var routingSummary: HeartwoodRoutingSummary?
     @Published var repositories: [HeartwoodRepositoryInfo] = []
+    @Published var repoIssueCounts: [String: HeartwoodIssueCounts] = [:]
+    @Published var repoPatchCounts: [String: HeartwoodPatchCounts] = [:]
     @Published var errorMessage: String?
     @Published var isLoading: Bool = false
 
@@ -25,8 +29,21 @@ class HeartwoodStore: ObservableObject {
 
         do {
             nodeInfo = try heartwoodNodeInfo()
+            nodeStatus = try heartwoodNodeStatus()
+            routingSummary = try heartwoodRoutingSummary()
             repositories = try heartwoodRepositoryList()
             errorMessage = nil
+
+            repoIssueCounts.removeAll()
+            repoPatchCounts.removeAll()
+            for repo in repositories {
+                if let issues = try? heartwoodRepositoryIssueCounts(rid: repo.rid) {
+                    repoIssueCounts[repo.rid] = issues
+                }
+                if let patches = try? heartwoodRepositoryPatchCounts(rid: repo.rid) {
+                    repoPatchCounts[repo.rid] = patches
+                }
+            }
         } catch let error as HeartwoodError {
             switch error {
             case .Profile(let msg), .Storage(let msg), .InvalidRepoId(let msg),
@@ -309,6 +326,14 @@ struct ContentView: View {
                         pathsCard(paths: node.paths)
                     }
 
+                    if let status = store.nodeStatus {
+                        statusCard(status: status)
+                    }
+
+                    if let routing = store.routingSummary {
+                        routingCard(routing: routing)
+                    }
+
                     if store.hasProfile && store.repositories.isEmpty {
                         glassCard {
                             VStack(alignment: .leading, spacing: 10) {
@@ -578,6 +603,57 @@ struct ContentView: View {
         }
     }
 
+    private func statusCard(status: HeartwoodNodeStatus) -> some View {
+        glassCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Status", systemImage: "bolt.horizontal")
+                    .font(.headline)
+                    .foregroundStyle(accentText)
+
+                HStack {
+                    Image(systemName: status.running ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .foregroundStyle(status.running ? .green : .red)
+                    Text(status.running ? "Running" : "Not Running")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(primaryText)
+                    Spacer()
+                }
+
+                infoRow(label: "Socket", value: status.socket)
+            }
+        }
+    }
+
+    private func routingCard(routing: HeartwoodRoutingSummary) -> some View {
+        glassCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Routing", systemImage: "arrow.3.trianglepath")
+                    .font(.headline)
+                    .foregroundStyle(accentText)
+
+                HStack(spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("\(routing.entries)")
+                            .font(.title3.weight(.bold).monospacedDigit())
+                            .foregroundStyle(accentText)
+                        Text("Entries")
+                            .font(.caption)
+                            .foregroundStyle(primaryText.opacity(0.62))
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("\(routing.seededRepos)")
+                            .font(.title3.weight(.bold).monospacedDigit())
+                            .foregroundStyle(accentText)
+                        Text("Seeded Repos")
+                            .font(.caption)
+                            .foregroundStyle(primaryText.opacity(0.62))
+                    }
+                    Spacer()
+                }
+            }
+        }
+    }
+
     private func pathsCard(paths: HeartwoodPaths) -> some View {
         glassCard {
             VStack(alignment: .leading, spacing: 10) {
@@ -640,6 +716,30 @@ struct ContentView: View {
                         Text("refs: \(repo.refsState)")
                             .font(.caption2)
                             .foregroundStyle(primaryText.opacity(0.52))
+
+                        if let issues = store.repoIssueCounts[repo.rid] {
+                            HStack(spacing: 12) {
+                                Label("\(issues.open)", systemImage: "exclamationmark.circle")
+                                Label("\(issues.closed)", systemImage: "checkmark.circle")
+                            }
+                            .font(.caption2)
+                            .foregroundStyle(primaryText.opacity(0.52))
+                        }
+
+                        if let patches = store.repoPatchCounts[repo.rid] {
+                            HStack(spacing: 12) {
+                                Label("\(patches.open)", systemImage: "envelope.open")
+                                Label("\(patches.merged)", systemImage: "checkmark.seal")
+                                if patches.draft > 0 {
+                                    Label("\(patches.draft)", systemImage: "doc")
+                                }
+                                if patches.archived > 0 {
+                                    Label("\(patches.archived)", systemImage: "archivebox")
+                                }
+                            }
+                            .font(.caption2)
+                            .foregroundStyle(primaryText.opacity(0.52))
+                        }
                     }
                     .padding(.vertical, 8)
                     .padding(.horizontal, 12)

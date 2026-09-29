@@ -4,9 +4,10 @@ use radicle::identity::Doc;
 use radicle::identity::doc::{GetPayload, PayloadId};
 use radicle::identity::project::Project;
 use radicle::node::{self, Alias, NodeId};
+use radicle::node::{Handle, routing::Store as RoutingStore};
 use radicle::prelude::RepoId;
 use radicle::profile;
-use radicle::storage::{RepositoryInfo, SignedRefsInfo};
+use radicle::storage::{ReadStorage, RepositoryInfo, SignedRefsInfo};
 
 #[derive(Debug, uniffi::Record)]
 pub struct HeartwoodPaths {
@@ -311,4 +312,109 @@ pub fn remove_listen_address(address: &str) -> Result<(), HeartwoodError> {
         .write(profile.home().config().as_path())
         .map_err(|err| HeartwoodError::ConfigWrite(err.to_string()))?;
     Ok(())
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct HeartwoodNodeStatus {
+    pub running: bool,
+    pub socket: String,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct HeartwoodRoutingSummary {
+    pub entries: u64,
+    pub seeded_repos: u64,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct HeartwoodIssueCounts {
+    pub open: u64,
+    pub closed: u64,
+    pub total: u64,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct HeartwoodPatchCounts {
+    pub open: u64,
+    pub draft: u64,
+    pub archived: u64,
+    pub merged: u64,
+    pub total: u64,
+}
+
+pub fn node_status() -> Result<HeartwoodNodeStatus, HeartwoodError> {
+    let profile = load_profile()?;
+    let socket = profile.socket_from_env();
+    let running = radicle::Node::new(&socket).is_running();
+    Ok(HeartwoodNodeStatus {
+        running,
+        socket: socket.display().to_string(),
+    })
+}
+
+pub fn routing_summary() -> Result<HeartwoodRoutingSummary, HeartwoodError> {
+    let profile = load_profile()?;
+    let routing = profile
+        .routing()
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let entries = routing
+        .len()
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))? as u64;
+
+    // Count unique seeded repos by iterating entries
+    let mut repos = std::collections::HashSet::new();
+    if let Ok(iter) = routing.entries() {
+        for (rid, _nid) in iter {
+            repos.insert(rid);
+        }
+    }
+
+    Ok(HeartwoodRoutingSummary {
+        entries,
+        seeded_repos: repos.len() as u64,
+    })
+}
+
+pub fn repository_issue_counts(rid: &str) -> Result<Option<HeartwoodIssueCounts>, HeartwoodError> {
+    let profile = load_profile()?;
+    let rid = RepoId::from_str(rid)
+        .map_err(|err| HeartwoodError::InvalidRepoId(err.to_string()))?;
+    let repo = profile
+        .storage
+        .repository(rid)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+
+    let counts = radicle::cob::issue::Issues::open(&repo, radicle::cob::store::access::ReadOnly)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?
+        .counts()
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+
+    Ok(Some(HeartwoodIssueCounts {
+        open: counts.open as u64,
+        closed: counts.closed as u64,
+        total: counts.total() as u64,
+    }))
+}
+
+pub fn repository_patch_counts(rid: &str) -> Result<Option<HeartwoodPatchCounts>, HeartwoodError> {
+    let profile = load_profile()?;
+    let rid = RepoId::from_str(rid)
+        .map_err(|err| HeartwoodError::InvalidRepoId(err.to_string()))?;
+    let repo = profile
+        .storage
+        .repository(rid)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+
+    let counts = radicle::cob::patch::Patches::open(&repo, radicle::cob::store::access::ReadOnly)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?
+        .counts()
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+
+    Ok(Some(HeartwoodPatchCounts {
+        open: counts.open as u64,
+        draft: counts.draft as u64,
+        archived: counts.archived as u64,
+        merged: counts.merged as u64,
+        total: counts.total() as u64,
+    }))
 }
