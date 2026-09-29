@@ -498,3 +498,48 @@ pub fn is_following(nid: &str) -> Result<bool, HeartwoodError> {
         .is_following(&nid)
         .map_err(|err| HeartwoodError::Storage(err.to_string()))
 }
+
+#[derive(Debug, uniffi::Record)]
+pub struct HeartwoodSession {
+    pub nid: String,
+    pub link: String,
+    pub addr: String,
+    pub state: String,
+}
+
+pub fn node_sessions() -> Result<Vec<HeartwoodSession>, HeartwoodError> {
+    let profile = load_profile()?;
+    let socket = profile.socket_from_env();
+    let node = radicle::Node::new(&socket);
+
+    if !node.is_running() {
+        return Ok(Vec::new());
+    }
+
+    let sessions = node
+        .sessions()
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+
+    Ok(sessions
+        .into_iter()
+        .map(|s| HeartwoodSession {
+            nid: s.nid.to_string(),
+            link: s.link.to_string(),
+            addr: s.addr.to_string(),
+            state: s.state.to_string(),
+        })
+        .collect())
+}
+
+pub fn repository_seed_count(rid: &str) -> Result<u64, HeartwoodError> {
+    let profile = load_profile()?;
+    let rid = RepoId::from_str(rid)
+        .map_err(|err| HeartwoodError::InvalidRepoId(err.to_string()))?;
+    let routing = profile
+        .routing()
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let count = routing
+        .count(&rid)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    Ok(count as u64)
+}

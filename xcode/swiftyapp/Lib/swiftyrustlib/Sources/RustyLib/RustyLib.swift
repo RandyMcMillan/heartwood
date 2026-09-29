@@ -1338,6 +1338,88 @@ public func FfiConverterTypeHeartwoodSeedPolicy_lower(_ value: HeartwoodSeedPoli
 }
 
 
+public struct HeartwoodSession {
+    public var nid: String
+    public var link: String
+    public var addr: String
+    public var state: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(nid: String, link: String, addr: String, state: String) {
+        self.nid = nid
+        self.link = link
+        self.addr = addr
+        self.state = state
+    }
+}
+
+
+
+extension HeartwoodSession: Equatable, Hashable {
+    public static func ==(lhs: HeartwoodSession, rhs: HeartwoodSession) -> Bool {
+        if lhs.nid != rhs.nid {
+            return false
+        }
+        if lhs.link != rhs.link {
+            return false
+        }
+        if lhs.addr != rhs.addr {
+            return false
+        }
+        if lhs.state != rhs.state {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(nid)
+        hasher.combine(link)
+        hasher.combine(addr)
+        hasher.combine(state)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHeartwoodSession: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HeartwoodSession {
+        return
+            try HeartwoodSession(
+                nid: FfiConverterString.read(from: &buf), 
+                link: FfiConverterString.read(from: &buf), 
+                addr: FfiConverterString.read(from: &buf), 
+                state: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HeartwoodSession, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.nid, into: &buf)
+        FfiConverterString.write(value.link, into: &buf)
+        FfiConverterString.write(value.addr, into: &buf)
+        FfiConverterString.write(value.state, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHeartwoodSession_lift(_ buf: RustBuffer) throws -> HeartwoodSession {
+    return try FfiConverterTypeHeartwoodSession.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHeartwoodSession_lower(_ value: HeartwoodSession) -> RustBuffer {
+    return FfiConverterTypeHeartwoodSession.lower(value)
+}
+
+
 public enum HeartwoodError {
 
     
@@ -1681,6 +1763,31 @@ fileprivate struct FfiConverterSequenceTypeHeartwoodSeedPolicy: FfiConverterRust
         return seq
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeHeartwoodSession: FfiConverterRustBuffer {
+    typealias SwiftType = [HeartwoodSession]
+
+    public static func write(_ value: [HeartwoodSession], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeHeartwoodSession.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [HeartwoodSession] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [HeartwoodSession]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeHeartwoodSession.read(from: &buf))
+        }
+        return seq
+    }
+}
 public func heartwoodAddConnectAddress(address: String)throws  {try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_add_connect_address(
         FfiConverterString.lower(address),$0
@@ -1743,6 +1850,12 @@ public func heartwoodNodeInfo()throws  -> HeartwoodNodeInfo {
     )
 })
 }
+public func heartwoodNodeSessions()throws  -> [HeartwoodSession] {
+    return try  FfiConverterSequenceTypeHeartwoodSession.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_node_sessions($0
+    )
+})
+}
 public func heartwoodNodeStatus()throws  -> HeartwoodNodeStatus {
     return try  FfiConverterTypeHeartwoodNodeStatus.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_node_status($0
@@ -1802,6 +1915,13 @@ public func heartwoodRepositoryList()throws  -> [HeartwoodRepositoryInfo] {
 public func heartwoodRepositoryPatchCounts(rid: String)throws  -> HeartwoodPatchCounts? {
     return try  FfiConverterOptionTypeHeartwoodPatchCounts.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_repository_patch_counts(
+        FfiConverterString.lower(rid),$0
+    )
+})
+}
+public func heartwoodRepositorySeedCount(rid: String)throws  -> UInt64 {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_repository_seed_count(
         FfiConverterString.lower(rid),$0
     )
 })
@@ -1923,6 +2043,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_rustylib_checksum_func_heartwood_node_info() != 33573) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_rustylib_checksum_func_heartwood_node_sessions() != 57868) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_rustylib_checksum_func_heartwood_node_status() != 6548) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1951,6 +2074,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_repository_patch_counts() != 22642) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_repository_seed_count() != 49650) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_routing_summary() != 40651) {

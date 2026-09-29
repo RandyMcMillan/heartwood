@@ -80,6 +80,15 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 - [x] Add Swift cards for seeding policies and followed nodes
 - [x] Add tests for shape and invalid input handling
 
+## Phase 10: Protocol gap — network sessions and per-repo seed count
+
+- [x] Add `heartwoodNodeSessions()` returning `[HeartwoodSession { nid, link, addr, state }]`
+- [x] Returns empty list when node is not running (graceful degradation)
+- [x] Add `heartwoodRepositorySeedCount(rid)` returning `u64`
+- [x] Uses `routing.count(&rid)` for efficient seed count lookup
+- [x] Add Swift sessions card and per-repo seed count badge
+- [x] Add tests for shape and invalid input handling
+
 ## Suggested implementation order
 
 1. Metadata and normalization helpers

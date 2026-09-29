@@ -7,7 +7,7 @@ mod bridge;
 pub use bridge::{
     HeartwoodError, HeartwoodFollowPolicy, HeartwoodIssueCounts, HeartwoodNodeInfo,
     HeartwoodNodeStatus, HeartwoodPatchCounts, HeartwoodPaths, HeartwoodProjectInfo,
-    HeartwoodRepositoryInfo, HeartwoodRoutingSummary, HeartwoodSeedPolicy,
+    HeartwoodRepositoryInfo, HeartwoodRoutingSummary, HeartwoodSeedPolicy, HeartwoodSession,
 };
 
 uniffi::setup_scaffolding!();
@@ -186,6 +186,16 @@ pub fn heartwood_is_seeding(rid: String) -> Result<bool, bridge::HeartwoodError>
 #[uniffi::export]
 pub fn heartwood_is_following(nid: String) -> Result<bool, bridge::HeartwoodError> {
     bridge::is_following(&nid)
+}
+
+#[uniffi::export]
+pub fn heartwood_node_sessions() -> Result<Vec<bridge::HeartwoodSession>, bridge::HeartwoodError> {
+    bridge::node_sessions()
+}
+
+#[uniffi::export]
+pub fn heartwood_repository_seed_count(rid: String) -> Result<u64, bridge::HeartwoodError> {
+    bridge::repository_seed_count(&rid)
 }
 
 #[cfg(test)]
@@ -513,6 +523,28 @@ mod tests {
                 || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
                 || matches!(result, Err(bridge::HeartwoodError::InvalidAddress(_))),
             "invalid nid should be accepted (noop) or fail with profile/address error"
+        );
+    }
+
+    #[test]
+    fn test_node_sessions_shape() {
+        if let Ok(sessions) = heartwood_node_sessions() {
+            for s in sessions {
+                assert!(!s.nid.is_empty());
+                assert!(matches!(s.link.as_str(), "outbound" | "inbound"));
+                assert!(!s.state.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn test_repository_seed_count_invalid_rid() {
+        let result = heartwood_repository_seed_count("not-a-rid".to_string());
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
+                || matches!(result, Err(bridge::HeartwoodError::InvalidRepoId(_))),
+            "invalid rid should be accepted (noop) or fail with profile/repo error"
         );
     }
 }

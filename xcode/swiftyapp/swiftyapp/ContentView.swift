@@ -19,6 +19,8 @@ class HeartwoodStore: ObservableObject {
     @Published var repoPatchCounts: [String: HeartwoodPatchCounts] = [:]
     @Published var seedPolicies: [HeartwoodSeedPolicy] = []
     @Published var followPolicies: [HeartwoodFollowPolicy] = []
+    @Published var nodeSessions: [HeartwoodSession] = []
+    @Published var repoSeedCounts: [String: UInt64] = [:]
     @Published var errorMessage: String?
     @Published var isLoading: Bool = false
 
@@ -49,6 +51,14 @@ class HeartwoodStore: ObservableObject {
 
             seedPolicies = (try? heartwoodSeedPolicies()) ?? []
             followPolicies = (try? heartwoodFollowPolicies()) ?? []
+            nodeSessions = (try? heartwoodNodeSessions()) ?? []
+
+            repoSeedCounts.removeAll()
+            for repo in repositories {
+                if let count = try? heartwoodRepositorySeedCount(rid: repo.rid) {
+                    repoSeedCounts[repo.rid] = count
+                }
+            }
         } catch let error as HeartwoodError {
             switch error {
             case .Profile(let msg), .Storage(let msg), .InvalidRepoId(let msg),
@@ -337,6 +347,10 @@ struct ContentView: View {
 
                     if let routing = store.routingSummary {
                         routingCard(routing: routing)
+                    }
+
+                    if !store.nodeSessions.isEmpty {
+                        sessionsCard(sessions: store.nodeSessions)
                     }
 
                     if store.hasProfile && store.repositories.isEmpty {
@@ -730,6 +744,12 @@ struct ContentView: View {
                             .font(.caption2)
                             .foregroundStyle(primaryText.opacity(0.52))
 
+                        if let seeds = store.repoSeedCounts[repo.rid] {
+                            Label("\(seeds) seed\(seeds == 1 ? "" : "s")", systemImage: "network")
+                                .font(.caption2)
+                                .foregroundStyle(primaryText.opacity(0.52))
+                        }
+
                         if let issues = store.repoIssueCounts[repo.rid] {
                             HStack(spacing: 12) {
                                 Label("\(issues.open)", systemImage: "exclamationmark.circle")
@@ -820,6 +840,42 @@ struct ContentView: View {
                     Text("Repository not found")
                         .font(.subheadline)
                         .foregroundStyle(primaryText.opacity(0.62))
+                }
+            }
+        }
+    }
+
+    private func sessionsCard(sessions: [HeartwoodSession]) -> some View {
+        glassCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Sessions", systemImage: "network")
+                    .font(.headline)
+                    .foregroundStyle(accentText)
+
+                ForEach(sessions, id: \.nid) { session in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(session.nid)
+                                .font(.subheadline)
+                                .foregroundStyle(primaryText)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Text("\(session.link) — \(session.addr)")
+                                .font(.caption2)
+                                .foregroundStyle(primaryText.opacity(0.52))
+                        }
+                        Spacer()
+                        Text(session.state)
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(accentFill.opacity(colorScheme == .dark ? 0.18 : 0.12), in: Capsule())
+                            .foregroundStyle(accentText)
+                    }
+                    if session.nid != sessions.last?.nid {
+                        Divider()
+                            .overlay(accentFill.opacity(colorScheme == .dark ? 0.22 : 0.16))
+                    }
                 }
             }
         }
