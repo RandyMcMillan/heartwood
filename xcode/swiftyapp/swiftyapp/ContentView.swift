@@ -144,6 +144,8 @@ struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var store = HeartwoodStore()
     @State private var newAddress = ""
+    @State private var lookupRid = ""
+    @State private var lookedUpRepo: HeartwoodRepositoryInfo?
 
     var body: some View {
         ZStack {
@@ -213,6 +215,8 @@ struct ContentView: View {
                     if !store.repositories.isEmpty {
                         repositoriesCard(repos: store.repositories)
                     }
+
+                    lookupCard
 
                     bridgeCard
                 }
@@ -454,6 +458,64 @@ struct ContentView: View {
                         Divider()
                             .overlay(accentFill.opacity(colorScheme == .dark ? 0.22 : 0.16))
                     }
+                }
+            }
+        }
+    }
+
+    private var lookupCard: some View {
+        glassCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Lookup", systemImage: "magnifyingglass")
+                    .font(.headline)
+                    .foregroundStyle(accentText)
+
+                HStack(spacing: 8) {
+                    TextField("rad:z…", text: $lookupRid)
+                        .font(.subheadline)
+                        .textFieldStyle(.roundedBorder)
+                    Button {
+                        lookedUpRepo = store.repository(byRid: lookupRid)
+                    } label: {
+                        Image(systemName: "magnifyingglass.circle.fill")
+                            .foregroundStyle(accentFill)
+                    }
+                    .disabled(lookupRid.isEmpty)
+                }
+
+                if let repo = lookedUpRepo {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(repo.project?.name ?? repo.rid)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(primaryText)
+                            Spacer()
+                            Text(repo.visibility)
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(accentFill.opacity(colorScheme == .dark ? 0.18 : 0.12), in: Capsule())
+                                .foregroundStyle(accentText)
+                        }
+                        if let project = repo.project {
+                            Text(project.description)
+                                .font(.caption)
+                                .foregroundStyle(primaryText.opacity(0.68))
+                                .lineLimit(2)
+                        }
+                        if let head = repo.head {
+                            Text("head: \(String(head.prefix(7)))")
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(primaryText.opacity(0.52))
+                        }
+                    }
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 12)
+                    .background(cardBackground.opacity(colorScheme == .dark ? 0.3 : 0.5), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                } else if !lookupRid.isEmpty {
+                    Text("Repository not found")
+                        .font(.subheadline)
+                        .foregroundStyle(primaryText.opacity(0.62))
                 }
             }
         }
