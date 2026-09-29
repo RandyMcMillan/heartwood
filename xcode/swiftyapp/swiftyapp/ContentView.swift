@@ -7,14 +7,60 @@
 
 import SwiftUI
 
+@MainActor
+class HeartwoodStore: ObservableObject {
+    @Published var version: String = ""
+    @Published var commit: String = ""
+    @Published var nodeInfo: HeartwoodNodeInfo?
+    @Published var repositories: [HeartwoodRepositoryInfo] = []
+    @Published var errorMessage: String?
+    @Published var isLoading: Bool = false
+
+    func load() {
+        isLoading = true
+        defer { isLoading = false }
+
+        version = heartwoodVersion()
+        commit = heartwoodCommit()
+
+        do {
+            nodeInfo = try heartwoodNodeInfo()
+            repositories = try heartwoodRepositoryList()
+            errorMessage = nil
+        } catch let error as HeartwoodError {
+            switch error {
+            case .Profile(let msg), .Storage(let msg), .InvalidRepoId(let msg):
+                errorMessage = msg
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func repository(byRid rid: String) -> HeartwoodRepositoryInfo? {
+        do {
+            return try heartwoodRepository(rid: rid)
+        } catch {
+            return nil
+        }
+    }
+
+    func normalizedRepoId(_ input: String) -> String? {
+        normalizeRepoId(input: input)
+    }
+
+    func normalizedNodeId(_ input: String) -> String? {
+        normalizeNodeId(input: input)
+    }
+
+    func normalizedAlias(_ input: String) -> String? {
+        normalizeAlias(input: input)
+    }
+}
+
 struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
-
-    @State private var version = ""
-    @State private var commit = ""
-    @State private var nodeInfo: HeartwoodNodeInfo?
-    @State private var repositories: [HeartwoodRepositoryInfo] = []
-    @State private var errorMessage: String?
+    @StateObject private var store = HeartwoodStore()
 
     var body: some View {
         ZStack {
@@ -63,7 +109,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     header
 
-                    if let error = errorMessage {
+                    if let error = store.errorMessage {
                         glassCard {
                             VStack(alignment: .leading, spacing: 8) {
                                 Label("Error", systemImage: "exclamationmark.triangle.fill")
@@ -76,13 +122,13 @@ struct ContentView: View {
                         }
                     }
 
-                    if let node = nodeInfo {
+                    if let node = store.nodeInfo {
                         nodeCard(node: node)
                         pathsCard(paths: node.paths)
                     }
 
-                    if !repositories.isEmpty {
-                        repositoriesCard(repos: repositories)
+                    if !store.repositories.isEmpty {
+                        repositoriesCard(repos: store.repositories)
                     }
 
                     bridgeCard
@@ -90,24 +136,7 @@ struct ContentView: View {
                 .padding(20)
             }
         }
-        .onAppear(perform: loadData)
-    }
-
-    private func loadData() {
-        version = heartwoodVersion()
-        commit = heartwoodCommit()
-
-        do {
-            nodeInfo = try heartwoodNodeInfo()
-            repositories = try heartwoodRepositoryList()
-        } catch let error as HeartwoodError {
-            switch error {
-            case .Profile(let msg), .Storage(let msg), .InvalidRepoId(let msg):
-                errorMessage = msg
-            }
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        .onAppear(perform: store.load)
     }
 
     private var header: some View {
@@ -148,8 +177,8 @@ struct ContentView: View {
             }
 
             HStack(spacing: 8) {
-                pill(text: version)
-                pill(text: String(commit.prefix(7)))
+                pill(text: store.version)
+                pill(text: String(store.commit.prefix(7)))
                 pill(text: "SwiftUI")
                 pill(text: "UniFFI")
                 pill(text: "Rust")
