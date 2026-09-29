@@ -453,6 +453,473 @@ fileprivate struct FfiConverterString: FfiConverter {
     }
 }
 
+
+public struct HeartwoodNodeInfo {
+    public var alias: String
+    public var nodeId: String
+    public var userAgent: String
+    public var network: String
+    public var relay: String
+    public var externalAddresses: [String]
+    public var connectAddresses: [String]
+    public var paths: HeartwoodPaths
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(alias: String, nodeId: String, userAgent: String, network: String, relay: String, externalAddresses: [String], connectAddresses: [String], paths: HeartwoodPaths) {
+        self.alias = alias
+        self.nodeId = nodeId
+        self.userAgent = userAgent
+        self.network = network
+        self.relay = relay
+        self.externalAddresses = externalAddresses
+        self.connectAddresses = connectAddresses
+        self.paths = paths
+    }
+}
+
+
+
+extension HeartwoodNodeInfo: Equatable, Hashable {
+    public static func ==(lhs: HeartwoodNodeInfo, rhs: HeartwoodNodeInfo) -> Bool {
+        if lhs.alias != rhs.alias {
+            return false
+        }
+        if lhs.nodeId != rhs.nodeId {
+            return false
+        }
+        if lhs.userAgent != rhs.userAgent {
+            return false
+        }
+        if lhs.network != rhs.network {
+            return false
+        }
+        if lhs.relay != rhs.relay {
+            return false
+        }
+        if lhs.externalAddresses != rhs.externalAddresses {
+            return false
+        }
+        if lhs.connectAddresses != rhs.connectAddresses {
+            return false
+        }
+        if lhs.paths != rhs.paths {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(alias)
+        hasher.combine(nodeId)
+        hasher.combine(userAgent)
+        hasher.combine(network)
+        hasher.combine(relay)
+        hasher.combine(externalAddresses)
+        hasher.combine(connectAddresses)
+        hasher.combine(paths)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHeartwoodNodeInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HeartwoodNodeInfo {
+        return
+            try HeartwoodNodeInfo(
+                alias: FfiConverterString.read(from: &buf), 
+                nodeId: FfiConverterString.read(from: &buf), 
+                userAgent: FfiConverterString.read(from: &buf), 
+                network: FfiConverterString.read(from: &buf), 
+                relay: FfiConverterString.read(from: &buf), 
+                externalAddresses: FfiConverterSequenceString.read(from: &buf), 
+                connectAddresses: FfiConverterSequenceString.read(from: &buf), 
+                paths: FfiConverterTypeHeartwoodPaths.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HeartwoodNodeInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.alias, into: &buf)
+        FfiConverterString.write(value.nodeId, into: &buf)
+        FfiConverterString.write(value.userAgent, into: &buf)
+        FfiConverterString.write(value.network, into: &buf)
+        FfiConverterString.write(value.relay, into: &buf)
+        FfiConverterSequenceString.write(value.externalAddresses, into: &buf)
+        FfiConverterSequenceString.write(value.connectAddresses, into: &buf)
+        FfiConverterTypeHeartwoodPaths.write(value.paths, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHeartwoodNodeInfo_lift(_ buf: RustBuffer) throws -> HeartwoodNodeInfo {
+    return try FfiConverterTypeHeartwoodNodeInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHeartwoodNodeInfo_lower(_ value: HeartwoodNodeInfo) -> RustBuffer {
+    return FfiConverterTypeHeartwoodNodeInfo.lower(value)
+}
+
+
+public struct HeartwoodPaths {
+    public var home: String
+    public var storage: String
+    public var config: String
+    public var keys: String
+    public var node: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(home: String, storage: String, config: String, keys: String, node: String) {
+        self.home = home
+        self.storage = storage
+        self.config = config
+        self.keys = keys
+        self.node = node
+    }
+}
+
+
+
+extension HeartwoodPaths: Equatable, Hashable {
+    public static func ==(lhs: HeartwoodPaths, rhs: HeartwoodPaths) -> Bool {
+        if lhs.home != rhs.home {
+            return false
+        }
+        if lhs.storage != rhs.storage {
+            return false
+        }
+        if lhs.config != rhs.config {
+            return false
+        }
+        if lhs.keys != rhs.keys {
+            return false
+        }
+        if lhs.node != rhs.node {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(home)
+        hasher.combine(storage)
+        hasher.combine(config)
+        hasher.combine(keys)
+        hasher.combine(node)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHeartwoodPaths: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HeartwoodPaths {
+        return
+            try HeartwoodPaths(
+                home: FfiConverterString.read(from: &buf), 
+                storage: FfiConverterString.read(from: &buf), 
+                config: FfiConverterString.read(from: &buf), 
+                keys: FfiConverterString.read(from: &buf), 
+                node: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HeartwoodPaths, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.home, into: &buf)
+        FfiConverterString.write(value.storage, into: &buf)
+        FfiConverterString.write(value.config, into: &buf)
+        FfiConverterString.write(value.keys, into: &buf)
+        FfiConverterString.write(value.node, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHeartwoodPaths_lift(_ buf: RustBuffer) throws -> HeartwoodPaths {
+    return try FfiConverterTypeHeartwoodPaths.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHeartwoodPaths_lower(_ value: HeartwoodPaths) -> RustBuffer {
+    return FfiConverterTypeHeartwoodPaths.lower(value)
+}
+
+
+public struct HeartwoodProjectInfo {
+    public var name: String
+    public var description: String
+    public var defaultBranch: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, description: String, defaultBranch: String) {
+        self.name = name
+        self.description = description
+        self.defaultBranch = defaultBranch
+    }
+}
+
+
+
+extension HeartwoodProjectInfo: Equatable, Hashable {
+    public static func ==(lhs: HeartwoodProjectInfo, rhs: HeartwoodProjectInfo) -> Bool {
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.description != rhs.description {
+            return false
+        }
+        if lhs.defaultBranch != rhs.defaultBranch {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(name)
+        hasher.combine(description)
+        hasher.combine(defaultBranch)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHeartwoodProjectInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HeartwoodProjectInfo {
+        return
+            try HeartwoodProjectInfo(
+                name: FfiConverterString.read(from: &buf), 
+                description: FfiConverterString.read(from: &buf), 
+                defaultBranch: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HeartwoodProjectInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.description, into: &buf)
+        FfiConverterString.write(value.defaultBranch, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHeartwoodProjectInfo_lift(_ buf: RustBuffer) throws -> HeartwoodProjectInfo {
+    return try FfiConverterTypeHeartwoodProjectInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHeartwoodProjectInfo_lower(_ value: HeartwoodProjectInfo) -> RustBuffer {
+    return FfiConverterTypeHeartwoodProjectInfo.lower(value)
+}
+
+
+public struct HeartwoodRepositoryInfo {
+    public var rid: String
+    public var head: String?
+    public var project: HeartwoodProjectInfo?
+    public var delegates: [String]
+    public var threshold: UInt32
+    public var visibility: String
+    public var refsState: String
+    public var syncedAt: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(rid: String, head: String?, project: HeartwoodProjectInfo?, delegates: [String], threshold: UInt32, visibility: String, refsState: String, syncedAt: String?) {
+        self.rid = rid
+        self.head = head
+        self.project = project
+        self.delegates = delegates
+        self.threshold = threshold
+        self.visibility = visibility
+        self.refsState = refsState
+        self.syncedAt = syncedAt
+    }
+}
+
+
+
+extension HeartwoodRepositoryInfo: Equatable, Hashable {
+    public static func ==(lhs: HeartwoodRepositoryInfo, rhs: HeartwoodRepositoryInfo) -> Bool {
+        if lhs.rid != rhs.rid {
+            return false
+        }
+        if lhs.head != rhs.head {
+            return false
+        }
+        if lhs.project != rhs.project {
+            return false
+        }
+        if lhs.delegates != rhs.delegates {
+            return false
+        }
+        if lhs.threshold != rhs.threshold {
+            return false
+        }
+        if lhs.visibility != rhs.visibility {
+            return false
+        }
+        if lhs.refsState != rhs.refsState {
+            return false
+        }
+        if lhs.syncedAt != rhs.syncedAt {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(rid)
+        hasher.combine(head)
+        hasher.combine(project)
+        hasher.combine(delegates)
+        hasher.combine(threshold)
+        hasher.combine(visibility)
+        hasher.combine(refsState)
+        hasher.combine(syncedAt)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHeartwoodRepositoryInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HeartwoodRepositoryInfo {
+        return
+            try HeartwoodRepositoryInfo(
+                rid: FfiConverterString.read(from: &buf), 
+                head: FfiConverterOptionString.read(from: &buf), 
+                project: FfiConverterOptionTypeHeartwoodProjectInfo.read(from: &buf), 
+                delegates: FfiConverterSequenceString.read(from: &buf), 
+                threshold: FfiConverterUInt32.read(from: &buf), 
+                visibility: FfiConverterString.read(from: &buf), 
+                refsState: FfiConverterString.read(from: &buf), 
+                syncedAt: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HeartwoodRepositoryInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.rid, into: &buf)
+        FfiConverterOptionString.write(value.head, into: &buf)
+        FfiConverterOptionTypeHeartwoodProjectInfo.write(value.project, into: &buf)
+        FfiConverterSequenceString.write(value.delegates, into: &buf)
+        FfiConverterUInt32.write(value.threshold, into: &buf)
+        FfiConverterString.write(value.visibility, into: &buf)
+        FfiConverterString.write(value.refsState, into: &buf)
+        FfiConverterOptionString.write(value.syncedAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHeartwoodRepositoryInfo_lift(_ buf: RustBuffer) throws -> HeartwoodRepositoryInfo {
+    return try FfiConverterTypeHeartwoodRepositoryInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHeartwoodRepositoryInfo_lower(_ value: HeartwoodRepositoryInfo) -> RustBuffer {
+    return FfiConverterTypeHeartwoodRepositoryInfo.lower(value)
+}
+
+
+public enum HeartwoodError {
+
+    
+    
+    case Profile(String
+    )
+    case Storage(String
+    )
+    case InvalidRepoId(String
+    )
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHeartwoodError: FfiConverterRustBuffer {
+    typealias SwiftType = HeartwoodError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HeartwoodError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        
+
+        
+        case 1: return .Profile(
+            try FfiConverterString.read(from: &buf)
+            )
+        case 2: return .Storage(
+            try FfiConverterString.read(from: &buf)
+            )
+        case 3: return .InvalidRepoId(
+            try FfiConverterString.read(from: &buf)
+            )
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: HeartwoodError, into buf: inout [UInt8]) {
+        switch value {
+
+        
+
+        
+        
+        case let .Profile(v1):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(v1, into: &buf)
+            
+        
+        case let .Storage(v1):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(v1, into: &buf)
+            
+        
+        case let .InvalidRepoId(v1):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(v1, into: &buf)
+            
+        }
+    }
+}
+
+
+extension HeartwoodError: Equatable, Hashable {}
+
+extension HeartwoodError: Foundation.LocalizedError {
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+}
+
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -476,6 +943,104 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         }
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeHeartwoodProjectInfo: FfiConverterRustBuffer {
+    typealias SwiftType = HeartwoodProjectInfo?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeHeartwoodProjectInfo.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeHeartwoodProjectInfo.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeHeartwoodRepositoryInfo: FfiConverterRustBuffer {
+    typealias SwiftType = HeartwoodRepositoryInfo?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeHeartwoodRepositoryInfo.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeHeartwoodRepositoryInfo.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]
+
+    public static func write(_ value: [String], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterString.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [String]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeHeartwoodRepositoryInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [HeartwoodRepositoryInfo]
+
+    public static func write(_ value: [HeartwoodRepositoryInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeHeartwoodRepositoryInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [HeartwoodRepositoryInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [HeartwoodRepositoryInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeHeartwoodRepositoryInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
 public func heartwoodAnswer() -> UInt32 {
     return try!  FfiConverterUInt32.lift(try! rustCall() {
     uniffi_rustylib_fn_func_heartwood_answer($0
@@ -488,14 +1053,14 @@ public func heartwoodCommit() -> String {
     )
 })
 }
-public func heartwoodNodeInfo() -> String {
-    return try!  FfiConverterString.lift(try! rustCall() {
+public func heartwoodNodeInfo()throws  -> HeartwoodNodeInfo {
+    return try  FfiConverterTypeHeartwoodNodeInfo.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_node_info($0
     )
 })
 }
-public func heartwoodPaths() -> String {
-    return try!  FfiConverterString.lift(try! rustCall() {
+public func heartwoodPaths()throws  -> HeartwoodPaths {
+    return try  FfiConverterTypeHeartwoodPaths.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_paths($0
     )
 })
@@ -506,15 +1071,15 @@ public func heartwoodPing() -> String {
     )
 })
 }
-public func heartwoodRepository(rid: String) -> String? {
-    return try!  FfiConverterOptionString.lift(try! rustCall() {
+public func heartwoodRepository(rid: String)throws  -> HeartwoodRepositoryInfo? {
+    return try  FfiConverterOptionTypeHeartwoodRepositoryInfo.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_repository(
         FfiConverterString.lower(rid),$0
     )
 })
 }
-public func heartwoodRepositoryList() -> String {
-    return try!  FfiConverterString.lift(try! rustCall() {
+public func heartwoodRepositoryList()throws  -> [HeartwoodRepositoryInfo] {
+    return try  FfiConverterSequenceTypeHeartwoodRepositoryInfo.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_repository_list($0
     )
 })
@@ -582,19 +1147,19 @@ private var initializationResult: InitializationResult = {
     if (uniffi_rustylib_checksum_func_heartwood_commit() != 16525) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_rustylib_checksum_func_heartwood_node_info() != 8766) {
+    if (uniffi_rustylib_checksum_func_heartwood_node_info() != 33573) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_rustylib_checksum_func_heartwood_paths() != 48649) {
+    if (uniffi_rustylib_checksum_func_heartwood_paths() != 35544) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_ping() != 43370) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_rustylib_checksum_func_heartwood_repository() != 23662) {
+    if (uniffi_rustylib_checksum_func_heartwood_repository() != 58935) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_rustylib_checksum_func_heartwood_repository_list() != 38322) {
+    if (uniffi_rustylib_checksum_func_heartwood_repository_list() != 26992) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_version() != 58832) {

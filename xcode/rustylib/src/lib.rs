@@ -10,7 +10,7 @@ use radicle::storage::{ReadStorage, RepositoryInfo, SignedRefsInfo};
 
 uniffi::setup_scaffolding!();
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, uniffi::Record)]
 pub struct HeartwoodPaths {
     pub home: String,
     pub storage: String,
@@ -19,14 +19,14 @@ pub struct HeartwoodPaths {
     pub node: String,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, uniffi::Record)]
 pub struct HeartwoodProjectInfo {
     pub name: String,
     pub description: String,
     pub default_branch: String,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, uniffi::Record)]
 pub struct HeartwoodRepositoryInfo {
     pub rid: String,
     pub head: Option<String>,
@@ -38,7 +38,7 @@ pub struct HeartwoodRepositoryInfo {
     pub synced_at: Option<String>,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, uniffi::Record)]
 pub struct HeartwoodNodeInfo {
     pub alias: String,
     pub node_id: String,
@@ -50,13 +50,18 @@ pub struct HeartwoodNodeInfo {
     pub paths: HeartwoodPaths,
 }
 
-fn load_profile() -> Result<profile::Profile, String> {
-    profile::Profile::load().map_err(|err| err.to_string())
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum HeartwoodError {
+    #[error("profile error: {0}")]
+    Profile(String),
+    #[error("storage error: {0}")]
+    Storage(String),
+    #[error("invalid repo id: {0}")]
+    InvalidRepoId(String),
 }
 
-fn json_string<T: serde::Serialize>(value: &T) -> String {
-    serde_json::to_string(value)
-        .unwrap_or_else(|err| serde_json::json!({ "error": err.to_string() }).to_string())
+fn load_profile() -> Result<profile::Profile, HeartwoodError> {
+    profile::Profile::load().map_err(|err| HeartwoodError::Profile(err.to_string()))
 }
 
 fn profile_paths(profile: &profile::Profile) -> HeartwoodPaths {
@@ -147,12 +152,14 @@ pub fn heartwood_ping() -> String {
     "ping".to_string()
 }
 
-fn heartwood_paths_info() -> Result<HeartwoodPaths, String> {
+#[uniffi::export]
+pub fn heartwood_paths() -> Result<HeartwoodPaths, HeartwoodError> {
     let profile = load_profile()?;
     Ok(profile_paths(&profile))
 }
 
-fn heartwood_node_info_value() -> Result<HeartwoodNodeInfo, String> {
+#[uniffi::export]
+pub fn heartwood_node_info() -> Result<HeartwoodNodeInfo, HeartwoodError> {
     let profile = load_profile()?;
     let config = &profile.config.node;
     let connect_addresses = config
@@ -185,58 +192,30 @@ fn heartwood_node_info_value() -> Result<HeartwoodNodeInfo, String> {
     })
 }
 
-fn heartwood_repository_list_value() -> Result<Vec<HeartwoodRepositoryInfo>, String> {
+#[uniffi::export]
+pub fn heartwood_repository_list() -> Result<Vec<HeartwoodRepositoryInfo>, HeartwoodError> {
     let profile = load_profile()?;
     let repos = profile
         .storage
         .repositories()
-        .map_err(|err| err.to_string())?
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?
         .into_iter()
         .map(repository_info)
         .collect::<Vec<_>>();
     Ok(repos)
 }
 
-fn heartwood_repository_value(rid: String) -> Result<Option<HeartwoodRepositoryInfo>, String> {
+#[uniffi::export]
+pub fn heartwood_repository(rid: String) -> Result<Option<HeartwoodRepositoryInfo>, HeartwoodError> {
     let profile = load_profile()?;
-    let rid = RepoId::from_str(&rid).map_err(|err| err.to_string())?;
+    let rid = RepoId::from_str(&rid).map_err(|err| HeartwoodError::InvalidRepoId(err.to_string()))?;
     let repo = profile
         .storage
         .repositories_by_id(std::iter::once(&rid))
         .next()
         .transpose()
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
     Ok(repo.map(repository_info))
-}
-
-#[uniffi::export]
-pub fn heartwood_paths() -> String {
-    heartwood_paths_info()
-        .map(|info| json_string(&info))
-        .unwrap_or_else(|err| serde_json::json!({ "error": err }).to_string())
-}
-
-#[uniffi::export]
-pub fn heartwood_node_info() -> String {
-    heartwood_node_info_value()
-        .map(|info| json_string(&info))
-        .unwrap_or_else(|err| serde_json::json!({ "error": err }).to_string())
-}
-
-#[uniffi::export]
-pub fn heartwood_repository_list() -> String {
-    heartwood_repository_list_value()
-        .map(|info| json_string(&info))
-        .unwrap_or_else(|err| serde_json::json!({ "error": err }).to_string())
-}
-
-#[uniffi::export]
-pub fn heartwood_repository(rid: String) -> Option<String> {
-    match heartwood_repository_value(rid) {
-        Ok(Some(info)) => Some(json_string(&info)),
-        Ok(None) => None,
-        Err(_) => None,
-    }
 }
 
 #[uniffi::export]

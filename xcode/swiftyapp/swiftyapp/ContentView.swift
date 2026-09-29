@@ -9,12 +9,12 @@ import SwiftUI
 
 struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
-    @State private var firstValue = 10
-    @State private var secondValue = 32
 
-    private var sum: Int {
-        Int(rustAdd(a: UInt32(firstValue), b: UInt32(secondValue)))
-    }
+    @State private var version = ""
+    @State private var commit = ""
+    @State private var nodeInfo: HeartwoodNodeInfo?
+    @State private var repositories: [HeartwoodRepositoryInfo] = []
+    @State private var errorMessage: String?
 
     var body: some View {
         ZStack {
@@ -63,136 +63,50 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     header
 
-                    glassCard {
-                        HStack(alignment: .center, spacing: 16) {
-                            Image(colorScheme == .dark ? "RustOrb" : "RustOrbLight")
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: 84, height: 84)
-                                .padding(8)
-                                .background(
-                                    colorScheme == .dark
-                                        ? .white.opacity(0.04)
-                                        : .white.opacity(0.70),
-                                    in: RoundedRectangle(cornerRadius: 22, style: .continuous)
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                                        .stroke(
-                                            colorScheme == .dark
-                                                ? Color(red: 1.0, green: 0.66, blue: 0.24).opacity(0.28)
-                                                : Color(red: 0.52, green: 0.62, blue: 0.72).opacity(0.22),
-                                            lineWidth: 1
-                                        )
-                                )
-
-                            VStack(alignment: .leading, spacing: 10) {
-                                Label("Rust bridge", systemImage: "sparkles")
+                    if let error = errorMessage {
+                        glassCard {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Label("Error", systemImage: "exclamationmark.triangle.fill")
                                     .font(.headline)
                                     .foregroundStyle(accentText)
-
-                                Text(rustHello())
-                                    .font(.title2.weight(.semibold))
-                                    .foregroundStyle(primaryText)
-
-                                Text("SwiftUI talking to Rust, dressed up in the same warm palette as the icon.")
+                                Text(error)
                                     .font(.subheadline)
-                                    .foregroundStyle(primaryText.opacity(0.74))
+                                    .foregroundStyle(primaryText.opacity(0.84))
                             }
                         }
                     }
 
-                    glassCard {
-                        VStack(alignment: .leading, spacing: 16) {
-                            HStack {
-                                Label("Live calculator", systemImage: "function")
-                                    .font(.headline)
-                                    .foregroundStyle(accentText)
-                                Spacer()
-                                Text("Rust powered")
-                                    .font(.caption.weight(.semibold))
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 6)
-                                    .background(accentFill.opacity(colorScheme == .dark ? 0.18 : 0.12), in: Capsule())
-                                    .foregroundStyle(accentText)
-                            }
-
-                            stepperRow(
-                                title: "First value",
-                                value: $firstValue,
-                                range: 0...100
-                            )
-
-                            stepperRow(
-                                title: "Second value",
-                                value: $secondValue,
-                                range: 0...100
-                            )
-
-                            Divider()
-                                .overlay(accentFill.opacity(colorScheme == .dark ? 0.22 : 0.16))
-
-                            HStack(alignment: .firstTextBaseline) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Result")
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundStyle(primaryText.opacity(0.68))
-                                    Text("\(firstValue) + \(secondValue)")
-                                        .font(.title3.weight(.semibold))
-                                        .foregroundStyle(primaryText)
-                                }
-
-                                Spacer()
-
-                                Text("\(sum)")
-                                    .font(.system(size: 42, weight: .bold, design: .rounded))
-                                    .foregroundStyle(
-                                        LinearGradient(
-                                            colors: colorScheme == .dark
-                                                ? [.white, Color(red: 1.0, green: 0.76, blue: 0.42)]
-                                                : [Color(red: 0.10, green: 0.16, blue: 0.24), Color(red: 0.38, green: 0.45, blue: 0.58)],
-                                            startPoint: .top,
-                                            endPoint: .bottom
-                                        )
-                                    )
-                            }
-
-                            Button {
-                                firstValue = Int.random(in: 0...100)
-                                secondValue = Int.random(in: 0...100)
-                            } label: {
-                                Label("Randomize values", systemImage: "dice.fill")
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(PrimaryButtonStyle())
-                        }
+                    if let node = nodeInfo {
+                        nodeCard(node: node)
+                        pathsCard(paths: node.paths)
                     }
 
-                    glassCard {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Label("What this proves", systemImage: "checkmark.seal.fill")
-                                .font(.headline)
-                                .foregroundStyle(accentText)
-
-                            ForEach([
-                                "SwiftUI rendering",
-                                "State-driven interactions",
-                                "Native Rust function calls",
-                            ], id: \.self) { item in
-                                HStack(spacing: 10) {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .foregroundStyle(accentFill)
-                                    Text(item)
-                                        .foregroundStyle(primaryText.opacity(colorScheme == .dark ? 0.88 : 0.84))
-                                    Spacer()
-                                }
-                                .font(.subheadline)
-                            }
-                        }
+                    if !repositories.isEmpty {
+                        repositoriesCard(repos: repositories)
                     }
+
+                    bridgeCard
                 }
                 .padding(20)
             }
+        }
+        .onAppear(perform: loadData)
+    }
+
+    private func loadData() {
+        version = heartwoodVersion()
+        commit = heartwoodCommit()
+
+        do {
+            nodeInfo = try heartwoodNodeInfo()
+            repositories = try heartwoodRepositoryList()
+        } catch let error as HeartwoodError {
+            switch error {
+            case .Profile(let msg), .Storage(let msg), .InvalidRepoId(let msg):
+                errorMessage = msg
+            }
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -200,11 +114,11 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Swifty Rust")
+                    Text("Heartwood")
                         .font(.system(size: 34, weight: .bold, design: .rounded))
                         .foregroundStyle(primaryText)
 
-                    Text("A polished SwiftUI shell with the same warm tone as the new icon.")
+                    Text("SwiftUI talking to Rust via UniFFI.")
                         .font(.subheadline)
                         .foregroundStyle(primaryText.opacity(0.74))
                 }
@@ -234,12 +148,152 @@ struct ContentView: View {
             }
 
             HStack(spacing: 8) {
+                pill(text: version)
+                pill(text: String(commit.prefix(7)))
                 pill(text: "SwiftUI")
                 pill(text: "UniFFI")
                 pill(text: "Rust")
             }
         }
         .padding(.bottom, 4)
+    }
+
+    private func nodeCard(node: HeartwoodNodeInfo) -> some View {
+        glassCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Node", systemImage: "network")
+                    .font(.headline)
+                    .foregroundStyle(accentText)
+
+                infoRow(label: "Alias", value: node.alias)
+                infoRow(label: "Node ID", value: node.nodeId)
+                infoRow(label: "User Agent", value: node.userAgent)
+                infoRow(label: "Network", value: node.network)
+                infoRow(label: "Relay", value: node.relay)
+
+                if !node.externalAddresses.isEmpty {
+                    infoRow(label: "External", value: node.externalAddresses.joined(separator: ", "))
+                }
+
+                if !node.connectAddresses.isEmpty {
+                    infoRow(label: "Connect", value: node.connectAddresses.joined(separator: ", "))
+                }
+            }
+        }
+    }
+
+    private func pathsCard(paths: HeartwoodPaths) -> some View {
+        glassCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Paths", systemImage: "folder")
+                    .font(.headline)
+                    .foregroundStyle(accentText)
+
+                infoRow(label: "Home", value: paths.home)
+                infoRow(label: "Storage", value: paths.storage)
+                infoRow(label: "Config", value: paths.config)
+                infoRow(label: "Keys", value: paths.keys)
+                infoRow(label: "Node", value: paths.node)
+            }
+        }
+    }
+
+    private func repositoriesCard(repos: [HeartwoodRepositoryInfo]) -> some View {
+        glassCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Repositories", systemImage: "archivebox")
+                    .font(.headline)
+                    .foregroundStyle(accentText)
+
+                ForEach(repos, id: \.rid) { repo in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(repo.project?.name ?? repo.rid)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(primaryText)
+                            Spacer()
+                            Text(repo.visibility)
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(accentFill.opacity(colorScheme == .dark ? 0.18 : 0.12), in: Capsule())
+                                .foregroundStyle(accentText)
+                        }
+
+                        if let project = repo.project {
+                            Text(project.description)
+                                .font(.caption)
+                                .foregroundStyle(primaryText.opacity(0.68))
+                                .lineLimit(2)
+
+                            Text("default: \(project.defaultBranch)")
+                                .font(.caption2)
+                                .foregroundStyle(primaryText.opacity(0.52))
+                        }
+
+                        if let head = repo.head {
+                            Text("head: \(String(head.prefix(7)))")
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(primaryText.opacity(0.52))
+                        }
+
+                        Text("delegates: \(repo.delegates.count)  threshold: \(repo.threshold)")
+                            .font(.caption2)
+                            .foregroundStyle(primaryText.opacity(0.52))
+
+                        Text("refs: \(repo.refsState)")
+                            .font(.caption2)
+                            .foregroundStyle(primaryText.opacity(0.52))
+                    }
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 12)
+                    .background(cardBackground.opacity(colorScheme == .dark ? 0.3 : 0.5), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                    if repo.rid != repos.last?.rid {
+                        Divider()
+                            .overlay(accentFill.opacity(colorScheme == .dark ? 0.22 : 0.16))
+                    }
+                }
+            }
+        }
+    }
+
+    private var bridgeCard: some View {
+        glassCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Bridge", systemImage: "sparkles")
+                    .font(.headline)
+                    .foregroundStyle(accentText)
+
+                Text(rustHello())
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(primaryText)
+
+                HStack(spacing: 8) {
+                    Text("Answer:")
+                        .font(.subheadline)
+                        .foregroundStyle(primaryText.opacity(0.74))
+                    Text("\(heartwoodAnswer())")
+                        .font(.title3.weight(.bold).monospacedDigit())
+                        .foregroundStyle(accentText)
+                }
+            }
+        }
+    }
+
+    private func infoRow(label: String, value: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(label)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(primaryText.opacity(0.62))
+                .frame(width: 72, alignment: .leading)
+            Text(value)
+                .font(.subheadline)
+                .foregroundStyle(primaryText.opacity(0.92))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+        }
     }
 
     private func pill(text: String) -> some View {
@@ -263,31 +317,6 @@ struct ContentView: View {
             .shadow(color: .black.opacity(colorScheme == .dark ? 0.28 : 0.12), radius: 18, x: 0, y: 10)
     }
 
-    private func stepperRow(title: String, value: Binding<Int>, range: ClosedRange<Int>) -> some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(primaryText.opacity(0.92))
-                Text("Tap +/- or use the randomizer")
-                    .font(.caption)
-                    .foregroundStyle(primaryText.opacity(0.62))
-            }
-
-            Spacer()
-
-            Stepper(value: value, in: range) {
-                Text("\(value.wrappedValue)")
-                    .font(.title3.weight(.semibold))
-                    .monospacedDigit()
-                    .foregroundStyle(primaryText)
-                    .frame(minWidth: 44, alignment: .trailing)
-            }
-            .labelsHidden()
-            .tint(accentFill)
-        }
-    }
-
     private var primaryText: Color {
         colorScheme == .dark ? .white : Color(red: 0.10, green: 0.14, blue: 0.20)
     }
@@ -302,28 +331,6 @@ struct ContentView: View {
 
     private var cardBackground: Color {
         colorScheme == .dark ? .white.opacity(0.05) : .white.opacity(0.76)
-    }
-}
-
-private struct PrimaryButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.headline.weight(.semibold))
-            .padding(.vertical, 14)
-            .foregroundStyle(.white)
-            .background(
-                LinearGradient(
-                    colors: [
-                        Color(red: 1.0, green: 0.56, blue: 0.12),
-                        Color(red: 0.93, green: 0.30, blue: 0.08)
-                    ],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                ),
-                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-            )
-            .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
-            .opacity(configuration.isPressed ? 0.92 : 1.0)
     }
 }
 

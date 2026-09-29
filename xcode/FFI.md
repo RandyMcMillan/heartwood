@@ -11,9 +11,9 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
   - [x] repository lookup and summaries
   - [x] node status and identity data
   - [x] local state/config access
-  - [ ] read-only operations first, write actions later
-- [ ] Decide which operations should stay in Rust and which should be thin Swift wrappers
-- [ ] Define the error model for Swift-friendly failures
+  - [x] read-only operations first, write actions later
+- [x] Decide which operations should stay in Rust and which should be thin Swift wrappers
+- [x] Define the error model for Swift-friendly failures
 
 ## Phase 2: Build a Rust bridge layer
 
@@ -40,18 +40,18 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 
 ## Phase 5: Refresh Swift bindings and app usage
 
-- [ ] Regenerate UniFFI Swift bindings from the Rust interface
+- [x] Regenerate UniFFI Swift bindings from the Rust interface
 - [ ] Add a small Swift façade over the generated bindings
-- [ ] Replace demo UI calls in `swiftyapp/ContentView.swift`
-- [ ] Keep the app compiling after each bridge addition
+- [x] Replace demo UI calls in `swiftyapp/ContentView.swift`
+- [x] Keep the app compiling after each bridge addition
 
 ## Phase 6: Verification and CI
 
-- [ ] Run `cd xcode && make rust`
-- [ ] Run `cd xcode && make app`
-- [ ] Verify the generated bindings contract checks still pass
+- [x] Run `cd xcode && make rust`
+- [x] Run `cd xcode && make app`
+- [x] Verify the generated bindings contract checks still pass
 - [ ] Add or update CI so the bridge build stays covered
-- [ ] Ensure generated artifacts are rebuilt, not edited manually
+- [x] Ensure generated artifacts are rebuilt, not edited manually
 
 ## Suggested implementation order
 
