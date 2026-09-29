@@ -23,6 +23,7 @@ class HeartwoodStore: ObservableObject {
     @Published var repoSeedCounts: [String: UInt64] = [:]
     @Published var repoRemotes: [String: [HeartwoodRemote]] = [:]
     @Published var repoBranches: [String: [HeartwoodRef]] = [:]
+    @Published var repoLogs: [String: [HeartwoodCommit]] = [:]
     @Published var notificationCount: UInt64 = 0
     @Published var notificationCountsByRepo: [HeartwoodNotificationCount] = []
     @Published var errorMessage: String?
@@ -62,6 +63,7 @@ class HeartwoodStore: ObservableObject {
             repoSeedCounts.removeAll()
             repoRemotes.removeAll()
             repoBranches.removeAll()
+            repoLogs.removeAll()
             for repo in repositories {
                 if let count = try? heartwoodRepositorySeedCount(rid: repo.rid) {
                     repoSeedCounts[repo.rid] = count
@@ -71,6 +73,9 @@ class HeartwoodStore: ObservableObject {
                 }
                 if let branches = try? heartwoodRepositoryBranches(rid: repo.rid) {
                     repoBranches[repo.rid] = branches
+                }
+                if let log = try? heartwoodRepositoryLog(rid: repo.rid, limit: 5) {
+                    repoLogs[repo.rid] = log
                 }
             }
         } catch let error as HeartwoodError {
@@ -819,6 +824,26 @@ struct ContentView: View {
                                     .font(.caption2)
                             }
                             .foregroundStyle(primaryText.opacity(0.52))
+                        }
+
+                        if let log = store.repoLogs[repo.rid], !log.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Recent commits")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(primaryText.opacity(0.62))
+                                ForEach(log.prefix(3), id: \.oid) { commit in
+                                    HStack(spacing: 8) {
+                                        Text(String(commit.oid.prefix(7)))
+                                            .font(.caption2.monospaced())
+                                            .foregroundStyle(primaryText.opacity(0.68))
+                                        Text(commit.message)
+                                            .font(.caption2)
+                                            .foregroundStyle(primaryText.opacity(0.84))
+                                            .lineLimit(1)
+                                        Spacer()
+                                    }
+                                }
+                            }
                         }
                     }
                     .padding(.vertical, 8)

@@ -667,3 +667,45 @@ pub fn nodes_for_alias(alias: &str) -> Result<Vec<String>, HeartwoodError> {
         .collect::<Vec<_>>();
     Ok(nodes)
 }
+
+#[derive(Debug, uniffi::Record)]
+pub struct HeartwoodCommit {
+    pub oid: String,
+    pub message: String,
+    pub author: String,
+    pub timestamp: i64,
+}
+
+pub fn repository_log(rid: &str, limit: u32) -> Result<Vec<HeartwoodCommit>, HeartwoodError> {
+    let profile = load_profile()?;
+    let rid = RepoId::from_str(rid)
+        .map_err(|err| HeartwoodError::InvalidRepoId(err.to_string()))?;
+    let repo = profile
+        .storage
+        .repository(rid)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+
+    let (_refname, head) = repo.head().map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let revwalk = repo
+        .revwalk(head)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+
+    let mut commits = Vec::new();
+    for oid in revwalk.take(limit as usize) {
+        let oid = oid.map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+        let commit = repo
+            .commit(oid.into())
+            .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+        let message = commit.message().unwrap_or("").to_string();
+        let author = commit.author().name().unwrap_or("").to_string();
+        let timestamp = commit.time().seconds();
+        commits.push(HeartwoodCommit {
+            oid: oid.to_string(),
+            message,
+            author,
+            timestamp,
+        });
+    }
+
+    Ok(commits)
+}

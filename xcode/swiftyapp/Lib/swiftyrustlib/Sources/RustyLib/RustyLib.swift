@@ -431,6 +431,22 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
+    typealias FfiType = Int64
+    typealias SwiftType = Int64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int64, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -491,6 +507,88 @@ fileprivate struct FfiConverterString: FfiConverter {
         writeInt(&buf, len)
         writeBytes(&buf, value.utf8)
     }
+}
+
+
+public struct HeartwoodCommit {
+    public var oid: String
+    public var message: String
+    public var author: String
+    public var timestamp: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(oid: String, message: String, author: String, timestamp: Int64) {
+        self.oid = oid
+        self.message = message
+        self.author = author
+        self.timestamp = timestamp
+    }
+}
+
+
+
+extension HeartwoodCommit: Equatable, Hashable {
+    public static func ==(lhs: HeartwoodCommit, rhs: HeartwoodCommit) -> Bool {
+        if lhs.oid != rhs.oid {
+            return false
+        }
+        if lhs.message != rhs.message {
+            return false
+        }
+        if lhs.author != rhs.author {
+            return false
+        }
+        if lhs.timestamp != rhs.timestamp {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(oid)
+        hasher.combine(message)
+        hasher.combine(author)
+        hasher.combine(timestamp)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHeartwoodCommit: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HeartwoodCommit {
+        return
+            try HeartwoodCommit(
+                oid: FfiConverterString.read(from: &buf), 
+                message: FfiConverterString.read(from: &buf), 
+                author: FfiConverterString.read(from: &buf), 
+                timestamp: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HeartwoodCommit, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.oid, into: &buf)
+        FfiConverterString.write(value.message, into: &buf)
+        FfiConverterString.write(value.author, into: &buf)
+        FfiConverterInt64.write(value.timestamp, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHeartwoodCommit_lift(_ buf: RustBuffer) throws -> HeartwoodCommit {
+    return try FfiConverterTypeHeartwoodCommit.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHeartwoodCommit_lower(_ value: HeartwoodCommit) -> RustBuffer {
+    return FfiConverterTypeHeartwoodCommit.lower(value)
 }
 
 
@@ -1890,6 +1988,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeHeartwoodCommit: FfiConverterRustBuffer {
+    typealias SwiftType = [HeartwoodCommit]
+
+    public static func write(_ value: [HeartwoodCommit], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeHeartwoodCommit.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [HeartwoodCommit] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [HeartwoodCommit]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeHeartwoodCommit.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeHeartwoodFollowPolicy: FfiConverterRustBuffer {
     typealias SwiftType = [HeartwoodFollowPolicy]
 
@@ -2218,6 +2341,14 @@ public func heartwoodRepositoryList()throws  -> [HeartwoodRepositoryInfo] {
     )
 })
 }
+public func heartwoodRepositoryLog(rid: String, limit: UInt32)throws  -> [HeartwoodCommit] {
+    return try  FfiConverterSequenceTypeHeartwoodCommit.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_repository_log(
+        FfiConverterString.lower(rid),
+        FfiConverterUInt32.lower(limit),$0
+    )
+})
+}
 public func heartwoodRepositoryPatchCounts(rid: String)throws  -> HeartwoodPatchCounts? {
     return try  FfiConverterOptionTypeHeartwoodPatchCounts.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_repository_patch_counts(
@@ -2399,6 +2530,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_repository_list() != 26992) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_repository_log() != 30337) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_repository_patch_counts() != 22642) {

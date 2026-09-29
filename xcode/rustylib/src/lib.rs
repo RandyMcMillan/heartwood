@@ -5,7 +5,7 @@ use radicle::storage::ReadStorage;
 mod bridge;
 
 pub use bridge::{
-    HeartwoodError, HeartwoodFollowPolicy, HeartwoodIssueCounts, HeartwoodNodeInfo,
+    HeartwoodCommit, HeartwoodError, HeartwoodFollowPolicy, HeartwoodIssueCounts, HeartwoodNodeInfo,
     HeartwoodNodeStatus, HeartwoodNotificationCount, HeartwoodPatchCounts, HeartwoodPaths,
     HeartwoodProjectInfo, HeartwoodRef, HeartwoodRemote, HeartwoodRepositoryInfo,
     HeartwoodRoutingSummary, HeartwoodSeedPolicy, HeartwoodSession,
@@ -227,6 +227,11 @@ pub fn heartwood_alias_for_node(nid: String) -> Result<Option<String>, bridge::H
 #[uniffi::export]
 pub fn heartwood_nodes_for_alias(alias: String) -> Result<Vec<String>, bridge::HeartwoodError> {
     bridge::nodes_for_alias(&alias)
+}
+
+#[uniffi::export]
+pub fn heartwood_repository_log(rid: String, limit: u32) -> Result<Vec<bridge::HeartwoodCommit>, bridge::HeartwoodError> {
+    bridge::repository_log(&rid, limit)
 }
 
 #[cfg(test)]
@@ -638,5 +643,30 @@ mod tests {
                 || matches!(result, Err(bridge::HeartwoodError::InvalidAlias(_))),
             "empty alias should be accepted (noop) or fail with profile/alias error"
         );
+    }
+
+    #[test]
+    fn test_repository_log_invalid_rid() {
+        let result = heartwood_repository_log("not-a-rid".to_string(), 10);
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
+                || matches!(result, Err(bridge::HeartwoodError::InvalidRepoId(_))),
+            "invalid rid should be accepted (noop) or fail with profile/repo error"
+        );
+    }
+
+    #[test]
+    fn test_repository_log_shape() {
+        if let Ok(repos) = heartwood_repository_list() {
+            for repo in repos {
+                if let Ok(commits) = heartwood_repository_log(repo.rid, 5) {
+                    for commit in commits {
+                        assert!(!commit.oid.is_empty());
+                        assert!(commit.timestamp >= 0);
+                    }
+                }
+            }
+        }
     }
 }

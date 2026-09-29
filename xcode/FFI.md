@@ -113,6 +113,13 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 - [x] Add Swift alias lookup fields in the lookup card
 - [x] Add tests for invalid input handling
 
+## Phase 14: Protocol gap — repository commit log
+
+- [x] Add `heartwoodRepositoryLog(rid, limit)` returning `[HeartwoodCommit { oid, message, author, timestamp }]`
+- [x] Uses `ReadRepository::revwalk()` and `ReadRepository::commit()`
+- [x] Add Swift recent commit list in repository cards
+- [x] Add tests for shape and invalid RID handling
+
 ## Suggested implementation order
 
 1. Metadata and normalization helpers
