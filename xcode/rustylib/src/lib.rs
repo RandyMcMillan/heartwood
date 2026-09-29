@@ -137,6 +137,16 @@ pub fn heartwood_remove_connect_address(address: String) -> Result<(), bridge::H
     bridge::remove_connect_address(&address)
 }
 
+#[uniffi::export]
+pub fn heartwood_add_listen_address(address: String) -> Result<(), bridge::HeartwoodError> {
+    bridge::add_listen_address(&address)
+}
+
+#[uniffi::export]
+pub fn heartwood_remove_listen_address(address: String) -> Result<(), bridge::HeartwoodError> {
+    bridge::remove_listen_address(&address)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,6 +371,28 @@ mod tests {
                 || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
                 || matches!(result, Err(bridge::HeartwoodError::InvalidAddress(_))),
             "invalid connect address should be accepted (noop) or fail with profile/address error"
+        );
+    }
+
+    #[test]
+    fn test_add_listen_address_invalid() {
+        let result = heartwood_add_listen_address("not-a-socket".to_string());
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
+                || matches!(result, Err(bridge::HeartwoodError::InvalidAddress(_))),
+            "invalid listen address should be accepted (noop) or fail with profile/address error"
+        );
+    }
+
+    #[test]
+    fn test_remove_listen_address_invalid() {
+        let result = heartwood_remove_listen_address("bad-addr".to_string());
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
+                || matches!(result, Err(bridge::HeartwoodError::InvalidAddress(_))),
+            "invalid listen address should be accepted (noop) or fail with profile/address error"
         );
     }
 }

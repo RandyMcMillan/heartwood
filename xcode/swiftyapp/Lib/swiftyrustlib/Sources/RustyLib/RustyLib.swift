@@ -484,18 +484,20 @@ public struct HeartwoodNodeInfo {
     public var userAgent: String
     public var network: String
     public var relay: String
+    public var listenAddresses: [String]
     public var externalAddresses: [String]
     public var connectAddresses: [String]
     public var paths: HeartwoodPaths
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(alias: String, nodeId: String, userAgent: String, network: String, relay: String, externalAddresses: [String], connectAddresses: [String], paths: HeartwoodPaths) {
+    public init(alias: String, nodeId: String, userAgent: String, network: String, relay: String, listenAddresses: [String], externalAddresses: [String], connectAddresses: [String], paths: HeartwoodPaths) {
         self.alias = alias
         self.nodeId = nodeId
         self.userAgent = userAgent
         self.network = network
         self.relay = relay
+        self.listenAddresses = listenAddresses
         self.externalAddresses = externalAddresses
         self.connectAddresses = connectAddresses
         self.paths = paths
@@ -521,6 +523,9 @@ extension HeartwoodNodeInfo: Equatable, Hashable {
         if lhs.relay != rhs.relay {
             return false
         }
+        if lhs.listenAddresses != rhs.listenAddresses {
+            return false
+        }
         if lhs.externalAddresses != rhs.externalAddresses {
             return false
         }
@@ -539,6 +544,7 @@ extension HeartwoodNodeInfo: Equatable, Hashable {
         hasher.combine(userAgent)
         hasher.combine(network)
         hasher.combine(relay)
+        hasher.combine(listenAddresses)
         hasher.combine(externalAddresses)
         hasher.combine(connectAddresses)
         hasher.combine(paths)
@@ -558,6 +564,7 @@ public struct FfiConverterTypeHeartwoodNodeInfo: FfiConverterRustBuffer {
                 userAgent: FfiConverterString.read(from: &buf), 
                 network: FfiConverterString.read(from: &buf), 
                 relay: FfiConverterString.read(from: &buf), 
+                listenAddresses: FfiConverterSequenceString.read(from: &buf), 
                 externalAddresses: FfiConverterSequenceString.read(from: &buf), 
                 connectAddresses: FfiConverterSequenceString.read(from: &buf), 
                 paths: FfiConverterTypeHeartwoodPaths.read(from: &buf)
@@ -570,6 +577,7 @@ public struct FfiConverterTypeHeartwoodNodeInfo: FfiConverterRustBuffer {
         FfiConverterString.write(value.userAgent, into: &buf)
         FfiConverterString.write(value.network, into: &buf)
         FfiConverterString.write(value.relay, into: &buf)
+        FfiConverterSequenceString.write(value.listenAddresses, into: &buf)
         FfiConverterSequenceString.write(value.externalAddresses, into: &buf)
         FfiConverterSequenceString.write(value.connectAddresses, into: &buf)
         FfiConverterTypeHeartwoodPaths.write(value.paths, into: &buf)
@@ -1127,6 +1135,12 @@ public func heartwoodAddExternalAddress(address: String)throws  {try rustCallWit
     )
 }
 }
+public func heartwoodAddListenAddress(address: String)throws  {try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_add_listen_address(
+        FfiConverterString.lower(address),$0
+    )
+}
+}
 public func heartwoodAnswer() -> UInt32 {
     return try!  FfiConverterUInt32.lift(try! rustCall() {
     uniffi_rustylib_fn_func_heartwood_answer($0
@@ -1171,6 +1185,12 @@ public func heartwoodRemoveConnectAddress(address: String)throws  {try rustCallW
 }
 public func heartwoodRemoveExternalAddress(address: String)throws  {try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_remove_external_address(
+        FfiConverterString.lower(address),$0
+    )
+}
+}
+public func heartwoodRemoveListenAddress(address: String)throws  {try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_remove_listen_address(
         FfiConverterString.lower(address),$0
     )
 }
@@ -1269,6 +1289,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_rustylib_checksum_func_heartwood_add_external_address() != 40825) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_rustylib_checksum_func_heartwood_add_listen_address() != 22113) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_rustylib_checksum_func_heartwood_answer() != 4271) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1291,6 +1314,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_remove_external_address() != 28540) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_remove_listen_address() != 57918) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_repository() != 58935) {

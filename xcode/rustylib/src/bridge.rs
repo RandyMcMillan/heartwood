@@ -43,6 +43,7 @@ pub struct HeartwoodNodeInfo {
     pub user_agent: String,
     pub network: String,
     pub relay: String,
+    pub listen_addresses: Vec<String>,
     pub external_addresses: Vec<String>,
     pub connect_addresses: Vec<String>,
     pub paths: HeartwoodPaths,
@@ -134,6 +135,11 @@ pub fn repository_info(repo: RepositoryInfo) -> HeartwoodRepositoryInfo {
 
 pub fn node_info(profile: &profile::Profile) -> HeartwoodNodeInfo {
     let config = &profile.config.node;
+    let listen_addresses = config
+        .listen
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
     let connect_addresses = config
         .connect
         .iter()
@@ -158,6 +164,7 @@ pub fn node_info(profile: &profile::Profile) -> HeartwoodNodeInfo {
             node::config::Relay::Never => "never".to_string(),
             node::config::Relay::Auto => "auto".to_string(),
         },
+        listen_addresses,
         external_addresses,
         connect_addresses,
         paths: profile_paths(profile),
@@ -274,6 +281,32 @@ pub fn remove_connect_address(input: &str) -> Result<(), HeartwoodError> {
     let connect = parse_connect_address(input)?;
     let mut config = profile.config.clone();
     config.node.connect.shift_remove(&connect);
+    config
+        .write(profile.home().config().as_path())
+        .map_err(|err| HeartwoodError::ConfigWrite(err.to_string()))?;
+    Ok(())
+}
+
+pub fn add_listen_address(address: &str) -> Result<(), HeartwoodError> {
+    let profile = load_profile()?;
+    let addr = std::net::SocketAddr::from_str(address)
+        .map_err(|err| HeartwoodError::InvalidAddress(err.to_string()))?;
+    let mut config = profile.config.clone();
+    if !config.node.listen.contains(&addr) {
+        config.node.listen.push(addr);
+    }
+    config
+        .write(profile.home().config().as_path())
+        .map_err(|err| HeartwoodError::ConfigWrite(err.to_string()))?;
+    Ok(())
+}
+
+pub fn remove_listen_address(address: &str) -> Result<(), HeartwoodError> {
+    let profile = load_profile()?;
+    let addr = std::net::SocketAddr::from_str(address)
+        .map_err(|err| HeartwoodError::InvalidAddress(err.to_string()))?;
+    let mut config = profile.config.clone();
+    config.node.listen.retain(|a| a != &addr);
     config
         .write(profile.home().config().as_path())
         .map_err(|err| HeartwoodError::ConfigWrite(err.to_string()))?;

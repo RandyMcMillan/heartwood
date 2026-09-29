@@ -175,6 +175,38 @@ class HeartwoodStore: ObservableObject {
         }
     }
 
+    func addListenAddress(_ value: String) {
+        do {
+            try heartwoodAddListenAddress(address: value)
+            load()
+        } catch let error as HeartwoodError {
+            switch error {
+            case .InvalidAddress(let msg):
+                errorMessage = msg
+            default:
+                errorMessage = error.localizedDescription
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func removeListenAddress(_ value: String) {
+        do {
+            try heartwoodRemoveListenAddress(address: value)
+            load()
+        } catch let error as HeartwoodError {
+            switch error {
+            case .InvalidAddress(let msg):
+                errorMessage = msg
+            default:
+                errorMessage = error.localizedDescription
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     var hasProfile: Bool {
         heartwoodHasProfile()
     }
@@ -185,6 +217,7 @@ struct ContentView: View {
     @StateObject private var store = HeartwoodStore()
     @State private var newAddress = ""
     @State private var newConnectAddress = ""
+    @State private var newListenAddress = ""
     @State private var lookupRid = ""
     @State private var lookedUpRepo: HeartwoodRepositoryInfo?
 
@@ -483,6 +516,42 @@ struct ContentView: View {
                             .foregroundStyle(accentFill)
                     }
                     .disabled(newConnectAddress.isEmpty)
+                }
+
+                if !node.listenAddresses.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Listen")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(primaryText.opacity(0.62))
+                        ForEach(node.listenAddresses, id: \.self) { addr in
+                            HStack {
+                                Text(addr)
+                                    .font(.subheadline)
+                                    .foregroundStyle(primaryText.opacity(0.92))
+                                Spacer()
+                                Button {
+                                    store.removeListenAddress(addr)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundStyle(accentFill.opacity(0.7))
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    TextField("ip:port", text: $newListenAddress)
+                        .font(.subheadline)
+                        .textFieldStyle(.roundedBorder)
+                    Button {
+                        store.addListenAddress(newListenAddress)
+                        newListenAddress = ""
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .foregroundStyle(accentFill)
+                    }
+                    .disabled(newListenAddress.isEmpty)
                 }
             }
         }
