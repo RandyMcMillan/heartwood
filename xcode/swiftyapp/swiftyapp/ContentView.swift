@@ -24,6 +24,7 @@ class HeartwoodStore: ObservableObject {
     @Published var repoRemotes: [String: [HeartwoodRemote]] = [:]
     @Published var repoBranches: [String: [HeartwoodRef]] = [:]
     @Published var repoLogs: [String: [HeartwoodCommit]] = [:]
+    @Published var nodeInventory: [String] = []
     @Published var notificationCount: UInt64 = 0
     @Published var notificationCountsByRepo: [HeartwoodNotificationCount] = []
     @Published var errorMessage: String?
@@ -57,6 +58,7 @@ class HeartwoodStore: ObservableObject {
             seedPolicies = (try? heartwoodSeedPolicies()) ?? []
             followPolicies = (try? heartwoodFollowPolicies()) ?? []
             nodeSessions = (try? heartwoodNodeSessions()) ?? []
+            nodeInventory = (try? heartwoodNodeInventory()) ?? []
             notificationCount = (try? heartwoodNotificationCount()) ?? 0
             notificationCountsByRepo = (try? heartwoodNotificationCountsByRepo()) ?? []
 
@@ -397,6 +399,10 @@ struct ContentView: View {
                         repositoriesCard(repos: store.repositories)
                     }
 
+                    if !store.nodeInventory.isEmpty {
+                        inventoryCard
+                    }
+
                     if !store.seedPolicies.isEmpty {
                         seedPoliciesCard(policies: store.seedPolicies)
                     }
@@ -674,6 +680,33 @@ struct ContentView: View {
                 }
 
                 infoRow(label: "Socket", value: status.socket)
+            }
+        }
+    }
+
+    private var inventoryCard: some View {
+        glassCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Inventory", systemImage: "archivebox")
+                    .font(.headline)
+                    .foregroundStyle(accentText)
+
+                Text("\(store.nodeInventory.count) repo\(store.nodeInventory.count == 1 ? "" : "s") advertised")
+                    .font(.subheadline)
+                    .foregroundStyle(primaryText.opacity(0.84))
+
+                ForEach(store.nodeInventory.prefix(5), id: \.self) { rid in
+                    Text(rid)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(primaryText.opacity(0.68))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                if store.nodeInventory.count > 5 {
+                    Text("+\(store.nodeInventory.count - 5) more")
+                        .font(.caption2)
+                        .foregroundStyle(primaryText.opacity(0.52))
+                }
             }
         }
     }

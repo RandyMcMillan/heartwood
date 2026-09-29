@@ -2253,6 +2253,12 @@ public func heartwoodNodeInfo()throws  -> HeartwoodNodeInfo {
     )
 })
 }
+public func heartwoodNodeInventory()throws  -> [String] {
+    return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_node_inventory($0
+    )
+})
+}
 public func heartwoodNodeSessions()throws  -> [HeartwoodSession] {
     return try  FfiConverterSequenceTypeHeartwoodSession.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_node_sessions($0
@@ -2488,6 +2494,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_node_info() != 33573) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_node_inventory() != 4964) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_node_sessions() != 57868) {

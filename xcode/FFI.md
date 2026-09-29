@@ -120,6 +120,13 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 - [x] Add Swift recent commit list in repository cards
 - [x] Add tests for shape and invalid RID handling
 
+## Phase 15: Protocol gap — node inventory
+
+- [x] Add `heartwoodNodeInventory()` returning `[String]` (list of RIDs)
+- [x] Uses `routing.get_inventory(profile.id())` to get advertised repos
+- [x] Add Swift inventory card showing advertised repositories
+- [x] Add tests for shape
+
 ## Suggested implementation order
 
 1. Metadata and normalization helpers

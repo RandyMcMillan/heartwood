@@ -234,6 +234,11 @@ pub fn heartwood_repository_log(rid: String, limit: u32) -> Result<Vec<bridge::H
     bridge::repository_log(&rid, limit)
 }
 
+#[uniffi::export]
+pub fn heartwood_node_inventory() -> Result<Vec<String>, bridge::HeartwoodError> {
+    bridge::node_inventory()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -666,6 +671,15 @@ mod tests {
                         assert!(commit.timestamp >= 0);
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn test_node_inventory_shape() {
+        if let Ok(inventory) = heartwood_node_inventory() {
+            for rid in inventory {
+                assert!(!rid.is_empty());
             }
         }
     }

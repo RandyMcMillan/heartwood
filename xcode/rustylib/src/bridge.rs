@@ -709,3 +709,17 @@ pub fn repository_log(rid: &str, limit: u32) -> Result<Vec<HeartwoodCommit>, Hea
 
     Ok(commits)
 }
+
+pub fn node_inventory() -> Result<Vec<String>, HeartwoodError> {
+    let profile = load_profile()?;
+    let routing = profile
+        .routing()
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let inventory = routing
+        .get_inventory(profile.id())
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?
+        .into_iter()
+        .map(|rid| rid.to_string())
+        .collect::<Vec<_>>();
+    Ok(inventory)
+}
