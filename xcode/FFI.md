@@ -4,31 +4,31 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 
 ## Phase 1: Define the public FFI surface
 
-- [ ] Audit the current Rust bridge exports in `xcode/rustylib/src/lib.rs`
-- [ ] List the Swift app needs from Heartwood:
-  - [ ] version/build metadata
-  - [ ] repo and node ID normalization
-  - [ ] repository lookup and summaries
-  - [ ] node status and identity data
-  - [ ] local state/config access
+- [x] Audit the current Rust bridge exports in `xcode/rustylib/src/lib.rs`
+- [x] List the Swift app needs from Heartwood:
+  - [x] version/build metadata
+  - [x] repo and node ID normalization
+  - [x] repository lookup and summaries
+  - [x] node status and identity data
+  - [x] local state/config access
   - [ ] read-only operations first, write actions later
 - [ ] Decide which operations should stay in Rust and which should be thin Swift wrappers
 - [ ] Define the error model for Swift-friendly failures
 
 ## Phase 2: Build a Rust bridge layer
 
-- [ ] Keep `xcode/rustylib` as the UniFFI entrypoint
+- [x] Keep `xcode/rustylib` as the UniFFI entrypoint
 - [ ] Add a dedicated internal bridge module or helper crate for Heartwood-facing logic
-- [ ] Reuse existing Heartwood crates instead of reimplementing logic in the bridge
-- [ ] Prefer simple UniFFI types: strings, records, enums, optionals, lists, and explicit errors
-- [ ] Avoid exposing opaque Rust internals directly unless a handle type is clearly justified
+- [x] Reuse existing Heartwood crates instead of reimplementing logic in the bridge
+- [x] Prefer simple UniFFI types: strings, records, enums, optionals, lists, and explicit errors
+- [x] Avoid exposing opaque Rust internals directly unless a handle type is clearly justified
 
 ## Phase 3: Implement read-only APIs first
 
-- [ ] Expose build metadata and runtime version info
-- [ ] Expose repository ID and node ID parsing/normalization helpers
-- [ ] Add repository summary/read APIs
-- [ ] Add node summary/status APIs
+- [x] Expose build metadata and runtime version info
+- [x] Expose repository ID and node ID parsing/normalization helpers
+- [x] Add repository summary/read APIs
+- [x] Add node summary/status APIs
 - [ ] Add tests for each exported function
 
 ## Phase 4: Add stateful and interactive APIs

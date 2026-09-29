@@ -17,8 +17,9 @@ Demonstrates the ability to generate the necessary bindings for a rust lib compi
 `swiftyrustlib` Swift package of rust lib
 
 The Rust bridge now also exposes heartwood-aware UniFFI helpers for version/
-commit metadata and `RepoId`/`NodeId` normalization. Those are the first
-building blocks for the Swift app to talk to the main `heartwood` crates.
+commit metadata, `RepoId`/`NodeId` normalization, local profile paths, and
+repository/node summaries. Those are the first building blocks for the Swift
+app to talk to the main `heartwood` crates.
 
 1. Run `build.sh`
 1. Open the Xcode project located at `swiftyapp/swiftyapp.xcodeproj`.

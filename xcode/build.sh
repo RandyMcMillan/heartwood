@@ -21,9 +21,18 @@ STATIC_LIB_NAME="lib${MY_CRATE}.a"
 NEW_HEADER_DIR="out/include"
 
 targets=("aarch64-apple-ios" "aarch64-apple-ios-sim" "aarch64-apple-darwin")
+IOS_DEPLOYMENT_TARGET="17.4"
+MACOS_DEPLOYMENT_TARGET="14.0"
 
 for target in "${targets[@]}"; do
-    cargo build --target "${target}" --release
+    case "${target}" in
+        aarch64-apple-ios|aarch64-apple-ios-sim)
+            IPHONEOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET}" cargo build --target "${target}" --release
+            ;;
+        aarch64-apple-darwin)
+            MACOSX_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET}" cargo build --target "${target}" --release
+            ;;
+    esac
     cargo run --bin uniffi-bindgen generate --library target/${target}/release/lib${MY_CRATE}.a --language swift --out-dir out
 done
 
