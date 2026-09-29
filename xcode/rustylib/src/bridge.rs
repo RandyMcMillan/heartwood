@@ -3,7 +3,7 @@ use std::str::FromStr;
 use radicle::identity::Doc;
 use radicle::identity::doc::{GetPayload, PayloadId};
 use radicle::identity::project::Project;
-use radicle::node::{self, Alias, NodeId};
+use radicle::node::{self, Alias, AliasStore, NodeId};
 use radicle::node::{Handle, routing::Store as RoutingStore};
 use radicle::prelude::RepoId;
 use radicle::profile;
@@ -645,4 +645,25 @@ pub fn notification_counts_by_repo() -> Result<Vec<HeartwoodNotificationCount>, 
         })
         .collect::<Vec<_>>();
     Ok(items)
+}
+
+pub fn alias_for_node(nid: &str) -> Result<Option<String>, HeartwoodError> {
+    let profile = load_profile()?;
+    let nid = NodeId::from_str(nid)
+        .map_err(|err| HeartwoodError::InvalidAddress(err.to_string()))?;
+    let aliases = profile.aliases();
+    Ok(aliases.alias(&nid).map(|a| a.to_string()))
+}
+
+pub fn nodes_for_alias(alias: &str) -> Result<Vec<String>, HeartwoodError> {
+    let profile = load_profile()?;
+    let alias = Alias::from_str(alias)
+        .map_err(|err| HeartwoodError::InvalidAlias(err.to_string()))?;
+    let aliases = profile.aliases();
+    let nodes = aliases
+        .reverse_lookup(&alias)
+        .into_values()
+        .flat_map(|set| set.into_iter().map(|nid| nid.to_string()))
+        .collect::<Vec<_>>();
+    Ok(nodes)
 }

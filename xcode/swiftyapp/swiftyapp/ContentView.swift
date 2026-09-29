@@ -266,6 +266,10 @@ struct ContentView: View {
     @State private var newListenAddress = ""
     @State private var lookupRid = ""
     @State private var lookedUpRepo: HeartwoodRepositoryInfo?
+    @State private var lookupNid = ""
+    @State private var lookedUpAlias: String?
+    @State private var lookupAlias = ""
+    @State private var lookedUpNodes: [String] = []
 
     var body: some View {
         ZStack {
@@ -881,6 +885,58 @@ struct ContentView: View {
                     .background(cardBackground.opacity(colorScheme == .dark ? 0.3 : 0.5), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 } else if !lookupRid.isEmpty {
                     Text("Repository not found")
+                        .font(.subheadline)
+                        .foregroundStyle(primaryText.opacity(0.62))
+                }
+
+                HStack(spacing: 8) {
+                    TextField("z6M…", text: $lookupNid)
+                        .font(.subheadline)
+                        .textFieldStyle(.roundedBorder)
+                    Button {
+                        lookedUpAlias = (try? heartwoodAliasForNode(nid: lookupNid)) ?? nil
+                    } label: {
+                        Image(systemName: "person.crop.circle.badge.magnifyingglass")
+                            .foregroundStyle(accentFill)
+                    }
+                    .disabled(lookupNid.isEmpty)
+                }
+
+                if let alias = lookedUpAlias {
+                    Text(alias)
+                        .font(.subheadline)
+                        .foregroundStyle(primaryText)
+                } else if !lookupNid.isEmpty {
+                    Text("No alias found")
+                        .font(.subheadline)
+                        .foregroundStyle(primaryText.opacity(0.62))
+                }
+
+                HStack(spacing: 8) {
+                    TextField("alias", text: $lookupAlias)
+                        .font(.subheadline)
+                        .textFieldStyle(.roundedBorder)
+                    Button {
+                        lookedUpNodes = (try? heartwoodNodesForAlias(alias: lookupAlias)) ?? []
+                    } label: {
+                        Image(systemName: "person.2.badge.magnifyingglass")
+                            .foregroundStyle(accentFill)
+                    }
+                    .disabled(lookupAlias.isEmpty)
+                }
+
+                if !lookedUpNodes.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(lookedUpNodes, id: \.self) { nid in
+                            Text(nid)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(primaryText.opacity(0.84))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                } else if !lookupAlias.isEmpty {
+                    Text("No nodes found")
                         .font(.subheadline)
                         .foregroundStyle(primaryText.opacity(0.62))
                 }

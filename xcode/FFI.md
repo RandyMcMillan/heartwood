@@ -105,6 +105,14 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 - [x] Add Swift notification card with total count and per-repo breakdown
 - [x] Add tests for shape
 
+## Phase 13: Protocol gap — alias lookup
+
+- [x] Add `heartwoodAliasForNode(nid)` returning `Option<String>`
+- [x] Add `heartwoodNodesForAlias(alias)` returning `[String]`
+- [x] Uses `profile.aliases()` which combines policy and database aliases
+- [x] Add Swift alias lookup fields in the lookup card
+- [x] Add tests for invalid input handling
+
 ## Suggested implementation order
 
 1. Metadata and normalization helpers

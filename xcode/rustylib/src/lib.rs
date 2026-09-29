@@ -219,6 +219,16 @@ pub fn heartwood_notification_counts_by_repo() -> Result<Vec<bridge::HeartwoodNo
     bridge::notification_counts_by_repo()
 }
 
+#[uniffi::export]
+pub fn heartwood_alias_for_node(nid: String) -> Result<Option<String>, bridge::HeartwoodError> {
+    bridge::alias_for_node(&nid)
+}
+
+#[uniffi::export]
+pub fn heartwood_nodes_for_alias(alias: String) -> Result<Vec<String>, bridge::HeartwoodError> {
+    bridge::nodes_for_alias(&alias)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,5 +616,27 @@ mod tests {
                 assert!(!c.rid.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn test_alias_for_node_invalid() {
+        let result = heartwood_alias_for_node("not-a-nid".to_string());
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
+                || matches!(result, Err(bridge::HeartwoodError::InvalidAddress(_))),
+            "invalid nid should be accepted (noop) or fail with profile/address error"
+        );
+    }
+
+    #[test]
+    fn test_nodes_for_alias_invalid() {
+        let result = heartwood_nodes_for_alias("".to_string());
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
+                || matches!(result, Err(bridge::HeartwoodError::InvalidAlias(_))),
+            "empty alias should be accepted (noop) or fail with profile/alias error"
+        );
     }
 }

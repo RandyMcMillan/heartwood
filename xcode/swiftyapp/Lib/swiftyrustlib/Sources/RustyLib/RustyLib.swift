@@ -2079,6 +2079,13 @@ public func heartwoodAddListenAddress(address: String)throws  {try rustCallWithE
     )
 }
 }
+public func heartwoodAliasForNode(nid: String)throws  -> String? {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_alias_for_node(
+        FfiConverterString.lower(nid),$0
+    )
+})
+}
 public func heartwoodAnswer() -> UInt32 {
     return try!  FfiConverterUInt32.lift(try! rustCall() {
     uniffi_rustylib_fn_func_heartwood_answer($0
@@ -2132,6 +2139,13 @@ public func heartwoodNodeSessions()throws  -> [HeartwoodSession] {
 public func heartwoodNodeStatus()throws  -> HeartwoodNodeStatus {
     return try  FfiConverterTypeHeartwoodNodeStatus.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_node_status($0
+    )
+})
+}
+public func heartwoodNodesForAlias(alias: String)throws  -> [String] {
+    return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_nodes_for_alias(
+        FfiConverterString.lower(alias),$0
     )
 })
 }
@@ -2321,6 +2335,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_rustylib_checksum_func_heartwood_add_listen_address() != 22113) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_rustylib_checksum_func_heartwood_alias_for_node() != 51339) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_rustylib_checksum_func_heartwood_answer() != 4271) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2346,6 +2363,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_node_status() != 6548) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_nodes_for_alias() != 52837) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_notification_count() != 38100) {
