@@ -158,7 +158,15 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 - [x] Parses git OIDs via `radicle::git::Oid::from_str()`
 - [x] Add tests for invalid RID handling
 
-## Phase 20: Protocol gap — SSH key management
+## Phase 20: Protocol gap — repository creation/init
+
+- [x] Add `heartwoodRepositoryInit(path, name, description, defaultBranch, visibility)` returning `String` (RID)
+- [x] Uses `radicle::rad::init()` with an existing git repository at `path`
+- [x] Parses `ProjectName`, `BranchName`, and `Visibility` from strings
+- [x] Requires signer (encrypted keystore or ssh-agent)
+- [x] Add tests for invalid path handling
+
+## Phase 21: Protocol gap — SSH key management
 
 - [x] Add `heartwoodSshKeyStatus()` returning `HeartwoodSshKeyStatus { exists, encrypted, publicKey }`
 - [x] Add `heartwoodSshKeyGenerate(passphrase)` returning `String` (public key)
@@ -213,10 +221,11 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 18. Issue and patch lists
 19. COB write operations (create issue)
 20. COB write operations (create patch)
-21. SSH key management
-22. Repository deletion
-23. Node network control (fetch, seed, follow, connect)
-24. Swift integration and error handling
+21. Repository creation/init
+22. SSH key management
+23. Repository deletion
+24. Node network control (fetch, seed, follow, connect)
+25. Swift integration and error handling
 
 ## Notes
 
@@ -227,7 +236,5 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 
 ## Remaining advanced gaps (not yet implemented)
 
-- Repository creation/init (`rad init` equivalent — requires existing git repo on disk)
-- Patch creation (`patches_mut().create()` — requires MergeTarget and git OIDs)
 - Node daemon start/stop (not feasible on iOS, use external process or shell)
 - Repository deletion/cleanup
