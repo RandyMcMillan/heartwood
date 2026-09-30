@@ -1884,6 +1884,10 @@ public enum HeartwoodError {
     )
     case InvalidAddress(String
     )
+    case Signer(String
+    )
+    case InvalidTitle(String
+    )
 }
 
 
@@ -1922,6 +1926,12 @@ public struct FfiConverterTypeHeartwoodError: FfiConverterRustBuffer {
             try FfiConverterString.read(from: &buf)
             )
         case 8: return .InvalidAddress(
+            try FfiConverterString.read(from: &buf)
+            )
+        case 9: return .Signer(
+            try FfiConverterString.read(from: &buf)
+            )
+        case 10: return .InvalidTitle(
             try FfiConverterString.read(from: &buf)
             )
 
@@ -1973,6 +1983,16 @@ public struct FfiConverterTypeHeartwoodError: FfiConverterRustBuffer {
         
         case let .InvalidAddress(v1):
             writeInt(&buf, Int32(8))
+            FfiConverterString.write(v1, into: &buf)
+            
+        
+        case let .Signer(v1):
+            writeInt(&buf, Int32(9))
+            FfiConverterString.write(v1, into: &buf)
+            
+        
+        case let .InvalidTitle(v1):
+            writeInt(&buf, Int32(10))
             FfiConverterString.write(v1, into: &buf)
             
         }
@@ -2419,6 +2439,15 @@ public func heartwoodCommit() -> String {
     )
 })
 }
+public func heartwoodCreateIssue(rid: String, title: String, description: String)throws  -> String {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_create_issue(
+        FfiConverterString.lower(rid),
+        FfiConverterString.lower(title),
+        FfiConverterString.lower(description),$0
+    )
+})
+}
 public func heartwoodFollowPolicies()throws  -> [HeartwoodFollowPolicy] {
     return try  FfiConverterSequenceTypeHeartwoodFollowPolicy.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_follow_policies($0
@@ -2700,6 +2729,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_commit() != 16525) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_create_issue() != 13932) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_follow_policies() != 40008) {

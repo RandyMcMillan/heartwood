@@ -254,6 +254,15 @@ pub fn heartwood_repository_patches_list(rid: String, limit: u32) -> Result<Vec<
     bridge::repository_patches(&rid, limit)
 }
 
+#[uniffi::export]
+pub fn heartwood_create_issue(
+    rid: String,
+    title: String,
+    description: String,
+) -> Result<String, bridge::HeartwoodError> {
+    bridge::create_issue(&rid, &title, &description)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,6 +749,22 @@ mod tests {
                 || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
                 || matches!(result, Err(bridge::HeartwoodError::InvalidRepoId(_))),
             "invalid rid should be accepted (noop) or fail with profile/repo error"
+        );
+    }
+
+    #[test]
+    fn test_create_issue_invalid_rid() {
+        let result = heartwood_create_issue(
+            "not-a-rid".to_string(),
+            "title".to_string(),
+            "description".to_string(),
+        );
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
+                || matches!(result, Err(bridge::HeartwoodError::InvalidRepoId(_)))
+                || matches!(result, Err(bridge::HeartwoodError::Signer(_))),
+            "invalid rid should be accepted (noop) or fail with profile/repo/signer error"
         );
     }
 }

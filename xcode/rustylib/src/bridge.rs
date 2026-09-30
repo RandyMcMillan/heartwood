@@ -7,7 +7,7 @@ use radicle::node::{self, Alias, AliasStore, NodeId};
 use radicle::node::{Handle, routing::Store as RoutingStore};
 use radicle::prelude::RepoId;
 use radicle::profile;
-use radicle::storage::{ReadRepository, ReadStorage, RemoteRepository, RepositoryInfo, SignedRefsInfo};
+use radicle::storage::{ReadRepository, ReadStorage, RemoteRepository, RepositoryInfo, SignedRefsInfo, WriteStorage};
 
 #[derive(Debug, uniffi::Record)]
 pub struct HeartwoodPaths {
@@ -68,6 +68,10 @@ pub enum HeartwoodError {
     ConfigWrite(String),
     #[error("invalid address: {0}")]
     InvalidAddress(String),
+    #[error("signer unavailable: {0}")]
+    Signer(String),
+    #[error("invalid title: {0}")]
+    InvalidTitle(String),
 }
 
 pub fn load_profile() -> Result<profile::Profile, HeartwoodError> {
@@ -822,4 +826,33 @@ pub fn repository_patches(rid: &str, limit: u32) -> Result<Vec<HeartwoodPatch>, 
         .collect::<Vec<_>>();
 
     Ok(items)
+}
+
+pub fn create_issue(rid: &str, title: &str, description: &str) -> Result<String, HeartwoodError> {
+    let profile = load_profile()?;
+    let signer = profile
+        .signer()
+        .map_err(|err| HeartwoodError::Signer(err.to_string()))?;
+    let rid = RepoId::from_str(rid)
+        .map_err(|err| HeartwoodError::InvalidRepoId(err.to_string()))?;
+    let repo = profile
+        .storage
+        .repository_mut(rid)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let title = radicle::cob::Title::new(title)
+        .map_err(|err| HeartwoodError::InvalidTitle(err.to_string()))?;
+    let mut issues = profile
+        .issues_mut(&repo, &signer)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let issue = issues
+        .create(
+            title,
+            description,
+            &[],
+            &[],
+            std::iter::empty::<radicle::cob::Embed<radicle::cob::Uri>>(),
+        )
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let (id, _): (radicle::cob::issue::IssueId, _) = issue.into();
+    Ok(id.to_string())
 }
