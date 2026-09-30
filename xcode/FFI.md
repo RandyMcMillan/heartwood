@@ -150,7 +150,15 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 - [x] Maps `SignerError` to `HeartwoodError::Signer` for encrypted keystores or missing ssh-agent
 - [x] Add tests for invalid RID handling
 
-## Phase 19: Protocol gap — SSH key management
+## Phase 19: Protocol gap — COB write operations (patches)
+
+- [x] Add `heartwoodCreatePatch(rid, title, description, base, tip, targetBranch)` returning `String` (patch ID)
+- [x] Uses `profile.signer()`, `profile.patches_mut(&repo, &signer)`, and `cache.create()`
+- [x] Supports `MergeTarget::Delegates` (default) and `MergeTarget::Branch(TargetBranch)`
+- [x] Parses git OIDs via `radicle::git::Oid::from_str()`
+- [x] Add tests for invalid RID handling
+
+## Phase 20: Protocol gap — SSH key management
 
 - [x] Add `heartwoodSshKeyStatus()` returning `HeartwoodSshKeyStatus { exists, encrypted, publicKey }`
 - [x] Add `heartwoodSshKeyGenerate(passphrase)` returning `String` (public key)
@@ -158,13 +166,13 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 - [x] Generates random seed via `getrandom::getrandom()`
 - [x] Add tests for shape
 
-## Phase 20: Protocol gap — repository deletion
+## Phase 21: Protocol gap — repository deletion
 
 - [x] Add `heartwoodRepositoryRemove(rid)` returning `()`
 - [x] Uses `profile.storage.repository(rid)` and `repo.remove()` for full deletion
 - [x] Add tests for invalid RID handling
 
-## Phase 21: Protocol gap — node network control
+## Phase 22: Protocol gap — node network control
 
 - [x] Add `heartwoodNodeFetch(rid, from, timeoutSecs)` returning `String`
 - [x] Add `heartwoodNodeSeed(rid, scope)` returning `bool`
@@ -175,6 +183,13 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 - [x] Add `heartwoodNodeDisconnect(nid)` returning `()`
 - [x] Uses `radicle::Node::new(socket)` via the `Handle` trait
 - [x] Add tests for invalid RID/NID/address handling
+
+## Phase 23: Swift integration
+
+- [x] Update `HeartwoodError` switch to handle `.Signer` and `.InvalidTitle` cases
+- [x] Add `HeartwoodStore` methods: `createIssue`, `createPatch`, `sshKeyStatus`, `sshKeyGenerate`, `removeRepository`
+- [x] Add `HeartwoodStore` methods: `nodeFetch`, `nodeSeed`, `nodeUnseed`, `nodeFollow`, `nodeUnfollow`, `nodeConnect`, `nodeDisconnect`
+- [x] Verify Xcode app builds successfully after each FFI addition
 
 ## Suggested implementation order
 
@@ -197,9 +212,11 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 17. Repository size
 18. Issue and patch lists
 19. COB write operations (create issue)
-20. SSH key management
-21. Repository deletion
-22. Node network control (fetch, seed, follow, connect)
+20. COB write operations (create patch)
+21. SSH key management
+22. Repository deletion
+23. Node network control (fetch, seed, follow, connect)
+24. Swift integration and error handling
 
 ## Notes
 
