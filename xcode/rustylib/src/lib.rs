@@ -278,6 +278,41 @@ pub fn heartwood_repository_remove(rid: String) -> Result<(), bridge::HeartwoodE
     bridge::repository_remove(&rid)
 }
 
+#[uniffi::export]
+pub fn heartwood_node_fetch(rid: String, from: String, timeout_secs: u64) -> Result<String, bridge::HeartwoodError> {
+    bridge::node_fetch(&rid, &from, timeout_secs)
+}
+
+#[uniffi::export]
+pub fn heartwood_node_seed(rid: String, scope: String) -> Result<bool, bridge::HeartwoodError> {
+    bridge::node_seed(&rid, &scope)
+}
+
+#[uniffi::export]
+pub fn heartwood_node_unseed(rid: String) -> Result<bool, bridge::HeartwoodError> {
+    bridge::node_unseed(&rid)
+}
+
+#[uniffi::export]
+pub fn heartwood_node_follow(nid: String, alias: Option<String>) -> Result<bool, bridge::HeartwoodError> {
+    bridge::node_follow(&nid, alias)
+}
+
+#[uniffi::export]
+pub fn heartwood_node_unfollow(nid: String) -> Result<bool, bridge::HeartwoodError> {
+    bridge::node_unfollow(&nid)
+}
+
+#[uniffi::export]
+pub fn heartwood_node_connect(nid: String, addr: String, timeout_secs: u64) -> Result<String, bridge::HeartwoodError> {
+    bridge::node_connect(&nid, &addr, timeout_secs)
+}
+
+#[uniffi::export]
+pub fn heartwood_node_disconnect(nid: String) -> Result<(), bridge::HeartwoodError> {
+    bridge::node_disconnect(&nid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -800,6 +835,40 @@ mod tests {
                 || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
                 || matches!(result, Err(bridge::HeartwoodError::InvalidRepoId(_))),
             "invalid rid should be accepted (noop) or fail with profile/repo error"
+        );
+    }
+
+    #[test]
+    fn test_node_fetch_invalid_rid() {
+        let result = heartwood_node_fetch("not-a-rid".to_string(), "not-a-nid".to_string(), 30);
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
+                || matches!(result, Err(bridge::HeartwoodError::InvalidRepoId(_)))
+                || matches!(result, Err(bridge::HeartwoodError::InvalidAddress(_))),
+            "invalid rid should be accepted (noop) or fail with profile/repo/address error"
+        );
+    }
+
+    #[test]
+    fn test_node_seed_invalid_rid() {
+        let result = heartwood_node_seed("not-a-rid".to_string(), "all".to_string());
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
+                || matches!(result, Err(bridge::HeartwoodError::InvalidRepoId(_))),
+            "invalid rid should be accepted (noop) or fail with profile/repo error"
+        );
+    }
+
+    #[test]
+    fn test_node_connect_invalid() {
+        let result = heartwood_node_connect("not-a-nid".to_string(), "bad-addr".to_string(), 30);
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
+                || matches!(result, Err(bridge::HeartwoodError::InvalidAddress(_))),
+            "invalid params should be accepted (noop) or fail with profile/address error"
         );
     }
 }

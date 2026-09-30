@@ -916,3 +916,100 @@ pub fn repository_remove(rid: &str) -> Result<(), HeartwoodError> {
     repo.remove().map_err(|err| HeartwoodError::Storage(err.to_string()))?;
     Ok(())
 }
+
+pub fn node_fetch(rid: &str, from: &str, timeout_secs: u64) -> Result<String, HeartwoodError> {
+    let profile = load_profile()?;
+    let rid = RepoId::from_str(rid)
+        .map_err(|err| HeartwoodError::InvalidRepoId(err.to_string()))?;
+    let from = NodeId::from_str(from)
+        .map_err(|err| HeartwoodError::InvalidAddress(err.to_string()))?;
+    let socket = profile.socket_from_env();
+    let mut node = radicle::Node::new(&socket);
+    let result = node
+        .fetch(rid, from, std::time::Duration::from_secs(timeout_secs), None)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    match result {
+        radicle::node::FetchResult::Success { .. } => Ok("success".to_string()),
+        radicle::node::FetchResult::Failed { reason } => Ok(format!("failed: {reason}")),
+    }
+}
+
+pub fn node_seed(rid: &str, scope: &str) -> Result<bool, HeartwoodError> {
+    let profile = load_profile()?;
+    let rid = RepoId::from_str(rid)
+        .map_err(|err| HeartwoodError::InvalidRepoId(err.to_string()))?;
+    let scope = match scope {
+        "followed" => radicle::node::policy::Scope::Followed,
+        "all" => radicle::node::policy::Scope::All,
+        _ => return Err(HeartwoodError::InvalidRelay(scope.to_string())),
+    };
+    let socket = profile.socket_from_env();
+    let mut node = radicle::Node::new(&socket);
+    node.seed(rid, scope)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))
+}
+
+pub fn node_unseed(rid: &str) -> Result<bool, HeartwoodError> {
+    let profile = load_profile()?;
+    let rid = RepoId::from_str(rid)
+        .map_err(|err| HeartwoodError::InvalidRepoId(err.to_string()))?;
+    let socket = profile.socket_from_env();
+    let mut node = radicle::Node::new(&socket);
+    node.unseed(rid)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))
+}
+
+pub fn node_follow(nid: &str, alias: Option<String>) -> Result<bool, HeartwoodError> {
+    let profile = load_profile()?;
+    let nid = NodeId::from_str(nid)
+        .map_err(|err| HeartwoodError::InvalidAddress(err.to_string()))?;
+    let alias = alias
+        .map(|a| Alias::from_str(&a).map_err(|e| HeartwoodError::InvalidAlias(e.to_string())))
+        .transpose()?;
+    let socket = profile.socket_from_env();
+    let mut node = radicle::Node::new(&socket);
+    node.follow(nid, alias)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))
+}
+
+pub fn node_unfollow(nid: &str) -> Result<bool, HeartwoodError> {
+    let profile = load_profile()?;
+    let nid = NodeId::from_str(nid)
+        .map_err(|err| HeartwoodError::InvalidAddress(err.to_string()))?;
+    let socket = profile.socket_from_env();
+    let mut node = radicle::Node::new(&socket);
+    node.unfollow(nid)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))
+}
+
+pub fn node_connect(nid: &str, addr: &str, timeout_secs: u64) -> Result<String, HeartwoodError> {
+    let profile = load_profile()?;
+    let nid = NodeId::from_str(nid)
+        .map_err(|err| HeartwoodError::InvalidAddress(err.to_string()))?;
+    let address = radicle::node::Address::from_str(addr)
+        .map_err(|err| HeartwoodError::InvalidAddress(err.to_string()))?;
+    let socket = profile.socket_from_env();
+    let mut node = radicle::Node::new(&socket);
+    let opts = radicle::node::ConnectOptions {
+        persistent: false,
+        timeout: std::time::Duration::from_secs(timeout_secs),
+    };
+    let result = node
+        .connect(nid, address, opts)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    match result {
+        radicle::node::ConnectResult::Connected => Ok("connected".to_string()),
+        radicle::node::ConnectResult::Disconnected { reason } => Ok(format!("disconnected: {reason}")),
+    }
+}
+
+pub fn node_disconnect(nid: &str) -> Result<(), HeartwoodError> {
+    let profile = load_profile()?;
+    let nid = NodeId::from_str(nid)
+        .map_err(|err| HeartwoodError::InvalidAddress(err.to_string()))?;
+    let socket = profile.socket_from_env();
+    let mut node = radicle::Node::new(&socket);
+    node.disconnect(nid)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    Ok(())
+}

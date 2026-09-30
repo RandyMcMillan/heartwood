@@ -2548,6 +2548,38 @@ public func heartwoodIsSeeding(rid: String)throws  -> Bool {
     )
 })
 }
+public func heartwoodNodeConnect(nid: String, addr: String, timeoutSecs: UInt64)throws  -> String {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_node_connect(
+        FfiConverterString.lower(nid),
+        FfiConverterString.lower(addr),
+        FfiConverterUInt64.lower(timeoutSecs),$0
+    )
+})
+}
+public func heartwoodNodeDisconnect(nid: String)throws  {try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_node_disconnect(
+        FfiConverterString.lower(nid),$0
+    )
+}
+}
+public func heartwoodNodeFetch(rid: String, from: String, timeoutSecs: UInt64)throws  -> String {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_node_fetch(
+        FfiConverterString.lower(rid),
+        FfiConverterString.lower(from),
+        FfiConverterUInt64.lower(timeoutSecs),$0
+    )
+})
+}
+public func heartwoodNodeFollow(nid: String, alias: String?)throws  -> Bool {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_node_follow(
+        FfiConverterString.lower(nid),
+        FfiConverterOptionString.lower(alias),$0
+    )
+})
+}
 public func heartwoodNodeInfo()throws  -> HeartwoodNodeInfo {
     return try  FfiConverterTypeHeartwoodNodeInfo.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_node_info($0
@@ -2560,6 +2592,14 @@ public func heartwoodNodeInventory()throws  -> [String] {
     )
 })
 }
+public func heartwoodNodeSeed(rid: String, scope: String)throws  -> Bool {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_node_seed(
+        FfiConverterString.lower(rid),
+        FfiConverterString.lower(scope),$0
+    )
+})
+}
 public func heartwoodNodeSessions()throws  -> [HeartwoodSession] {
     return try  FfiConverterSequenceTypeHeartwoodSession.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_node_sessions($0
@@ -2569,6 +2609,20 @@ public func heartwoodNodeSessions()throws  -> [HeartwoodSession] {
 public func heartwoodNodeStatus()throws  -> HeartwoodNodeStatus {
     return try  FfiConverterTypeHeartwoodNodeStatus.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_node_status($0
+    )
+})
+}
+public func heartwoodNodeUnfollow(nid: String)throws  -> Bool {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_node_unfollow(
+        FfiConverterString.lower(nid),$0
+    )
+})
+}
+public func heartwoodNodeUnseed(rid: String)throws  -> Bool {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_node_unseed(
+        FfiConverterString.lower(rid),$0
     )
 })
 }
@@ -2839,16 +2893,37 @@ private var initializationResult: InitializationResult = {
     if (uniffi_rustylib_checksum_func_heartwood_is_seeding() != 59320) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_rustylib_checksum_func_heartwood_node_connect() != 10008) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_node_disconnect() != 63156) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_node_fetch() != 6575) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_node_follow() != 22313) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_rustylib_checksum_func_heartwood_node_info() != 33573) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_node_inventory() != 4964) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_rustylib_checksum_func_heartwood_node_seed() != 17439) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_rustylib_checksum_func_heartwood_node_sessions() != 57868) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_node_status() != 6548) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_node_unfollow() != 22069) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_node_unseed() != 44665) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_nodes_for_alias() != 52837) {
