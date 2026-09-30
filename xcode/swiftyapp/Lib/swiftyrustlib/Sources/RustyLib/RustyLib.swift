@@ -1864,6 +1864,80 @@ public func FfiConverterTypeHeartwoodSession_lower(_ value: HeartwoodSession) ->
 }
 
 
+public struct HeartwoodSshKeyStatus {
+    public var exists: Bool
+    public var encrypted: Bool
+    public var publicKey: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(exists: Bool, encrypted: Bool, publicKey: String?) {
+        self.exists = exists
+        self.encrypted = encrypted
+        self.publicKey = publicKey
+    }
+}
+
+
+
+extension HeartwoodSshKeyStatus: Equatable, Hashable {
+    public static func ==(lhs: HeartwoodSshKeyStatus, rhs: HeartwoodSshKeyStatus) -> Bool {
+        if lhs.exists != rhs.exists {
+            return false
+        }
+        if lhs.encrypted != rhs.encrypted {
+            return false
+        }
+        if lhs.publicKey != rhs.publicKey {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(exists)
+        hasher.combine(encrypted)
+        hasher.combine(publicKey)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHeartwoodSshKeyStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HeartwoodSshKeyStatus {
+        return
+            try HeartwoodSshKeyStatus(
+                exists: FfiConverterBool.read(from: &buf), 
+                encrypted: FfiConverterBool.read(from: &buf), 
+                publicKey: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HeartwoodSshKeyStatus, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.exists, into: &buf)
+        FfiConverterBool.write(value.encrypted, into: &buf)
+        FfiConverterOptionString.write(value.publicKey, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHeartwoodSshKeyStatus_lift(_ buf: RustBuffer) throws -> HeartwoodSshKeyStatus {
+    return try FfiConverterTypeHeartwoodSshKeyStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHeartwoodSshKeyStatus_lower(_ value: HeartwoodSshKeyStatus) -> RustBuffer {
+    return FfiConverterTypeHeartwoodSshKeyStatus.lower(value)
+}
+
+
 public enum HeartwoodError {
 
     
@@ -2612,6 +2686,12 @@ public func heartwoodRepositoryRemotes(rid: String)throws  -> [HeartwoodRemote] 
     )
 })
 }
+public func heartwoodRepositoryRemove(rid: String)throws  {try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_repository_remove(
+        FfiConverterString.lower(rid),$0
+    )
+}
+}
 public func heartwoodRepositorySeedCount(rid: String)throws  -> UInt64 {
     return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_repository_seed_count(
@@ -2655,6 +2735,19 @@ public func heartwoodSetRelay(mode: String)throws  {try rustCallWithError(FfiCon
         FfiConverterString.lower(mode),$0
     )
 }
+}
+public func heartwoodSshKeyGenerate(passphrase: String?)throws  -> String {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_ssh_key_generate(
+        FfiConverterOptionString.lower(passphrase),$0
+    )
+})
+}
+public func heartwoodSshKeyStatus()throws  -> HeartwoodSshKeyStatus {
+    return try  FfiConverterTypeHeartwoodSshKeyStatus.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_ssh_key_status($0
+    )
+})
 }
 public func heartwoodVersion() -> String {
     return try!  FfiConverterString.lift(try! rustCall() {
@@ -2809,6 +2902,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_rustylib_checksum_func_heartwood_repository_remotes() != 41429) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_rustylib_checksum_func_heartwood_repository_remove() != 44615) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_rustylib_checksum_func_heartwood_repository_seed_count() != 49650) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2828,6 +2924,12 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_set_relay() != 6716) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_ssh_key_generate() != 16452) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_ssh_key_status() != 6169) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_version() != 58832) {

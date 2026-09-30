@@ -856,3 +856,63 @@ pub fn create_issue(rid: &str, title: &str, description: &str) -> Result<String,
     let (id, _): (radicle::cob::issue::IssueId, _) = issue.into();
     Ok(id.to_string())
 }
+
+#[derive(Debug, uniffi::Record)]
+pub struct HeartwoodSshKeyStatus {
+    pub exists: bool,
+    pub encrypted: bool,
+    pub public_key: Option<String>,
+}
+
+pub fn ssh_key_status() -> Result<HeartwoodSshKeyStatus, HeartwoodError> {
+    let profile = load_profile()?;
+    let exists = profile.keystore.secret_key_path().exists();
+    let encrypted = if exists {
+        profile
+            .keystore
+            .is_encrypted()
+            .map_err(|err| HeartwoodError::Storage(err.to_string()))?
+    } else {
+        false
+    };
+    let public_key = if exists {
+        profile
+            .keystore
+            .public_key()
+            .map_err(|err| HeartwoodError::Storage(err.to_string()))?
+            .map(|pk| pk.to_string())
+    } else {
+        None
+    };
+
+    Ok(HeartwoodSshKeyStatus {
+        exists,
+        encrypted,
+        public_key,
+    })
+}
+
+pub fn ssh_key_generate(passphrase: Option<String>) -> Result<String, HeartwoodError> {
+    let profile = load_profile()?;
+    let mut seed = [0u8; 32];
+    getrandom::getrandom(&mut seed).map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let radicle_seed = radicle::crypto::Seed::new(seed);
+    let passphrase = passphrase.map(radicle::crypto::ssh::Passphrase::from);
+    let public_key = profile
+        .keystore
+        .init("radicle", passphrase, radicle_seed)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    Ok(public_key.to_string())
+}
+
+pub fn repository_remove(rid: &str) -> Result<(), HeartwoodError> {
+    let profile = load_profile()?;
+    let rid = RepoId::from_str(rid)
+        .map_err(|err| HeartwoodError::InvalidRepoId(err.to_string()))?;
+    let repo = profile
+        .storage
+        .repository(rid)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    repo.remove().map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    Ok(())
+}

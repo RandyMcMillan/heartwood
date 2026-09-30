@@ -263,6 +263,21 @@ pub fn heartwood_create_issue(
     bridge::create_issue(&rid, &title, &description)
 }
 
+#[uniffi::export]
+pub fn heartwood_ssh_key_status() -> Result<bridge::HeartwoodSshKeyStatus, bridge::HeartwoodError> {
+    bridge::ssh_key_status()
+}
+
+#[uniffi::export]
+pub fn heartwood_ssh_key_generate(passphrase: Option<String>) -> Result<String, bridge::HeartwoodError> {
+    bridge::ssh_key_generate(passphrase)
+}
+
+#[uniffi::export]
+pub fn heartwood_repository_remove(rid: String) -> Result<(), bridge::HeartwoodError> {
+    bridge::repository_remove(&rid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,6 +780,26 @@ mod tests {
                 || matches!(result, Err(bridge::HeartwoodError::InvalidRepoId(_)))
                 || matches!(result, Err(bridge::HeartwoodError::Signer(_))),
             "invalid rid should be accepted (noop) or fail with profile/repo/signer error"
+        );
+    }
+
+    #[test]
+    fn test_ssh_key_status_shape() {
+        if let Ok(status) = heartwood_ssh_key_status() {
+            // Should always return a valid shape
+            let _ = status.exists;
+            let _ = status.encrypted;
+        }
+    }
+
+    #[test]
+    fn test_repository_remove_invalid_rid() {
+        let result = heartwood_repository_remove("not-a-rid".to_string());
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
+                || matches!(result, Err(bridge::HeartwoodError::InvalidRepoId(_))),
+            "invalid rid should be accepted (noop) or fail with profile/repo error"
         );
     }
 }
