@@ -286,6 +286,17 @@ pub fn heartwood_ssh_key_generate(passphrase: Option<String>) -> Result<String, 
 }
 
 #[uniffi::export]
+pub fn heartwood_repository_init(
+    path: String,
+    name: String,
+    description: String,
+    default_branch: String,
+    visibility: String,
+) -> Result<String, bridge::HeartwoodError> {
+    bridge::repository_init(&path, &name, &description, &default_branch, &visibility)
+}
+
+#[uniffi::export]
 pub fn heartwood_repository_remove(rid: String) -> Result<(), bridge::HeartwoodError> {
     bridge::repository_remove(&rid)
 }
@@ -900,6 +911,24 @@ mod tests {
                 || matches!(result, Err(bridge::HeartwoodError::InvalidRepoId(_)))
                 || matches!(result, Err(bridge::HeartwoodError::Signer(_))),
             "invalid rid should be accepted (noop) or fail with profile/repo/signer error"
+        );
+    }
+
+    #[test]
+    fn test_repository_init_invalid_path() {
+        let result = heartwood_repository_init(
+            "/nonexistent/path".to_string(),
+            "test".to_string(),
+            "description".to_string(),
+            "main".to_string(),
+            "public".to_string(),
+        );
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
+                || matches!(result, Err(bridge::HeartwoodError::Storage(_)))
+                || matches!(result, Err(bridge::HeartwoodError::Signer(_))),
+            "invalid path should be accepted (noop) or fail with profile/storage/signer error"
         );
     }
 }

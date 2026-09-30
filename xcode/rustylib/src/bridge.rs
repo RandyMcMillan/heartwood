@@ -946,6 +946,38 @@ pub fn ssh_key_generate(passphrase: Option<String>) -> Result<String, HeartwoodE
     Ok(public_key.to_string())
 }
 
+pub fn repository_init(
+    path: &str,
+    name: &str,
+    description: &str,
+    default_branch: &str,
+    visibility: &str,
+) -> Result<String, HeartwoodError> {
+    let profile = load_profile()?;
+    let signer = profile
+        .signer()
+        .map_err(|err| HeartwoodError::Signer(err.to_string()))?;
+    let repo = radicle::git::raw::Repository::open(path)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let name = radicle::identity::project::ProjectName::from_str(name)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let default_branch = radicle::git::fmt::RefString::try_from(default_branch)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let visibility = radicle::identity::doc::Visibility::from_str(visibility)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let (rid, _doc, _signed) = radicle::rad::init(
+        &repo,
+        name,
+        description,
+        default_branch,
+        visibility,
+        &signer,
+        &profile.storage,
+    )
+    .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    Ok(rid.to_string())
+}
+
 pub fn repository_remove(rid: &str) -> Result<(), HeartwoodError> {
     let profile = load_profile()?;
     let rid = RepoId::from_str(rid)

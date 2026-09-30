@@ -393,6 +393,22 @@ class HeartwoodStore: ObservableObject {
         }
     }
 
+    func initRepository(path: String, name: String, description: String, defaultBranch: String, visibility: String) {
+        do {
+            _ = try heartwoodRepositoryInit(path: path, name: name, description: description, defaultBranch: defaultBranch, visibility: visibility)
+            load()
+        } catch let error as HeartwoodError {
+            switch error {
+            case .Signer(let msg):
+                errorMessage = msg
+            default:
+                errorMessage = error.localizedDescription
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     var hasProfile: Bool {
         heartwoodHasProfile()
     }

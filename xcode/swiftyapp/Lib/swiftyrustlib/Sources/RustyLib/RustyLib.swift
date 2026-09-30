@@ -2701,6 +2701,17 @@ public func heartwoodRepositoryBranches(rid: String)throws  -> [HeartwoodRef] {
     )
 })
 }
+public func heartwoodRepositoryInit(path: String, name: String, description: String, defaultBranch: String, visibility: String)throws  -> String {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_repository_init(
+        FfiConverterString.lower(path),
+        FfiConverterString.lower(name),
+        FfiConverterString.lower(description),
+        FfiConverterString.lower(defaultBranch),
+        FfiConverterString.lower(visibility),$0
+    )
+})
+}
 public func heartwoodRepositoryIssueCounts(rid: String)throws  -> HeartwoodIssueCounts? {
     return try  FfiConverterOptionTypeHeartwoodIssueCounts.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_repository_issue_counts(
@@ -2969,6 +2980,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_repository_branches() != 60987) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_repository_init() != 2521) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_repository_issue_counts() != 42917) {
