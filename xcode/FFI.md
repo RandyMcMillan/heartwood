@@ -142,6 +142,40 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 - [x] Add Swift issue/patch lists in repository cards
 - [x] Add tests for invalid RID handling
 
+## Phase 18: Protocol gap — COB write operations (issues)
+
+- [x] Add `heartwoodCreateIssue(rid, title, description)` returning `String` (issue ID)
+- [x] Uses `profile.signer()`, `profile.issues_mut(&repo, &signer)`, and `cache.create()`
+- [x] Validates title via `cob::Title::new()` and maps `TitleError` to `HeartwoodError::InvalidTitle`
+- [x] Maps `SignerError` to `HeartwoodError::Signer` for encrypted keystores or missing ssh-agent
+- [x] Add tests for invalid RID handling
+
+## Phase 19: Protocol gap — SSH key management
+
+- [x] Add `heartwoodSshKeyStatus()` returning `HeartwoodSshKeyStatus { exists, encrypted, publicKey }`
+- [x] Add `heartwoodSshKeyGenerate(passphrase)` returning `String` (public key)
+- [x] Uses `profile.keystore.public_key()`, `is_encrypted()`, and `init()`
+- [x] Generates random seed via `getrandom::getrandom()`
+- [x] Add tests for shape
+
+## Phase 20: Protocol gap — repository deletion
+
+- [x] Add `heartwoodRepositoryRemove(rid)` returning `()`
+- [x] Uses `profile.storage.repository(rid)` and `repo.remove()` for full deletion
+- [x] Add tests for invalid RID handling
+
+## Phase 21: Protocol gap — node network control
+
+- [x] Add `heartwoodNodeFetch(rid, from, timeoutSecs)` returning `String`
+- [x] Add `heartwoodNodeSeed(rid, scope)` returning `bool`
+- [x] Add `heartwoodNodeUnseed(rid)` returning `bool`
+- [x] Add `heartwoodNodeFollow(nid, alias)` returning `bool`
+- [x] Add `heartwoodNodeUnfollow(nid)` returning `bool`
+- [x] Add `heartwoodNodeConnect(nid, addr, timeoutSecs)` returning `String`
+- [x] Add `heartwoodNodeDisconnect(nid)` returning `()`
+- [x] Uses `radicle::Node::new(socket)` via the `Handle` trait
+- [x] Add tests for invalid RID/NID/address handling
+
 ## Suggested implementation order
 
 1. Metadata and normalization helpers
@@ -162,6 +196,10 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 16. Node inventory
 17. Repository size
 18. Issue and patch lists
+19. COB write operations (create issue)
+20. SSH key management
+21. Repository deletion
+22. Node network control (fetch, seed, follow, connect)
 
 ## Notes
 
@@ -172,9 +210,7 @@ Goal: replace the demo-only Rust bridge with a Heartwood-focused UniFFI surface 
 
 ## Remaining advanced gaps (not yet implemented)
 
-- Repository creation/init (`rad init` equivalent)
-- Network operations (clone, fetch, sync — require running node daemon)
-- Node daemon control (start/stop — not feasible on iOS)
-- SSH key management (`rad auth` equivalent)
-- COB write operations (create/edit issues and patches — requires signer)
+- Repository creation/init (`rad init` equivalent — requires existing git repo on disk)
+- Patch creation (`patches_mut().create()` — requires MergeTarget and git OIDs)
+- Node daemon start/stop (not feasible on iOS, use external process or shell)
 - Repository deletion/cleanup
