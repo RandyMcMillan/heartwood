@@ -99,7 +99,8 @@ class HeartwoodStore: ObservableObject {
             switch error {
             case .Profile(let msg), .Storage(let msg), .InvalidRepoId(let msg),
                  .InvalidAlias(let msg), .InvalidRelay(let msg), .InvalidNetwork(let msg),
-                 .ConfigWrite(let msg), .InvalidAddress(let msg):
+                 .ConfigWrite(let msg), .InvalidAddress(let msg),
+                 .Signer(let msg), .InvalidTitle(let msg):
                 errorMessage = msg
             }
         } catch {
@@ -270,6 +271,123 @@ class HeartwoodStore: ObservableObject {
             default:
                 errorMessage = error.localizedDescription
             }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func createIssue(rid: String, title: String, description: String) {
+        do {
+            _ = try heartwoodCreateIssue(rid: rid, title: title, description: description)
+            load()
+        } catch let error as HeartwoodError {
+            switch error {
+            case .InvalidTitle(let msg), .Signer(let msg):
+                errorMessage = msg
+            default:
+                errorMessage = error.localizedDescription
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func createPatch(rid: String, title: String, description: String, base: String, tip: String, targetBranch: String?) {
+        do {
+            _ = try heartwoodCreatePatch(rid: rid, title: title, description: description, base: base, tip: tip, targetBranch: targetBranch)
+            load()
+        } catch let error as HeartwoodError {
+            switch error {
+            case .InvalidTitle(let msg), .Signer(let msg):
+                errorMessage = msg
+            default:
+                errorMessage = error.localizedDescription
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func sshKeyStatus() -> HeartwoodSshKeyStatus? {
+        try? heartwoodSshKeyStatus()
+    }
+
+    func sshKeyGenerate(passphrase: String?) {
+        do {
+            _ = try heartwoodSshKeyGenerate(passphrase: passphrase)
+            load()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func removeRepository(rid: String) {
+        do {
+            try heartwoodRepositoryRemove(rid: rid)
+            load()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func nodeFetch(rid: String, from: String, timeoutSecs: UInt64) {
+        do {
+            _ = try heartwoodNodeFetch(rid: rid, from: from, timeoutSecs: timeoutSecs)
+            load()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func nodeSeed(rid: String, scope: String) {
+        do {
+            _ = try heartwoodNodeSeed(rid: rid, scope: scope)
+            load()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func nodeUnseed(rid: String) {
+        do {
+            _ = try heartwoodNodeUnseed(rid: rid)
+            load()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func nodeFollow(nid: String, alias: String?) {
+        do {
+            _ = try heartwoodNodeFollow(nid: nid, alias: alias)
+            load()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func nodeUnfollow(nid: String) {
+        do {
+            _ = try heartwoodNodeUnfollow(nid: nid)
+            load()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func nodeConnect(nid: String, addr: String, timeoutSecs: UInt64) {
+        do {
+            _ = try heartwoodNodeConnect(nid: nid, addr: addr, timeoutSecs: timeoutSecs)
+            load()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func nodeDisconnect(nid: String) {
+        do {
+            try heartwoodNodeDisconnect(nid: nid)
+            load()
         } catch {
             errorMessage = error.localizedDescription
         }
