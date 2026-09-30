@@ -78,7 +78,7 @@ did:key:z6Mkt67GdsW7715MEfRuP4pSZxJRJh6kj6Y48WRqVv4N1tRk (bob)
 
 Later, Bob meets Eve at a conference and she wants to take part in the
 project. For Bob to propose Eve, similar steps need to happen as
-between Alice and Bob. Eve first needs to setup a fork:
+between Alice and Bob. Eve first needs to set up a fork:
 
 ``` ~eve
 $ rad clone rad:z42hL2jL4XNk6K8oHQaSWfMgCL7ji --scope followed
@@ -156,15 +156,15 @@ At this point, when Alice runs `rad sync`, she will fetch Eve's fork
 since she has become a delegate:
 
 ``` ~alice
-$ rad sync --timeout 3
+$ rad sync --timeout 3s
 ✓ Fetching rad:z42hL2jL4XNk6K8oHQaSWfMgCL7ji from z6MkvVv…Z1Ct4tD@[..]..
 ✓ Fetching rad:z42hL2jL4XNk6K8oHQaSWfMgCL7ji from z6MkuPZ…xEuaPUp@[..]..
 ✓ Fetched repository from 2 seed(s)
 ✓ Synced with 3 node(s)
 $ rad inspect rad:z42hL2jL4XNk6K8oHQaSWfMgCL7ji --sigrefs
-z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi 1f716870f890be0c13fdd0af9f527af849fec792
-z6Mkt67GdsW7715MEfRuP4pSZxJRJh6kj6Y48WRqVv4N1tRk c40018821dc1b41cad75e91e0c9d00827e815324
-z6Mkux1aUQD2voWWukVb5nNUR7thrHveQG4pDQua8nVhib7Z 95cd447c57de8d232c6154f5dba0451aa593520e
+z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi 1f716870f890be0c13fdd0af9f527af849fec792 parent
+z6Mkt67GdsW7715MEfRuP4pSZxJRJh6kj6Y48WRqVv4N1tRk c40018821dc1b41cad75e91e0c9d00827e815324 parent
+z6Mkux1aUQD2voWWukVb5nNUR7thrHveQG4pDQua8nVhib7Z 95cd447c57de8d232c6154f5dba0451aa593520e parent
 ```
 
 Since the network is eventually consistent, if Eve decides to `sync`

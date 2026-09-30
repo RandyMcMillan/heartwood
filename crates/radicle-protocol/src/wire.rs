@@ -3,24 +3,24 @@ pub mod message;
 pub mod varint;
 
 pub use frame::StreamId;
-pub use message::{AddressType, MessageType};
+pub use message::MessageType;
 
-use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::fmt::Debug;
-use std::mem;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::string::FromUtf8Error;
 
 use bytes::{Buf, BufMut};
 
-use cyphernet::addr::tor;
+#[cfg(feature = "i2p")]
+use cypheraddr::i2p;
+#[cfg(feature = "tor")]
+use cypheraddr::tor;
 
-use radicle::crypto::{PublicKey, Signature, Unverified};
+use radicle::crypto::{PublicKey, PublicKeyBytes, Signature};
 use radicle::git;
 use radicle::git::fmt;
-use radicle::git::raw;
 use radicle::identity::RepoId;
 use radicle::node;
 use radicle::node::Alias;
@@ -29,7 +29,6 @@ use radicle::node::Timestamp;
 use radicle::node::UserAgent;
 use radicle::storage::refs::Refs;
 use radicle::storage::refs::RefsAt;
-use radicle::storage::refs::SignedRefs;
 
 use crate::bounded::BoundedVec;
 use crate::service::filter;
@@ -44,8 +43,11 @@ pub type Size = u16;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Invalid {
-    #[error("invalid Git object identifier size: expected {expected}, got {actual}")]
-    Oid { expected: usize, actual: usize },
+    #[error(
+        "invalid Git object identifier size: expected {}, got {actual}",
+        git::Oid::LEN_SHA1
+    )]
+    Oid { actual: usize },
     #[error(transparent)]
     Bounded(#[from] crate::bounded::Error),
     #[error("invalid filter size: {actual}")]
@@ -58,8 +60,12 @@ pub enum Invalid {
     Alias(#[from] node::AliasError),
     #[error("invalid user agent string: {err}")]
     InvalidUserAgent { err: String },
+    #[cfg(feature = "tor")]
     #[error("invalid onion address: {0}")]
     OnionAddr(#[from] tor::OnionAddrDecodeError),
+    #[cfg(feature = "i2p")]
+    #[error("invalid i2p address: {0}")]
+    I2pAddr(#[from] i2p::I2pAddrParseError),
     #[error("invalid timestamp: {actual_millis} millis")]
     Timestamp { actual_millis: u64 },
 
@@ -87,7 +93,12 @@ pub enum Error {
     #[error(transparent)]
     Invalid(#[from] Invalid),
 
-    #[error("unexpected end of buffer, requested {requested} more bytes but only {available} are available")]
+    #[error("frame too long: expected at most {limit}, got {length}")]
+    FrameTooLong { length: usize, limit: usize },
+
+    #[error(
+        "unexpected end of buffer, requested {requested} more bytes but only {available} are available"
+    )]
     UnexpectedEnd { available: usize, requested: usize },
 }
 
@@ -139,7 +150,7 @@ pub trait Decode: Sized {
                 }
                 Ok(value)
             }
-            Err(err @ Error::UnexpectedEnd { .. }) => {
+            Err(err @ (Error::UnexpectedEnd { .. } | Error::FrameTooLong { .. })) => {
                 panic!("{}", err);
             }
             Err(Error::Invalid(e)) => Err(e),
@@ -173,7 +184,7 @@ impl Encode for u64 {
 
 impl Encode for PublicKey {
     fn encode(&self, buf: &mut impl BufMut) {
-        self.deref().encode(buf)
+        std::borrow::Borrow::<PublicKeyBytes>::borrow(self).encode(buf)
     }
 }
 
@@ -257,9 +268,17 @@ impl Encode for Refs {
     }
 }
 
-impl Encode for cyphernet::addr::tor::OnionAddrV3 {
+#[cfg(feature = "tor")]
+impl Encode for cypheraddr::tor::OnionAddrV3 {
     fn encode(&self, buf: &mut impl BufMut) {
         self.into_raw_bytes().encode(buf)
+    }
+}
+
+#[cfg(feature = "i2p")]
+impl Encode for i2p::I2pAddr {
+    fn encode(&self, buf: &mut impl BufMut) {
+        self.to_string().encode(buf)
     }
 }
 
@@ -294,7 +313,8 @@ impl Encode for git::fmt::RefString {
 
 impl Encode for Signature {
     fn encode(&self, buf: &mut impl BufMut) {
-        self.deref().encode(buf)
+        let bytes: [u8; 64] = self.to_bytes();
+        bytes.encode(buf)
     }
 }
 
@@ -310,16 +330,14 @@ impl Encode for git::Oid {
 
 impl Decode for PublicKey {
     fn decode(buf: &mut impl Buf) -> Result<Self, Error> {
-        let buf: [u8; 32] = Decode::decode(buf)?;
-
-        Ok(PublicKey::from(buf))
+        Ok(PublicKey::from(<[u8; 32]>::decode(buf)?))
     }
 }
 
 impl Decode for Refs {
     fn decode(buf: &mut impl Buf) -> Result<Self, Error> {
         let len = Size::decode(buf)?;
-        let mut refs = BTreeMap::new();
+        let mut refs = Refs::new();
 
         for _ in 0..len {
             let name = String::decode(buf)?;
@@ -328,7 +346,7 @@ impl Decode for Refs {
 
             refs.insert(name, oid);
         }
-        Ok(refs.into())
+        Ok(refs)
     }
 }
 
@@ -367,23 +385,13 @@ where
 
 impl Decode for git::Oid {
     fn decode(buf: &mut impl Buf) -> Result<Self, Error> {
-        const LEN_EXPECTED: usize = mem::size_of::<raw::Oid>();
-
         let len = Size::decode(buf)? as usize;
 
-        if len != LEN_EXPECTED {
-            return Err(Invalid::Oid {
-                expected: LEN_EXPECTED,
-                actual: len,
-            }
-            .into());
+        if len != git::Oid::LEN_SHA1 {
+            return Err(Invalid::Oid { actual: len }.into());
         }
 
-        let buf: [u8; LEN_EXPECTED] = Decode::decode(buf)?;
-        let oid = raw::Oid::from_bytes(&buf).expect("the buffer is exactly the right size");
-        let oid = git::Oid::from(oid);
-
-        Ok(oid)
+        Ok(git::Oid::Sha1(Decode::decode(buf)?))
     }
 }
 
@@ -489,24 +497,6 @@ impl Decode for filter::Filter {
     }
 }
 
-impl<V> Encode for SignedRefs<V> {
-    fn encode(&self, buf: &mut impl BufMut) {
-        self.id.encode(buf);
-        self.refs.encode(buf);
-        self.signature.encode(buf);
-    }
-}
-
-impl Decode for SignedRefs<Unverified> {
-    fn decode(buf: &mut impl Buf) -> Result<Self, Error> {
-        let id = NodeId::decode(buf)?;
-        let refs = Refs::decode(buf)?;
-        let signature = Signature::decode(buf)?;
-
-        Ok(Self::new(refs, id, signature))
-    }
-}
-
 impl Encode for RefsAt {
     fn encode(&self, buf: &mut impl BufMut) {
         self.remote.encode(buf);
@@ -536,10 +526,21 @@ impl Decode for node::Features {
     }
 }
 
+#[cfg(feature = "tor")]
 impl Decode for tor::OnionAddrV3 {
     fn decode(buf: &mut impl Buf) -> Result<Self, Error> {
         let bytes: [u8; tor::ONION_V3_RAW_LEN] = Decode::decode(buf)?;
         let addr = tor::OnionAddrV3::from_raw_bytes(bytes).map_err(Invalid::from)?;
+
+        Ok(addr)
+    }
+}
+
+#[cfg(feature = "i2p")]
+impl Decode for i2p::I2pAddr {
+    fn decode(buf: &mut impl Buf) -> Result<Self, Error> {
+        let s = String::decode(buf)?;
+        let addr = i2p::I2pAddr::from_str(&s).map_err(Invalid::from)?;
 
         Ok(addr)
     }
@@ -575,7 +576,7 @@ where
 #[macro_export]
 macro_rules! prop_roundtrip {
     ($t:ty, $name:tt) => {
-        paste::paste! {
+        pastey::paste! {
             #[quickcheck]
             fn [< prop_roundtrip_ $name:lower >](v: $t) {
                 $crate::wire::roundtrip(v);
@@ -583,7 +584,7 @@ macro_rules! prop_roundtrip {
         }
     };
     ($t:ty) => {
-        paste::paste! {
+        pastey::paste! {
             prop_roundtrip!($t, [< $t >]);
         }
     };
@@ -597,8 +598,6 @@ mod tests {
     use qcheck_macros::quickcheck;
 
     use radicle::assert_matches;
-    use radicle::crypto::Unverified;
-    use radicle::storage::refs::SignedRefs;
 
     prop_roundtrip!(u16);
     prop_roundtrip!(u32);
@@ -609,7 +608,6 @@ mod tests {
     prop_roundtrip!(RepoId);
     prop_roundtrip!(Refs);
     prop_roundtrip!((String, String), tuple);
-    prop_roundtrip!(SignedRefs<Unverified>, signed_refs);
 
     #[quickcheck]
     fn prop_string(input: String) -> qcheck::TestResult {
@@ -628,12 +626,12 @@ mod tests {
     }
 
     #[quickcheck]
-    fn prop_oid(input: [u8; 20]) {
-        roundtrip(git::Oid::from_sha1(input));
+    fn prop_oid(input: git::Oid) {
+        roundtrip(input);
     }
 
     #[test]
-    fn test_string() {
+    fn string() {
         assert_eq!(
             String::from("hello").encode_to_vec(),
             vec![5, b'h', b'e', b'l', b'l', b'o']
@@ -641,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn test_alias() {
+    fn alias() {
         assert_eq!(
             Alias::from_str("hello").unwrap().encode_to_vec(),
             vec![5, b'h', b'e', b'l', b'l', b'o']
@@ -649,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_invalid() {
+    fn filter_invalid() {
         let b = bloomy::BloomFilter::with_size(filter::FILTER_SIZE_M / 3);
         let f = filter::Filter::from(b);
         let bytes = f.encode_to_vec();
@@ -661,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bounded_vec_limit() {
+    fn bounded_vec_limit() {
         let v: BoundedVec<u8, 2> = vec![1, 2].try_into().unwrap();
         let buf = &v.encode_to_vec();
 

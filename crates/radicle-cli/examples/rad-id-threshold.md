@@ -22,6 +22,7 @@ $ rad id update --title "Add Bob" --description "Add Bob as a delegate" --delega
 ╭────────────────────────────────────────────────────────────────────────╮
 │ Title    Add Bob                                                       │
 │ Revision 7be665f9fccba97abb21b2fa85a6fd3181c72858                      │
+│ Parent   0656c217f917c3e06234771e9ecae53aba5e173e                      │
 │ Blob     93d3009787e5d8a481dffc4dd248ea46af592466                      │
 │ Author   did:key:z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi      │
 │ State    accepted                                                      │
@@ -148,9 +149,10 @@ z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi
 
 Similarly, she still does not have Bob's `rad/sigrefs`:
 
+
 ``` ~alice
 $ rad inspect --sigrefs
-z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi ae3c6b77dc1ed51c1c1e6a2772339c2779fa9ba8
+z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi e5c200775dc6da38306f62c995df67a1ab1bf62d parent
 ```
 
 And she can still list the project, without any worries:
@@ -170,7 +172,7 @@ sync` and fetch his references:
 
 ``` ~bob
 $ rad clone rad:z42hL2jL4XNk6K8oHQaSWfMgCL7ji
-✓ Seeding policy updated for rad:z42hL2jL4XNk6K8oHQaSWfMgCL7ji with scope 'all'
+✓ Seeding policy updated for rad:z42hL2jL4XNk6K8oHQaSWfMgCL7ji with scope 'followed'
 Fetching rad:z42hL2jL4XNk6K8oHQaSWfMgCL7ji from the network, found 2 potential seed(s).
 ✓ Target met: 1 seed(s)
 ✓ Creating checkout in ./heartwood..
@@ -198,6 +200,6 @@ Fetching rad:z42hL2jL4XNk6K8oHQaSWfMgCL7ji from the network, found 2 potential s
 🌱 Fetched from z6Mkux1aUQD2voWWukVb5nNUR7thrHveQG4pDQua8nVhib7Z
 🌱 Fetched from z6Mkt67GdsW7715MEfRuP4pSZxJRJh6kj6Y48WRqVv4N1tRk
 $ rad inspect --sigrefs
-z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi ae3c6b77dc1ed51c1c1e6a2772339c2779fa9ba8
-z6Mkt67GdsW7715MEfRuP4pSZxJRJh6kj6Y48WRqVv4N1tRk dace6fe948548168a2bb687718949d9b5d9076ee
+z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi e5c200775dc6da38306f62c995df67a1ab1bf62d parent
+z6Mkt67GdsW7715MEfRuP4pSZxJRJh6kj6Y48WRqVv4N1tRk dace6fe948548168a2bb687718949d9b5d9076ee parent
 ```

@@ -8,7 +8,7 @@ use crate::wire;
 
 /// Message stream deserializer.
 ///
-/// Used to for example turn a byte stream into network messages.
+/// Used, for example, to turn a byte stream into network messages.
 #[derive(Debug)]
 pub struct Deserializer<const B: usize, D = Message> {
     unparsed: BoundedVec<u8, B>,
@@ -58,7 +58,18 @@ impl<const B: usize, D: wire::Decode> Deserializer<B, D> {
 
                 Ok(Some(msg))
             }
-            Err(wire::Error::UnexpectedEnd { .. }) => Ok(None),
+            Err(wire::Error::UnexpectedEnd { .. }) => {
+                log::debug!("Dropping incomplete frame: Expected more bytes.");
+                Ok(None)
+            }
+            Err(wire::Error::FrameTooLong { length, limit }) => {
+                log::debug!(
+                    "Dropping frame that is too large: Expected at most {} bytes, got {} bytes.",
+                    limit,
+                    length
+                );
+                Ok(None)
+            }
             Err(wire::Error::Invalid(err)) => Err(err),
         }
     }
@@ -85,7 +96,9 @@ unsafe impl<const B: usize, D: wire::Decode> bytes::BufMut for Deserializer<B, D
     }
 
     unsafe fn advance_mut(&mut self, cnt: usize) {
-        self.unparsed.advance_mut(cnt);
+        unsafe {
+            self.unparsed.advance_mut(cnt);
+        }
     }
 
     fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
@@ -124,7 +137,7 @@ mod test {
     const MSG_BYE: &[u8] = &[3, b'b', b'y', b'e'];
 
     #[test]
-    fn test_decode_next() {
+    fn decode_next() {
         let mut decoder = Deserializer::<1024, String>::new(8);
 
         decoder.input(&[3, b'b']).unwrap();
@@ -142,7 +155,7 @@ mod test {
     }
 
     #[test]
-    fn test_unparsed() {
+    fn unparsed() {
         let mut decoder = Deserializer::<1024, String>::new(8);
 
         decoder.input(&[3, b'b', b'y']).unwrap();

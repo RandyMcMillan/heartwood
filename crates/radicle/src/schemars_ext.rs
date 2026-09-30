@@ -4,29 +4,6 @@
 
 use schemars::JsonSchema;
 
-pub mod crypto {
-    use super::*;
-    /// See [`crate::node::NodeId`]
-    /// See [`crate::storage::RemoteId`]
-    /// See [`::crypto::PublicKey`]
-    ///
-    /// An Ed25519 public key in multibase encoding.
-    ///
-    /// `MULTIBASE(base58-btc, MULTICODEC(public-key-type, raw-public-key-bytes))`
-    #[derive(JsonSchema)]
-    #[schemars(
-    title = "NodeId",
-    description = "An Ed25519 public key in multibase encoding.",
-    extend("examples" = [
-        "z6MkrLMMsiPWUcNPHcRajuMi9mDfYckSoJyPwwnknocNYPm7",
-        "z6MkvUJtYD9dHDJfpevWRT98mzDDpdAtmUjwyDSkyqksUr7C",
-        "z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi",
-        "z6MkkfM3tPXNPrPevKr3uSiQtHPuwnNhu2yUVjgd2jXVsVz5",
-    ]),
-)]
-    pub struct PublicKey(String);
-}
-
 pub(crate) mod log {
     use super::*;
 
@@ -67,26 +44,6 @@ pub(crate) mod bytesize {
     pub(crate) struct ByteSize(
         #[schemars(regex(pattern = r"^\d+(\.\d+)? ((K|M|G|T|P)i?B?|B)$"))] String,
     );
-}
-
-pub(crate) mod localtime {
-    use super::*;
-
-    /// See [`::localtime::LocalDuration`]
-    #[derive(JsonSchema)]
-    #[schemars(
-        remote = "localtime::LocalDuration",
-        description = "A time duration measured locally in milliseconds."
-    )]
-    pub(crate) struct LocalDuration(u64);
-
-    /// See [`crate::serde_ext::localtime::time`]
-    #[derive(JsonSchema)]
-    #[schemars(
-        remote = "localtime::LocalDuration",
-        description = "A time duration measured locally in seconds."
-    )]
-    pub(crate) struct LocalDurationInSeconds(u64);
 }
 
 pub(crate) mod git {

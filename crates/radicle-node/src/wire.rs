@@ -1,43 +1,42 @@
 //! Implementation of the transport protocol.
 //!
 //! We use the Noise XK handshake pattern to establish an encrypted stream with a remote peer.
-use std::collections::hash_map::Entry;
 use std::collections::VecDeque;
+use std::collections::hash_map::Entry;
 use std::fmt::Debug;
 use std::sync::Arc;
+use std::time::Instant;
 use std::{io, net, time};
 
 use crossbeam_channel as chan;
 use cyphernet::addr::{HostName, InetHost, NetAddr};
 use cyphernet::encrypt::noise::{HandshakePattern, Keyset, NoiseState};
 use cyphernet::proxy::socks5;
-use cyphernet::{Digest, EcSk, Ecdh, Sha256};
-use localtime::LocalTime;
+use cyphernet::{Digest, Sha256};
+use localtime::{LocalDuration, LocalTime};
 use mio::net::TcpStream;
-use radicle::node::device::Device;
-
+use protocol::deserializer::Deserializer;
+use protocol::service;
+use protocol::service::io::Io;
+use protocol::service::{DisconnectReason, Metrics, Service, session};
+use protocol::wire::frame;
+use protocol::wire::frame::{Frame, FrameData, StreamId};
+use protocol::wire::*;
+use protocol::worker::{FetchRequest, FetchResult};
 use radicle::collections::{RandomMap, RandomSet};
-use radicle::crypto;
-use radicle::node::config::AddressConfig;
+use radicle::crypto::{self, Signer as _};
 use radicle::node::Link;
 use radicle::node::NodeId;
+#[cfg(any(feature = "i2p", feature = "tor"))]
+use radicle::node::config::AddressConfig;
 use radicle::storage::WriteStorage;
-use radicle_protocol::deserializer::Deserializer;
-pub use radicle_protocol::wire::frame;
-pub use radicle_protocol::wire::frame::{Frame, FrameData, StreamId};
-pub use radicle_protocol::wire::*;
-use radicle_protocol::worker::{FetchRequest, FetchResult};
 
 use crate::reactor;
 use crate::reactor::{Listener, Transport};
 use crate::reactor::{NoiseSession, ProtocolArtifact, SessionEvent, Socks5Session};
 use crate::reactor::{Token, Tokens};
-use crate::service;
-use crate::service::io::Io;
-use crate::service::FETCH_TIMEOUT;
-use crate::service::{session, DisconnectReason, Metrics, Service};
 use crate::worker;
-use crate::worker::{ChannelEvent, ChannelsConfig};
+use crate::worker::channels::{ChannelEvent, ChannelsConfig};
 use crate::worker::{Task, TaskResult};
 
 /// NoiseXK handshake pattern.
@@ -65,15 +64,15 @@ pub enum Control {
 }
 
 /// Peer session type.
-type WireSession<G> = NoiseSession<G, Sha256, Socks5Session<TcpStream>>;
+type WireSession = NoiseSession<crypto::SigningKey, Sha256, Socks5Session<TcpStream>>;
 
 /// Reactor action.
-type Action<G> = reactor::Action<Listener, Transport<WireSession<G>>>;
+type Action = reactor::Action<Listener, Transport<WireSession>>;
 
 /// A worker stream.
 struct Stream {
     /// Channels.
-    channels: worker::Channels,
+    channels: worker::channels::Channels,
     /// Data sent.
     sent_bytes: usize,
     /// Data received.
@@ -81,7 +80,7 @@ struct Stream {
 }
 
 impl Stream {
-    fn new(channels: worker::Channels) -> Self {
+    fn new(channels: worker::channels::Channels) -> Self {
         Self {
             channels,
             sent_bytes: 0,
@@ -123,7 +122,7 @@ impl Streams {
     }
 
     /// Open a new stream.
-    fn open(&mut self, config: ChannelsConfig) -> (StreamId, worker::Channels) {
+    fn open(&mut self, config: ChannelsConfig) -> (StreamId, worker::channels::Channels) {
         self.seq += 1;
 
         let id = StreamId::git(self.link)
@@ -137,8 +136,12 @@ impl Streams {
     }
 
     /// Register an open stream.
-    fn register(&mut self, stream: StreamId, config: ChannelsConfig) -> Option<worker::Channels> {
-        let (wire, worker) = worker::Channels::pair(config)
+    fn register(
+        &mut self,
+        stream: StreamId,
+        config: ChannelsConfig,
+    ) -> Option<worker::channels::Channels> {
+        let (wire, worker) = worker::channels::Channels::pair(config)
             .expect("Streams::register: fatal: unable to create channels");
 
         match self.streams.entry(stream) {
@@ -247,7 +250,7 @@ impl Peers {
 
     fn insert(&mut self, token: Token, peer: Peer) {
         if self.0.insert(token, peer).is_some() {
-            log::warn!(target: "wire", token=token.0; "Replacing existing peer");
+            log::debug!(target: "wire", token=token.0; "Replacing existing peer");
         }
     }
 
@@ -292,17 +295,17 @@ impl Peers {
 }
 
 /// Wire protocol implementation for a set of peers.
-pub(crate) struct Wire<D, S, G: crypto::signature::Signer<crypto::Signature> + Ecdh> {
+pub(crate) struct Wire<D, S> {
     /// Backing service instance.
-    service: Service<D, S, G>,
+    service: Service<D, S>,
     /// Worker pool interface.
     worker: chan::Sender<Task>,
     /// Used for authentication.
-    signer: Device<G>,
+    secret_key: radicle::crypto::SigningKey,
     /// Node metrics.
     metrics: service::Metrics,
     /// Internal queue of actions to send to the reactor.
-    actions: VecDeque<Action<G>>,
+    actions: VecDeque<Action>,
     /// Outbound attempted peers without a session.
     outbound: RandomMap<Token, Outbound>,
     /// Inbound peers without a session.
@@ -315,19 +318,22 @@ pub(crate) struct Wire<D, S, G: crypto::signature::Signer<crypto::Signature> + E
     tokens: Tokens,
 }
 
-impl<D, S, G> Wire<D, S, G>
+impl<D, S> Wire<D, S>
 where
     D: service::Store,
     S: WriteStorage + 'static,
-    G: crypto::signature::Signer<crypto::Signature> + Ecdh<Pk = NodeId>,
 {
-    pub fn new(service: Service<D, S, G>, worker: chan::Sender<Task>, signer: Device<G>) -> Self {
+    pub fn new(
+        service: Service<D, S>,
+        worker: chan::Sender<Task>,
+        secret_key: crypto::SigningKey,
+    ) -> Self {
         assert!(service.started().is_some(), "Service must be initialized");
 
         Self {
             service,
             worker,
-            signer,
+            secret_key,
             metrics: Metrics::default(),
             actions: VecDeque::new(),
             inbound: RandomSet::default(),
@@ -361,7 +367,7 @@ where
             }
             Entry::Occupied(mut e) => match e.get_mut() {
                 Peer::Disconnecting { nid, link, .. } => {
-                    log::error!(target: "wire", token=token.0; "Peer is already disconnecting");
+                    log::debug!(target: "wire", token=token.0; "Peer is already disconnecting");
 
                     nid.map(|n| (n, *link))
                 }
@@ -387,15 +393,9 @@ where
     }
 
     fn worker_result(&mut self, task: TaskResult) {
-        log::debug!(
-            target: "wire",
-            "Received fetch result from worker for stream {}, remote {}: {:?}",
-            task.stream, task.remote, task.result
-        );
-
         let nid = task.remote;
         let Some((fd, peer)) = self.peers.lookup_mut(&nid) else {
-            log::warn!(target: "wire", "Peer {nid} not found; ignoring fetch result");
+            log::debug!(target: "wire", "Peer {nid} not found; ignoring fetch result");
             return;
         };
 
@@ -418,10 +418,10 @@ where
                     .push_back(Action::Send(fd, frame.encode_to_vec()));
             }
         } else {
-            // If the peer disconnected, we'll get here, but we still want to let the service know
-            // about the fetch result, so we don't return here.
-            log::warn!(target: "wire", "Peer {nid} is not connected; ignoring fetch result");
-            return;
+            // If the peer disconnected, we still let the service know about the fetch result.
+            // Otherwise the fetcher's `active` entry for this repo is never cleared, which blocks
+            // the repository from being fetched from any node until the node restarts.
+            log::debug!(target: "wire", "Peer {nid} is not connected; reporting fetch result anyway");
         };
 
         // Only call into the service if we initiated this fetch.
@@ -443,11 +443,11 @@ where
 
     fn flush(&mut self, remote: NodeId, stream: StreamId) {
         let Some((fd, peer)) = self.peers.lookup_mut(&remote) else {
-            log::warn!(target: "wire", "Peer {remote} is not known; ignoring flush");
+            log::debug!(target: "wire", "Peer {remote} is not known; ignoring flush");
             return;
         };
         let Peer::Connected { streams, link, .. } = peer else {
-            log::warn!(target: "wire", "Peer {remote} is not connected; ignoring flush");
+            log::debug!(target: "wire", "Peer {remote} is not connected; ignoring flush");
             return;
         };
         let Some(s) = streams.get_mut(&stream) else {
@@ -487,16 +487,15 @@ where
     }
 }
 
-impl<D, S, G> reactor::ReactionHandler for Wire<D, S, G>
+impl<D, S> reactor::ReactionHandler for Wire<D, S>
 where
     D: service::Store + Send,
     S: WriteStorage + Send + 'static,
-    G: crypto::signature::Signer<crypto::Signature> + Ecdh<Pk = NodeId> + Clone + Send + Debug,
 {
     type Listener = Listener;
-    type Transport = Transport<WireSession<G>>;
+    type Transport = Transport<WireSession>;
 
-    fn tick(&mut self, time: LocalTime) {
+    fn tick(&mut self) {
         self.metrics.open_channels = self
             .peers
             .iter()
@@ -509,10 +508,8 @@ where
             })
             .sum();
         self.metrics.worker_queue_size = self.worker.len();
-        self.service.tick(
-            LocalTime::from_millis(time.as_millis() as u128),
-            &self.metrics,
-        );
+
+        self.service.tick(LocalTime::now(), &self.metrics);
     }
 
     fn timer_reacted(&mut self) {
@@ -523,13 +520,13 @@ where
         &mut self,
         _: Token, // Note that this is the token of the listener socket.
         event: io::Result<(TcpStream, std::net::SocketAddr)>,
-        _: LocalTime,
+        _: Instant,
     ) {
         match event {
             Ok((connection, peer)) => {
                 let remote = NetAddr::from(peer);
                 let InetHost::Ip(ip) = remote.host else {
-                    log::error!(target: "wire", "Unexpected host type for inbound connection {remote}; dropping..");
+                    log::debug!(target: "wire", "Unexpected host type for inbound connection {remote}; dropping..");
                     drop(connection);
 
                     return;
@@ -545,15 +542,11 @@ where
                     return;
                 }
 
-                let session = accept::<G>(
-                    remote.clone().into(),
-                    connection,
-                    self.signer.clone().into_inner(),
-                );
-                let transport = match Transport::with_session(session, Link::Inbound) {
+                let session = accept(remote.clone().into(), connection, self.secret_key.clone());
+                let transport = match Transport::with_session(session) {
                     Ok(transport) => transport,
                     Err(err) => {
-                        log::error!(target: "wire", "Failed to create transport for accepted connection: {err}");
+                        log::warn!(target: "wire", "Failed to create transport for accepted connection: {err}");
                         return;
                     }
                 };
@@ -578,28 +571,23 @@ where
     }
 
     fn transport_registered(&mut self, token: Token, _transport: &Self::Transport) {
-        if let Some(outbound) = self.outbound.get_mut(&token) {
+        if let Some(outbound) = self.outbound.get(&token) {
             log::debug!(target: "wire", token=token.0; "Outbound peer resource registered for {}", outbound.nid);
         } else if self.inbound.contains(&token) {
             log::debug!(target: "wire", token=token.0; "Inbound peer resource registered");
         } else {
-            log::warn!(target: "wire", token=token.0; "Unknown peer registered");
+            log::debug!(target: "wire", token=token.0; "Unknown peer registered");
         }
     }
 
-    fn transport_reacted(
-        &mut self,
-        token: Token,
-        event: SessionEvent<WireSession<G>>,
-        _: LocalTime,
-    ) {
+    fn transport_reacted(&mut self, token: Token, event: SessionEvent<WireSession>, _: Instant) {
         match event {
             SessionEvent::Established(ProtocolArtifact { state, session }) => {
                 // SAFETY: With the NoiseXK protocol, there is always a remote static key.
-                let nid: NodeId = state.remote_static_key.unwrap();
+                let nid: NodeId = NodeId::from(*state.remote_static_key.unwrap().public_key());
                 // Make sure we don't try to connect to ourselves by mistake.
-                if &nid == self.signer.public_key() {
-                    log::error!(target: "wire", "Self-connection detected, disconnecting..");
+                if &nid == self.secret_key.public_key() {
+                    log::warn!(target: "wire", "Self-connection detected, disconnecting..");
                     self.disconnect(token, DisconnectReason::SelfConnection);
 
                     return;
@@ -613,7 +601,7 @@ where
                     assert_eq!(nid, peer.nid);
                     (peer.addr, Link::Outbound)
                 } else {
-                    log::error!(target: "wire", token=token.0; "Session for {nid} not found");
+                    log::debug!(target: "wire", token=token.0; "Session for {nid} not found");
                     return;
                 };
                 log::debug!(
@@ -640,7 +628,7 @@ where
                     use Precedence::*;
 
                     // Whether we have precedence in case of conflicting connections.
-                    let precedence = if *self.signer.public_key() > nid {
+                    let precedence = if NodeId::from(*self.secret_key.public_key()) > nid {
                         Ours
                     } else {
                         Theirs
@@ -671,14 +659,14 @@ where
                             (Outbound, Outbound, _) => token.max(c_token),
                         };
 
-                        log::warn!(
+                        log::trace!(
                             target: "wire", "Established session with token {} conflicts with existing session with token {} for {nid}. Disconnecting session with token {}.", token.0, c_token.0, close.0
                         );
                         disconnect.push(close);
                     }
                 }
                 for id in &disconnect {
-                    log::warn!(
+                    log::info!(
                         target: "wire", token=token.0; "Closing conflicting session with {nid}.."
                     );
                     // Disconnect and return the associated NID of the peer, if available.
@@ -708,8 +696,8 @@ where
                     metrics.received_bytes += data.len();
 
                     if inbox.input(&data).is_err() {
-                        log::error!(target: "wire", "Maximum inbox size ({MAX_INBOX_SIZE}) reached for peer {nid}");
-                        log::error!(target: "wire", "Unable to process messages fast enough for peer {nid}; disconnecting..");
+                        log::warn!(target: "wire", "Maximum inbox size ({MAX_INBOX_SIZE}) reached for peer {nid}");
+                        log::warn!(target: "wire", "Unable to process messages fast enough for peer {nid}; disconnecting..");
                         self.disconnect(
                             token,
                             DisconnectReason::Session(session::Error::Misbehavior),
@@ -727,13 +715,16 @@ where
                                 log::debug!(target: "wire", "Received `open` command for stream {stream} from {nid}");
                                 metrics.streams_opened += 1;
                                 metrics.received_fetch_requests += 1;
-                                let reader_limit = self.service.config().limits.fetch_pack_receive;
+                                let limits = &self.service.config().limits;
+                                let reader_limit = limits.fetch_pack_receive;
+                                let fetch_timeout: time::Duration =
+                                    LocalDuration::from(limits.fetch_timeout).into();
                                 let Some(channels) = streams.register(
                                     stream,
-                                    ChannelsConfig::new(FETCH_TIMEOUT)
+                                    ChannelsConfig::new(fetch_timeout)
                                         .with_reader_limit(reader_limit),
                                 ) else {
-                                    log::warn!(target: "wire", "Peer attempted to open already-open stream stream {stream}");
+                                    log::debug!(target: "wire", "Peer attempted to open already-open stream {stream}");
                                     continue;
                                 };
 
@@ -746,7 +737,7 @@ where
                                     channels,
                                 };
                                 if let Err(e) = self.worker.try_send(task) {
-                                    log::error!(
+                                    log::warn!(
                                         target: "wire",
                                         "Worker pool failed to accept incoming fetch request: {e}"
                                     );
@@ -760,7 +751,7 @@ where
                                     log::debug!(target: "wire", "Received `end-of-file` on stream {stream} from {nid}");
 
                                     if s.channels.send(ChannelEvent::Eof).is_err() {
-                                        log::error!(target: "wire", "Worker is disconnected; cannot send `EOF`");
+                                        log::debug!(target: "wire", "Worker is disconnected; cannot send `EOF`");
                                     }
                                 } else {
                                     log::debug!(target: "wire", "Ignoring frame on closed or unknown stream {stream}");
@@ -795,9 +786,9 @@ where
                             })) => {
                                 if let Some(s) = streams.get_mut(&stream) {
                                     metrics.received_git_bytes += data.len();
-
+                                    // Send via channel to the worker thread
                                     if s.channels.send(ChannelEvent::Data(data)).is_err() {
-                                        log::error!(target: "wire", "Worker is disconnected; cannot send data");
+                                        log::warn!(target: "wire", "Worker is disconnected; cannot send data");
                                     }
                                 } else {
                                     log::debug!(target: "wire", "Ignoring frame on closed or unknown stream {stream}");
@@ -808,7 +799,7 @@ where
                                 break;
                             }
                             Err(e) => {
-                                log::error!(target: "wire", "Invalid gossip message from {nid}: {e}");
+                                log::warn!(target: "wire", "Invalid gossip message from {nid}: {e}");
 
                                 if !inbox.is_empty() {
                                     log::debug!(target: "wire", "Dropping read buffer for {nid} with {} bytes", inbox.len());
@@ -822,7 +813,7 @@ where
                         }
                     }
                 } else {
-                    log::warn!(target: "wire", token=token.0; "Dropping message from unconnected peer");
+                    log::debug!(target: "wire", token=token.0; "Dropping message from unconnected peer");
                 }
             }
             SessionEvent::Terminated(err) => {
@@ -839,7 +830,7 @@ where
         }
     }
 
-    fn handle_error(&mut self, err: reactor::Error<Listener, Transport<WireSession<G>>>) {
+    fn handle_error(&mut self, err: reactor::Error<Listener, Transport<WireSession>>) {
         match err {
             reactor::Error::Poll(err) | reactor::Error::Registration(err) => {
                 // TODO: This should be a fatal error, there's nothing we can do here.
@@ -850,7 +841,7 @@ where
                 log::error!(target: "wire", token=token.0; "Listener disconnected");
             }
             reactor::Error::TransportDisconnect(token, transport) => {
-                log::error!(target: "wire", token=token.0; "Peer disconnected");
+                log::trace!(target: "wire", token=token.0; "Peer disconnected");
 
                 // We're dropping the TCP connection here.
                 drop(transport);
@@ -881,7 +872,7 @@ where
     }
 
     fn handover_listener(&mut self, token: Token, _listener: Self::Listener) {
-        log::error!(target: "wire", token=token.0; "Listener handover is not supported");
+        log::warn!(target: "wire", token=token.0; "Listener handover is not supported");
     }
 
     fn handover_transport(&mut self, token: Token, transport: Self::Transport) {
@@ -909,7 +900,10 @@ where
                         e.remove();
                     }
                     Peer::Connected { nid, .. } => {
-                        panic!("Wire::handover_transport: Unexpected handover of connected peer {nid} with token {}", token.0);
+                        panic!(
+                            "Wire::handover_transport: Unexpected handover of connected peer {nid} with token {}",
+                            token.0
+                        );
                     }
                 }
             }
@@ -918,13 +912,12 @@ where
     }
 }
 
-impl<D, S, G> Iterator for Wire<D, S, G>
+impl<D, S> Iterator for Wire<D, S>
 where
     D: service::Store,
     S: WriteStorage + 'static,
-    G: crypto::signature::Signer<crypto::Signature> + Ecdh<Pk = NodeId> + Clone,
 {
-    type Item = Action<G>;
+    type Item = Action;
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(ev) = self.service.next() {
@@ -939,7 +932,7 @@ where
                             continue;
                         }
                         None => {
-                            log::error!(target: "wire", "Dropping {} message(s) to {node_id}: unknown peer", msgs.len());
+                            log::debug!(target: "wire", "Dropping {} message(s) to {node_id}: unknown peer", msgs.len());
                             continue;
                         }
                     };
@@ -959,7 +952,7 @@ where
                 }
                 Io::Connect(node_id, addr) => {
                     if self.peers.connected().any(|(_, id)| id == &node_id) {
-                        log::error!(
+                        log::debug!(
                             target: "wire",
                             "Attempt to connect to already connected peer {node_id}"
                         );
@@ -970,15 +963,14 @@ where
                     self.service.attempted(node_id, addr.clone());
                     self.metrics.peer(node_id).outbound_connection_attempts += 1;
 
-                    match dial::<G>(
+                    match dial(
                         (*addr).clone(),
                         node_id,
-                        self.signer.clone().into_inner(),
+                        self.secret_key.clone(),
                         self.service.config(),
                     )
-                    .and_then(|session| {
-                        Transport::<WireSession<G>>::with_session(session, Link::Outbound)
-                    }) {
+                    .and_then(Transport::<WireSession>::with_session)
+                    {
                         Ok(transport) => {
                             let token = self.tokens.advance();
                             self.outbound.insert(
@@ -997,7 +989,7 @@ where
                                 .push_back(reactor::Action::RegisterTransport(token, transport));
                         }
                         Err(err) => {
-                            log::error!(target: "wire", "Error establishing connection to {addr}: {err}");
+                            logger::establish_connection(&addr, &err);
 
                             self.service.disconnected(
                                 node_id,
@@ -1013,7 +1005,7 @@ where
                             self.metrics.peer(nid).disconnects += 1;
                         }
                     } else {
-                        log::warn!(target: "wire", "Peer {nid} is not connected: ignoring disconnect");
+                        log::debug!(target: "wire", "Peer {nid} is not connected: ignoring disconnect");
                     }
                 }
                 Io::Wakeup(d) => {
@@ -1022,9 +1014,9 @@ where
                 Io::Fetch {
                     rid,
                     remote,
-                    timeout,
                     reader_limit,
                     refs_at,
+                    config,
                 } => {
                     log::trace!(target: "wire", "Processing fetch for {rid} from {remote}..");
 
@@ -1033,13 +1025,23 @@ where
                     else {
                         // Nb. It's possible that a peer is disconnected while an `Io::Fetch`
                         // is in the service's i/o buffer. Since the service may not purge the
-                        // buffer on disconnect, we should just ignore i/o actions that don't
-                        // have a connected peer.
-                        log::error!(target: "wire", "Peer {remote} is not connected: dropping fetch");
+                        // buffer on disconnect, we drop fetches that don't have a connected peer.
+                        // We must still report the failure so the fetcher clears its `active`
+                        // entry; otherwise the repository can no longer be fetched from any node.
+                        log::debug!(target: "wire", "Peer {remote} is not connected: dropping fetch");
+                        self.service.fetched(
+                            rid,
+                            remote,
+                            Err(protocol::worker::FetchError::Io(io::Error::new(
+                                io::ErrorKind::NotConnected,
+                                "peer disconnected before fetch could start",
+                            ))),
+                        );
                         continue;
                     };
-                    let (stream, channels) =
-                        streams.open(ChannelsConfig::new(timeout).with_reader_limit(reader_limit));
+                    let (stream, channels) = streams.open(
+                        ChannelsConfig::new(config.timeout()).with_reader_limit(reader_limit),
+                    );
 
                     log::debug!(target: "wire", "Opened new stream with id {stream} for {rid} and remote {remote}");
 
@@ -1049,6 +1051,7 @@ where
                             rid,
                             remote,
                             refs_at,
+                            config: config.fetch_config(),
                         },
                         stream,
                         channels,
@@ -1061,7 +1064,7 @@ where
                         );
                     }
                     if let Err(e) = self.worker.try_send(task) {
-                        log::error!(
+                        log::warn!(
                             target: "wire",
                             "Worker pool failed to accept outgoing fetch request: {e}"
                         );
@@ -1083,42 +1086,55 @@ where
 }
 
 /// Establish a new outgoing connection.
-pub fn dial<G: Ecdh<Pk = NodeId>>(
+pub fn dial(
     remote_addr: NetAddr<HostName>,
-    remote_id: <G as EcSk>::Pk,
-    signer: G,
+    remote_id: crypto::PublicKey,
+    signer: crypto::SigningKey,
     config: &radicle::node::Config,
-) -> io::Result<WireSession<G>> {
+) -> io::Result<WireSession> {
+    // TODO: Nicer error.
+    let remote_id = crypto::VerifyingKey::try_from(&remote_id)
+        .map_err(|source| io::Error::new(io::ErrorKind::InvalidInput, source.to_string()))?;
+
+    #[cfg(any(feature = "i2p", feature = "tor"))]
+    fn proxy_or_forward<H: std::fmt::Display>(
+        config: &AddressConfig,
+        global_proxy: Option<net::SocketAddr>,
+        host: H,
+        port: u16,
+    ) -> io::Result<NetAddr<InetHost>> {
+        match config {
+            // In proxy mode, simply use the configured proxy address.
+            // This takes precedence over any global proxy.
+            AddressConfig::Proxy { address } => Ok((*address).into()),
+            // In "forward" mode, if a global proxy is set, we use that; otherwise,
+            // we treat the address as a regular DNS name.
+            AddressConfig::Forward => Ok(global_proxy
+                .map(Into::into)
+                .unwrap_or_else(|| NetAddr::new(InetHost::Dns(host.to_string()), port))),
+            // If address type support isn't configured, refuse to connect.
+            AddressConfig::Drop => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "no configuration found for address type",
+            )),
+        }
+    }
+
     // Determine what address to establish a TCP connection with, given the remote peer
     // address and our node configuration.
     let inet_addr: NetAddr<InetHost> = match (&remote_addr.host, config.proxy) {
-        // For IP and DNS addresses, use the global proxy if set, otherwise use the address as-is.
+        // For IP and DNS addresses, use the global proxy if set; otherwise, use the address as-is.
         (HostName::Ip(_), Some(proxy)) => proxy.into(),
         (HostName::Ip(ip), None) => NetAddr::new(InetHost::Ip(*ip), remote_addr.port),
         (HostName::Dns(_), Some(proxy)) => proxy.into(),
         (HostName::Dns(dns), None) => NetAddr::new(InetHost::Dns(dns.clone()), remote_addr.port),
         // For onion addresses, handle with care.
-        (HostName::Tor(onion), proxy) => match config.onion {
-            // In onion proxy mode, simply use the configured proxy address.
-            // This takes precedence over any global proxy.
-            Some(AddressConfig::Proxy { address }) => address.into(),
-            // In "forward" mode, if a global proxy is set, we use that, otherwise
-            // we treat `.onion` addresses as regular DNS names.
-            Some(AddressConfig::Forward) => {
-                if let Some(proxy) = proxy {
-                    proxy.into()
-                } else {
-                    NetAddr::new(InetHost::Dns(onion.to_string()), remote_addr.port)
-                }
-            }
-            // If onion address support isn't configured, refuse to connect.
-            None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "no configuration found for .onion addresses",
-                ));
-            }
-        },
+        #[cfg(feature = "tor")]
+        (HostName::Tor(onion), proxy) => {
+            proxy_or_forward(&config.onion, proxy, onion, remote_addr.port)?
+        }
+        #[cfg(feature = "i2p")]
+        (HostName::I2p(i2p), proxy) => proxy_or_forward(&config.i2p, proxy, i2p, remote_addr.port)?,
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -1146,7 +1162,7 @@ pub fn dial<G: Ecdh<Pk = NodeId>>(
     // Whether to tunnel regular connections through the proxy.
     let force_proxy = config.proxy.is_some();
 
-    Ok(session::<G>(
+    Ok(session(
         remote_addr,
         Some(remote_id),
         connection,
@@ -1156,22 +1172,22 @@ pub fn dial<G: Ecdh<Pk = NodeId>>(
 }
 
 /// Accept a new connection.
-pub fn accept<G: Ecdh<Pk = NodeId>>(
+pub fn accept(
     remote_addr: NetAddr<HostName>,
     connection: TcpStream,
-    signer: G,
-) -> WireSession<G> {
-    session::<G>(remote_addr, None, connection, false, signer)
+    secret_key: crypto::SigningKey,
+) -> WireSession {
+    session(remote_addr, None, connection, false, secret_key)
 }
 
 /// Create a new [`WireSession`].
-fn session<G: Ecdh<Pk = NodeId>>(
+fn session(
     remote_addr: NetAddr<HostName>,
-    remote_id: Option<NodeId>,
+    remote_id: Option<crypto::VerifyingKey>,
     connection: TcpStream,
     force_proxy: bool,
-    signer: G,
-) -> WireSession<G> {
+    secret_key: crypto::SigningKey,
+) -> WireSession {
     if let Err(e) = connection.set_nodelay(true) {
         log::warn!(target: "wire", "Unable to set TCP_NODELAY on socket {connection:?}: {e}");
     }
@@ -1190,11 +1206,41 @@ fn session<G: Ecdh<Pk = NodeId>>(
     {
         let connection = socket2::SockRef::from(&connection);
 
-        let ka = socket2::TcpKeepalive::new()
-            .with_time(time::Duration::from_secs(30))
-            .with_interval(time::Duration::from_secs(10));
+        let ka = socket2::TcpKeepalive::new().with_time(time::Duration::from_secs(30));
 
-        #[cfg(not(windows))]
+        #[cfg(any(
+            target_os = "android",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "fuchsia",
+            target_os = "illumos",
+            target_os = "ios",
+            target_os = "visionos",
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "netbsd",
+            target_os = "tvos",
+            target_os = "watchos",
+            target_os = "windows",
+            target_os = "cygwin",
+        ))]
+        let ka = ka.with_interval(time::Duration::from_secs(10));
+
+        #[cfg(any(
+            target_os = "android",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "fuchsia",
+            target_os = "illumos",
+            target_os = "ios",
+            target_os = "visionos",
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "netbsd",
+            target_os = "tvos",
+            target_os = "watchos",
+            target_os = "cygwin",
+        ))]
         let ka = ka.with_retries(3);
 
         if let Err(e) = connection.set_tcp_keepalive(&ka) {
@@ -1212,12 +1258,13 @@ fn session<G: Ecdh<Pk = NodeId>>(
         Socks5Session::new(connection, socks5)
     };
 
-    let noise = {
-        let pair = G::generate_keypair();
+    let mut random = [0; 32];
+    getrandom::fill(&mut random).expect("failed get random bytes from the operating system");
 
+    let noise = {
         let keyset = Keyset {
-            e: pair.0,
-            s: Some(signer),
+            e: crypto::SigningKey::from_seed(crypto::Seed::new(random)),
+            s: Some(secret_key),
             re: None,
             rs: remote_id,
         };
@@ -1228,16 +1275,38 @@ fn session<G: Ecdh<Pk = NodeId>>(
     WireSession::new(proxy, noise)
 }
 
+mod logger {
+    use radicle::node::Address;
+
+    pub fn establish_connection(addr: &Address, err: &std::io::Error) {
+        use std::io::ErrorKind::*;
+        match err.kind() {
+            ConnectionRefused | ConnectionReset | HostUnreachable | ConnectionAborted
+            | NotConnected => {
+                log::info!(target: "wire", "Could not establish connection to {addr}: {err}")
+            }
+            _ => log::warn!(target: "wire", "Failed to establish connection to {addr}: {err}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::service::{Message, ZeroBytes};
+
+    use protocol::service::ServiceState as _;
+    use protocol::service::{Message, ZeroBytes};
+    use radicle::identity::RepoId;
+    use radicle::node;
+    use radicle::test::arbitrary;
+    use radicle::test::storage::MockStorage;
+
     use crate::wire;
     use crate::wire::varint;
 
     #[test]
-    fn test_pong_message_with_extension() {
-        use radicle_protocol::deserializer;
+    fn pong_message_with_extension() {
+        use protocol::deserializer;
 
         let mut stream = Vec::new();
         let pong = Message::Pong {
@@ -1267,8 +1336,8 @@ mod test {
     }
 
     #[test]
-    fn test_inventory_ann_with_extension() {
-        use radicle_protocol::deserializer;
+    fn inventory_ann_with_extension() {
+        use protocol::deserializer;
 
         #[derive(Debug)]
         struct MessageWithExt {
@@ -1292,9 +1361,9 @@ mod test {
             }
         }
 
-        let rid = radicle::test::arbitrary::gen(1);
-        let pk = radicle::test::arbitrary::gen(1);
-        let sig: [u8; 64] = radicle::test::arbitrary::gen(1);
+        let rid = arbitrary::r#gen(1);
+        let pk = arbitrary::r#gen(1);
+        let sig: [u8; 64] = arbitrary::r#gen(1);
 
         // Message with extension.
         let mut stream = Vec::new();
@@ -1359,5 +1428,103 @@ mod test {
             assert!(de.deserialize_next().unwrap().is_none());
             assert!(de.is_empty());
         }
+    }
+
+    // Builds a service holding an active fetch from `bob`, wrapped in a `Wire`.
+    // Returns the wire, the repo id, and bob's id/address.
+    #[allow(clippy::type_complexity)]
+    fn wire_with_active_fetch() -> (
+        Wire<radicle::node::Database, MockStorage>,
+        RepoId,
+        NodeId,
+        NetAddr<HostName>,
+    ) {
+        use crate::test::peer::Peer as TestPeer;
+
+        let storage = arbitrary::nonempty_storage(1);
+        let rid = *storage.repos.keys().next().unwrap();
+        let mut alice = TestPeer::with_storage("alice", 7, storage);
+        let bob = TestPeer::bob();
+        let bob_id = *bob.nid();
+        let bob_addr = NetAddr {
+            host: HostName::Ip(net::IpAddr::from([8, 8, 8, 8])),
+            port: node::DEFAULT_PORT,
+        };
+
+        // Start a fetch from Bob so the service holds `active[rid] = { from: bob }`.
+        alice.connect_to(&bob);
+        let (cmd, _recv) =
+            protocol::service::Command::fetch(rid, bob_id, radicle::node::DEFAULT_TIMEOUT, None);
+        alice.command(cmd);
+        assert!(
+            alice.fetches().any(|(r, _)| r == rid),
+            "fetch should be initiated"
+        );
+        assert!(alice.fetcher().active_fetches().contains_key(&rid));
+
+        let (worker_tx, _worker_rx) = chan::unbounded::<Task>();
+        let wire = Wire::new(
+            alice.into_service(),
+            worker_tx,
+            crypto::SigningKey::mock(100),
+        );
+
+        (wire, rid, bob_id, bob_addr)
+    }
+
+    fn timed_out_fetch_result(rid: RepoId, remote: NodeId) -> TaskResult {
+        TaskResult {
+            remote,
+            stream: StreamId::git(Link::Outbound).nth(1).unwrap(),
+            result: FetchResult::Initiator {
+                rid,
+                result: Err(protocol::worker::FetchError::Io(std::io::Error::from(
+                    std::io::ErrorKind::TimedOut,
+                ))),
+            },
+        }
+    }
+
+    // Regression test: a fetch result for a non-`Connected` peer must still reach
+    // `service.fetched` so `active[rid]` is cleared; otherwise the repo can no
+    // longer be fetched from any node until the process restarts.
+    #[test]
+    fn worker_result_clears_active_when_peer_disconnecting() {
+        let (mut wire, rid, bob_id, _addr) = wire_with_active_fetch();
+
+        // Bob is mid-disconnect at the wire layer: present, but not `Connected`.
+        wire.peers.insert(
+            Token(1),
+            Peer::Disconnecting {
+                link: Link::Outbound,
+                nid: Some(bob_id),
+                reason: DisconnectReason::connection(),
+            },
+        );
+
+        wire.worker_result(timed_out_fetch_result(rid, bob_id));
+
+        assert!(
+            !wire.service.fetcher().active_fetches().contains_key(&rid),
+            "fetch result must be reported even when the peer disconnected"
+        );
+    }
+
+    // Contrast: with the peer still `Connected`, the active entry clears too,
+    // confirming the test above exercises the disconnect path, not a vacuous
+    // assertion.
+    #[test]
+    fn worker_result_clears_active_when_peer_connected() {
+        let (mut wire, rid, bob_id, addr) = wire_with_active_fetch();
+
+        wire.peers
+            .insert(Token(1), Peer::connected(bob_id, addr, Link::Outbound));
+
+        wire.worker_result(timed_out_fetch_result(rid, bob_id));
+
+        assert!(
+            !wire.service.fetcher().active_fetches().contains_key(&rid),
+            "fetch result should have cleared active[rid]"
+        );
     }
 }

@@ -1,33 +1,35 @@
 use std::collections::HashSet;
 use std::net;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::{fmt, io, time};
 
 #[cfg(unix)]
-use std::os::unix::net::UnixStream as Stream;
+use std::os::unix::net::UnixStream;
 #[cfg(windows)]
-use winpipe::WinStream as Stream;
+use uds_windows::UnixStream;
 
-use crossbeam_channel as chan;
+use protocol::service;
+use protocol::service::QueryState;
+use protocol::wire::StreamId;
 use radicle::crypto::PublicKey;
+use radicle::identity::RepoId;
 use radicle::node::events::{Event, Events};
 use radicle::node::policy;
+use radicle::node::{Alias, Command, FetchResult};
 use radicle::node::{Config, NodeId};
 use radicle::node::{ConnectOptions, ConnectResult, Seeds};
+use radicle::profile::Home;
+use radicle::storage::refs;
+use radicle::storage::refs::RefsAt;
 use serde_json::json;
 use thiserror::Error;
 
-use crate::identity::RepoId;
-use crate::node::{Alias, Command, FetchResult};
-use crate::profile::Home;
 use crate::reactor;
 use crate::runtime::Emitter;
-use crate::service;
-use crate::service::{CommandError, QueryState};
-use crate::storage::refs::RefsAt;
 use crate::wire;
-use crate::wire::StreamId;
 use crate::worker::TaskResult;
 
 /// An error resulting from a handle method.
@@ -38,41 +40,45 @@ pub enum Error {
     ChannelDisconnected,
     /// The command returned an error.
     #[error("command failed: {0}")]
-    Command(#[from] CommandError),
+    Command(#[from] service::command::Error),
     /// The operation timed out.
     #[error("the operation timed out")]
     Timeout,
-    /// An I/O error occured.
+    /// An I/O error occurred.
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
 
-impl From<chan::RecvError> for Error {
-    fn from(_: chan::RecvError) -> Self {
+impl From<mpsc::RecvError> for Error {
+    fn from(_: mpsc::RecvError) -> Self {
         Self::ChannelDisconnected
     }
 }
 
-impl From<chan::RecvTimeoutError> for Error {
-    fn from(err: chan::RecvTimeoutError) -> Self {
+impl From<mpsc::RecvTimeoutError> for Error {
+    fn from(err: mpsc::RecvTimeoutError) -> Self {
         match err {
-            chan::RecvTimeoutError::Timeout => Self::Timeout,
-            chan::RecvTimeoutError::Disconnected => Self::ChannelDisconnected,
+            mpsc::RecvTimeoutError::Timeout => Self::Timeout,
+            mpsc::RecvTimeoutError::Disconnected => Self::ChannelDisconnected,
         }
     }
 }
 
-impl<T> From<chan::SendError<T>> for Error {
-    fn from(_: chan::SendError<T>) -> Self {
+impl<T> From<mpsc::SendError<T>> for Error {
+    fn from(_: mpsc::SendError<T>) -> Self {
         Self::ChannelDisconnected
     }
 }
 
 pub struct Handle {
     pub(crate) home: Home,
+
+    /// Path to the control socket in use. Required for shutdown.
+    pub(crate) socket: PathBuf,
+
     pub(crate) controller: reactor::Controller,
 
-    /// Whether a shutdown was initiated or not. Prevents attempting to shutdown twice.
+    /// Whether or not a shutdown was initiated. Prevents attempting to shutdown twice.
     shutdown: Arc<AtomicBool>,
     /// Publishes events to subscribers.
     emitter: Emitter<Event>,
@@ -95,6 +101,7 @@ impl Clone for Handle {
     fn clone(&self) -> Self {
         Self {
             home: self.home.clone(),
+            socket: self.socket.clone(),
             controller: self.controller.clone(),
             shutdown: self.shutdown.clone(),
             emitter: self.emitter.clone(),
@@ -103,9 +110,15 @@ impl Clone for Handle {
 }
 
 impl Handle {
-    pub fn new(home: Home, controller: reactor::Controller, emitter: Emitter<Event>) -> Self {
+    pub fn new(
+        home: Home,
+        socket: PathBuf,
+        controller: reactor::Controller,
+        emitter: Emitter<Event>,
+    ) -> Self {
         Self {
             home,
+            socket,
             controller,
             shutdown: Arc::default(),
             emitter,
@@ -132,12 +145,12 @@ impl radicle::node::Handle for Handle {
     type Error = Error;
 
     fn nid(&self) -> Result<NodeId, Self::Error> {
-        let (sender, receiver) = chan::bounded(1);
+        let (sender, receiver) = mpsc::sync_channel(1);
         let query: Arc<QueryState> = Arc::new(move |state| {
             sender.send(*state.nid()).ok();
             Ok(())
         });
-        let (err_sender, err_receiver) = chan::bounded(1);
+        let (err_sender, err_receiver) = mpsc::sync_channel(1);
         self.command(service::Command::QueryState(query, err_sender))?;
         err_receiver.recv()??;
 
@@ -161,10 +174,10 @@ impl radicle::node::Handle for Handle {
         let sessions = self.sessions()?;
         let session = sessions.iter().find(|s| s.nid == node);
 
-        if let Some(s) = session {
-            if s.state.is_connected() {
-                return Ok(ConnectResult::Connected);
-            }
+        if let Some(s) = session
+            && s.state.is_connected()
+        {
+            return Ok(ConnectResult::Connected);
         }
         self.command(service::Command::Connect(node, addr, opts))?;
 
@@ -203,25 +216,25 @@ impl radicle::node::Handle for Handle {
         id: RepoId,
         namespaces: impl IntoIterator<Item = PublicKey>,
     ) -> Result<Seeds, Self::Error> {
-        let (sender, receiver) = chan::bounded(1);
+        let (responder, receiver) = service::command::Responder::oneshot();
         self.command(service::Command::Seeds(
             id,
             HashSet::from_iter(namespaces),
-            sender,
+            responder,
         ))?;
-        receiver.recv().map_err(Error::from)
+        Ok(receiver.recv()??)
     }
 
     fn config(&self) -> Result<Config, Self::Error> {
-        let (sender, receiver) = chan::bounded(1);
-        self.command(service::Command::Config(sender))?;
-        receiver.recv().map_err(Error::from)
+        let (responder, receiver) = service::command::Responder::oneshot();
+        self.command(service::Command::Config(responder))?;
+        Ok(receiver.recv()??)
     }
 
     fn listen_addrs(&self) -> Result<Vec<net::SocketAddr>, Self::Error> {
-        let (sender, receiver) = chan::bounded(1);
-        self.command(service::Command::ListenAddrs(sender))?;
-        receiver.recv().map_err(Error::from)
+        let (responder, receiver) = service::command::Responder::oneshot();
+        self.command(service::Command::ListenAddrs(responder))?;
+        Ok(receiver.recv()??)
     }
 
     fn fetch(
@@ -229,34 +242,47 @@ impl radicle::node::Handle for Handle {
         id: RepoId,
         from: NodeId,
         timeout: time::Duration,
+        signed_references_minimum_feature_level: Option<refs::FeatureLevel>,
     ) -> Result<FetchResult, Error> {
-        let (sender, receiver) = chan::bounded(1);
-        self.command(service::Command::Fetch(id, from, timeout, sender))?;
-        receiver.recv().map_err(Error::from)
+        let (responder, receiver) = service::command::Responder::oneshot();
+        self.command(service::Command::Fetch(
+            id,
+            from,
+            timeout,
+            signed_references_minimum_feature_level,
+            responder,
+        ))?;
+        Ok(receiver.recv()??)
     }
 
     fn follow(&mut self, id: NodeId, alias: Option<Alias>) -> Result<bool, Error> {
-        let (sender, receiver) = chan::bounded(1);
-        self.command(service::Command::Follow(id, alias, sender))?;
-        receiver.recv().map_err(Error::from)
+        let (responder, receiver) = service::command::Responder::oneshot();
+        self.command(service::Command::Follow(id, alias, responder))?;
+        Ok(receiver.recv()??)
     }
 
     fn unfollow(&mut self, id: NodeId) -> Result<bool, Error> {
-        let (sender, receiver) = chan::bounded(1);
-        self.command(service::Command::Unfollow(id, sender))?;
-        receiver.recv().map_err(Error::from)
+        let (responder, receiver) = service::command::Responder::oneshot();
+        self.command(service::Command::Unfollow(id, responder))?;
+        Ok(receiver.recv()??)
+    }
+
+    fn block(&mut self, id: NodeId) -> Result<bool, Self::Error> {
+        let (responder, receiver) = service::command::Responder::oneshot();
+        self.command(service::Command::Block(id, responder))?;
+        Ok(receiver.recv()??)
     }
 
     fn seed(&mut self, id: RepoId, scope: policy::Scope) -> Result<bool, Error> {
-        let (sender, receiver) = chan::bounded(1);
-        self.command(service::Command::Seed(id, scope, sender))?;
-        receiver.recv().map_err(Error::from)
+        let (responder, receiver) = service::command::Responder::oneshot();
+        self.command(service::Command::Seed(id, scope, responder))?;
+        Ok(receiver.recv()??)
     }
 
     fn unseed(&mut self, id: RepoId) -> Result<bool, Error> {
-        let (sender, receiver) = chan::bounded(1);
-        self.command(service::Command::Unseed(id, sender))?;
-        receiver.recv().map_err(Error::from)
+        let (responder, receiver) = service::command::Responder::oneshot();
+        self.command(service::Command::Unseed(id, responder))?;
+        Ok(receiver.recv()??)
     }
 
     fn announce_refs_for(
@@ -264,13 +290,13 @@ impl radicle::node::Handle for Handle {
         id: RepoId,
         namespaces: impl IntoIterator<Item = PublicKey>,
     ) -> Result<RefsAt, Error> {
-        let (sender, receiver) = chan::bounded(1);
+        let (responder, receiver) = service::command::Responder::oneshot();
         self.command(service::Command::AnnounceRefs(
             id,
             HashSet::from_iter(namespaces),
-            sender,
+            responder,
         ))?;
-        receiver.recv().map_err(Error::from)
+        Ok(receiver.recv()??)
     }
 
     fn announce_inventory(&mut self) -> Result<(), Error> {
@@ -279,9 +305,9 @@ impl radicle::node::Handle for Handle {
     }
 
     fn add_inventory(&mut self, rid: RepoId) -> Result<bool, Error> {
-        let (sender, receiver) = chan::bounded(1);
-        self.command(service::Command::AddInventory(rid, sender))?;
-        receiver.recv().map_err(Error::from)
+        let (responder, receiver) = service::command::Responder::oneshot();
+        self.command(service::Command::AddInventory(rid, responder))?;
+        Ok(receiver.recv()??)
     }
 
     fn subscribe(&self, _timeout: time::Duration) -> Result<Self::Events, Self::Error> {
@@ -289,7 +315,7 @@ impl radicle::node::Handle for Handle {
     }
 
     fn sessions(&self) -> Result<Self::Sessions, Error> {
-        let (sender, receiver) = chan::unbounded();
+        let (sender, receiver) = mpsc::channel();
         let query: Arc<QueryState> = Arc::new(move |state| {
             let sessions = state
                 .sessions()
@@ -300,7 +326,7 @@ impl radicle::node::Handle for Handle {
 
             Ok(())
         });
-        let (err_sender, err_receiver) = chan::bounded(1);
+        let (err_sender, err_receiver) = mpsc::sync_channel(1);
         self.command(service::Command::QueryState(query, err_sender))?;
         err_receiver.recv()??;
 
@@ -310,14 +336,14 @@ impl radicle::node::Handle for Handle {
     }
 
     fn session(&self, nid: NodeId) -> Result<Option<radicle::node::Session>, Self::Error> {
-        let (sender, receiver) = chan::bounded(1);
+        let (sender, receiver) = mpsc::sync_channel(1);
         let query: Arc<QueryState> = Arc::new(move |state| {
             let session = state.sessions().get(&nid).map(radicle::node::Session::from);
             sender.send(session).ok();
 
             Ok(())
         });
-        let (err_sender, err_receiver) = chan::bounded(1);
+        let (err_sender, err_receiver) = mpsc::sync_channel(1);
         self.command(service::Command::QueryState(query, err_sender))?;
         err_receiver.recv()??;
 
@@ -327,7 +353,7 @@ impl radicle::node::Handle for Handle {
     }
 
     fn shutdown(self) -> Result<(), Error> {
-        // If the current value is `false`, set it to `true`, otherwise error.
+        // If the current value is `false`, set it to `true`; otherwise, error.
         if self
             .shutdown
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -338,7 +364,7 @@ impl radicle::node::Handle for Handle {
         // Send a shutdown request to our own control socket. This is the only way to kill the
         // control thread gracefully. Since the control thread may have called this function,
         // the control socket may already be disconnected. Ignore errors.
-        Stream::connect(self.home.socket())
+        UnixStream::connect(self.socket)
             .and_then(|sock| Command::Shutdown.to_writer(sock))
             .ok();
 
@@ -348,30 +374,12 @@ impl radicle::node::Handle for Handle {
     }
 
     fn debug(&self) -> Result<serde_json::Value, Self::Error> {
-        let (sender, receiver) = chan::bounded(1);
+        let (sender, receiver) = mpsc::sync_channel(1);
         let query: Arc<QueryState> = Arc::new(move |state| {
+            let fetching = debug::Fetching::new(state.fetching());
             let debug = serde_json::json!({
                 "outboxSize": state.outbox().len(),
-                "fetching": state.fetching().iter().map(|(rid, state)| {
-                    json!({
-                        "rid": rid,
-                        "from": state.from,
-                        "refsAt": state.refs_at,
-                        "subscribers": state.subscribers.len(),
-                    })
-                }).collect::<Vec<_>>(),
-                "queue": state.sessions().values().map(|sess| {
-                    json!({
-                        "nid": sess.id,
-                        "queue": sess.queue.iter().map(|fetch| {
-                            json!({
-                                "rid": fetch.rid,
-                                "from": fetch.from,
-                                "refsAt": fetch.refs_at,
-                            })
-                        }).collect::<Vec<_>>()
-                    })
-                }).collect::<Vec<_>>(),
+                "fetching": fetching,
                 "rateLimiter": state.limiter().buckets.iter().map(|(host, bucket)| {
                     json!({
                         "host": host.to_string(),
@@ -380,7 +388,7 @@ impl radicle::node::Handle for Handle {
                 }).collect::<Vec<_>>(),
                 "events": json!({
                     "subscribers": state.emitter().subscriptions(),
-                    "pending": state.emitter().pending(),
+                    "pending": serde_json::Value::Null,
                 }),
                 "metrics": state.metrics(),
             });
@@ -388,12 +396,85 @@ impl radicle::node::Handle for Handle {
 
             Ok(())
         });
-        let (err_sender, err_receiver) = chan::bounded(1);
+        let (err_sender, err_receiver) = mpsc::sync_channel(1);
         self.command(service::Command::QueryState(query, err_sender))?;
         err_receiver.recv()??;
 
         let debug = receiver.recv()?;
 
         Ok(debug)
+    }
+}
+
+mod debug {
+    //! Serialization formats for the output of [`Handle::debug`] output.
+
+    use protocol::fetcher;
+    use protocol::fetcher::FetcherState;
+    use serde::Serialize;
+
+    use super::{NodeId, RefsAt, RepoId};
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Fetching {
+        active: Vec<ActiveFetch>,
+        queued: Vec<QueuedFetch>,
+    }
+
+    impl Fetching {
+        pub fn new(state: &FetcherState) -> Self {
+            let active = state
+                .active_fetches()
+                .iter()
+                .map(|(rid, fetch)| ActiveFetch::new(*rid, fetch.clone()))
+                .collect();
+            let queued = state
+                .queued_fetches()
+                .iter()
+                .flat_map(|(node, queue)| {
+                    queue
+                        .iter()
+                        .map(|fetch| QueuedFetch::new(*node, fetch.clone()))
+                })
+                .collect();
+            Self { active, queued }
+        }
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct ActiveFetch {
+        rid: RepoId,
+        from: NodeId,
+        refs_at: Vec<RefsAt>,
+    }
+
+    impl ActiveFetch {
+        pub fn new(rid: RepoId, fetch: fetcher::ActiveFetch) -> Self {
+            Self {
+                rid,
+                from: fetch.from,
+                refs_at: fetch.refs.into(),
+            }
+        }
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct QueuedFetch {
+        nid: NodeId,
+        rid: RepoId,
+        refs_at: Vec<RefsAt>,
+    }
+
+    impl QueuedFetch {
+        pub fn new(node: NodeId, fetch: fetcher::QueuedFetch) -> Self {
+            Self {
+                nid: node,
+                rid: fetch.rid,
+                refs_at: fetch.refs.into(),
+            }
+        }
     }
 }

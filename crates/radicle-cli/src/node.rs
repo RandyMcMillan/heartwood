@@ -4,7 +4,7 @@ use std::io::Write;
 
 use radicle::node::sync;
 use radicle::node::{Handle as _, NodeId};
-use radicle::storage::{ReadRepository, RepositoryError};
+use radicle::storage::{ReadRepository, RepositoryError, refs};
 use radicle::{Node, Profile};
 
 use crate::terminal as term;
@@ -21,16 +21,27 @@ pub struct SyncSettings {
     pub seeds: BTreeSet<NodeId>,
     /// How long to wait for syncing to complete.
     pub timeout: time::Duration,
+    /// The minimum feature level to accept when fetching signed references.
+    pub signed_references_minimum_feature_level: Option<refs::FeatureLevel>,
 }
 
 impl SyncSettings {
     /// Set sync timeout. Defaults to [`DEFAULT_SYNC_TIMEOUT`].
+    #[must_use]
     pub fn timeout(mut self, timeout: time::Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
+    /// Set minimum feature level for fetching signed references.
+    #[must_use]
+    pub fn minimum_feature_level(mut self, feature_level: Option<refs::FeatureLevel>) -> Self {
+        self.signed_references_minimum_feature_level = feature_level;
+        self
+    }
+
     /// Set replicas.
+    #[must_use]
     pub fn replicas(mut self, replicas: sync::ReplicationFactor) -> Self {
         self.replicas = replicas;
         self
@@ -44,6 +55,7 @@ impl SyncSettings {
 
     /// Use profile to populate sync settings, by adding preferred seeds if no seeds are specified,
     /// and removing the local node from the set.
+    #[must_use]
     pub fn with_profile(mut self, profile: &Profile) -> Self {
         // If no seeds were specified, add the preferred seeds.
         if self.seeds.is_empty() {
@@ -66,6 +78,7 @@ impl Default for SyncSettings {
             replicas: sync::ReplicationFactor::default(),
             seeds: BTreeSet::new(),
             timeout: DEFAULT_SYNC_TIMEOUT,
+            signed_references_minimum_feature_level: None,
         }
     }
 }
@@ -87,7 +100,7 @@ impl SyncError {
     fn is_connection_err(&self) -> bool {
         match self {
             Self::Node(e) => e.is_connection_err(),
-            _ => false,
+            Self::Repository(_) | Self::AllSeedsTimedOut | Self::Target(_) => false,
         }
     }
 }
@@ -123,7 +136,9 @@ pub fn announce<R: ReadRepository>(
     match announce_(repo, settings, reporting, node, profile) {
         Ok(result) => Ok(result),
         Err(e) if e.is_connection_err() => {
-            term::hint("Node is stopped. To announce changes to the network, start it with `rad node start`.");
+            term::hint(
+                "Node is stopped. To announce changes to the network, start it with `rad node start`.",
+            );
             Ok(None)
         }
         Err(e) => Err(e),

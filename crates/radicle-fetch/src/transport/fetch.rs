@@ -1,17 +1,17 @@
+use std::borrow::Cow;
 use std::io;
 use std::path::PathBuf;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Arc, atomic::AtomicBool};
 
 use gix_features::progress::{DynNestedProgress, NestedProgress};
 use gix_pack as pack;
-use gix_protocol::fetch;
 use gix_protocol::fetch::negotiate::one_round::State;
-use gix_protocol::handshake;
 use gix_protocol::handshake::Ref;
+use gix_protocol::{Handshake, fetch};
 
 use crate::git::packfile;
 
-use super::{agent_name, Connection, WantsHaves};
+use super::{Connection, WantsHaves, agent_name};
 
 pub type Error = fetch::Error;
 
@@ -60,6 +60,7 @@ impl PackWriter {
             object_hash: gix_hash::Kind::Sha1,
             use_multi_pack_index: true,
             current_dir: Some(self.git_dir.clone()),
+            alloc_limit_bytes: None,
         };
         let thickener = Arc::new(
             gix_odb::Store::at_opts(self.git_dir.join("objects"), &mut [].into_iter(), odb_opts)
@@ -149,7 +150,7 @@ impl fetch::Negotiate for Negotiate {
 pub(crate) fn run<P, R, W>(
     wants_haves: WantsHaves,
     pack_writer: PackWriter,
-    handshake: &handshake::Outcome,
+    handshake: &Handshake,
     mut conn: Connection<R, W>,
     progress: &mut P,
 ) -> Result<FetchOut, Error>
@@ -159,7 +160,7 @@ where
     R: io::Read,
     W: io::Write,
 {
-    log::trace!(target: "fetch", "Performing fetch");
+    log::trace!("Performing fetch");
 
     if wants_haves.wants.is_empty() {
         return Err(Error::ReadRemainingBytes(io::Error::new(
@@ -173,7 +174,6 @@ where
         keepfile: None,
     };
     let mut negotiate = Negotiate { wants_haves };
-    let agent = agent_name();
 
     let mut pack_out = None;
     let mut handshake = handshake.clone();
@@ -189,7 +189,7 @@ where
         fetch::Context {
             handshake: &mut handshake,
             transport: &mut conn,
-            user_agent: ("agent", Some(agent.into())),
+            user_agent: ("agent", Some(Cow::Owned(agent_name()))),
             trace_packetlines: false,
         },
         fetch::Options {
@@ -214,6 +214,6 @@ where
         .and_then(packfile::Keepfile::new);
     out.pack = Some(pack_out);
 
-    log::trace!(target: "fetch", "fetched refs: {:?}", out.refs);
+    log::trace!("fetched refs: {:?}", out.refs);
     Ok(out)
 }

@@ -2,13 +2,15 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use radicle::{
-    identity::{project::ProjectName, Visibility},
+    identity::{Visibility, project::ProjectName},
     node::policy::Scope,
     prelude::RepoId,
 };
 use radicle_term::Interactive;
 
-pub(crate) const ABOUT: &str = "Initialize a Radicle repository";
+use crate::terminal::args::ScopeParser;
+
+const ABOUT: &str = "Initialize a Radicle repository";
 
 #[derive(Debug, Parser)]
 #[command(about = ABOUT, disable_version_flag = true)]
@@ -38,15 +40,15 @@ pub struct Args {
     /// Set repository visibility to *public*
     #[arg(long, conflicts_with = "private")]
     public: bool,
-    /// Setup repository as an existing Radicle repository
+    /// Set up repository as an existing Radicle repository
     ///
     /// [example values: rad:z3Tr6bC7ctEg2EHmLvknUr29mEDLH, z3Tr6bC7ctEg2EHmLvknUr29mEDLH]
     #[arg(long, value_name = "RID")]
     pub(super) existing: Option<RepoId>,
-    /// Setup the upstream of the default branch
+    /// Set up the upstream of the default branch
     #[arg(short = 'u', long)]
     pub(super) set_upstream: bool,
-    /// Setup the radicle key as a signing key for this repository
+    /// Set up the Radicle key as a signing key for this repository
     #[arg(long)]
     pub(super) setup_signing: bool,
     /// Don't ask for confirmation during setup
@@ -85,38 +87,11 @@ impl Args {
     }
 }
 
-// TODO(finto): this is duplicated from `clone::args`. Consolidate these once
-// the `clap` migration has finished and we can organise the shared code.
-#[derive(Clone, Debug)]
-struct ScopeParser;
-
-impl clap::builder::TypedValueParser for ScopeParser {
-    type Value = Scope;
-
-    fn parse_ref(
-        &self,
-        cmd: &clap::Command,
-        arg: Option<&clap::Arg>,
-        value: &std::ffi::OsStr,
-    ) -> Result<Self::Value, clap::Error> {
-        <Scope as std::str::FromStr>::from_str.parse_ref(cmd, arg, value)
-    }
-
-    fn possible_values(
-        &self,
-    ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
-        use clap::builder::PossibleValue;
-        Some(Box::new(
-            [PossibleValue::new("all"), PossibleValue::new("followed")].into_iter(),
-        ))
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::Args;
-    use clap::error::ErrorKind;
     use clap::Parser;
+    use clap::error::ErrorKind;
 
     #[test]
     fn should_parse_rid_non_urn() {

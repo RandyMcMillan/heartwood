@@ -1,28 +1,28 @@
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::{fmt, ops::Deref, str::FromStr};
 
 use crypto::{PublicKey, Signature};
+use nonempty::NonEmpty;
 use radicle_cob::{Embed, ObjectId, TypeName};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::cob::store::access::WriteAs;
 use crate::git;
 use crate::git::Oid;
 use crate::identity::doc::Doc;
-use crate::node::device::Device;
 use crate::node::NodeId;
 use crate::storage;
 use crate::{
     cob,
     cob::{
-        op, store,
+        ActorId, Timestamp, Uri, op, store,
         store::{Cob, CobAction, Transaction},
-        ActorId, Timestamp, Uri,
     },
     identity::{
-        doc::{DocError, RepoId},
         Did,
+        doc::{DocError, RepoId},
     },
     storage::{ReadRepository, RepositoryError, WriteRepository},
 };
@@ -65,6 +65,7 @@ pub enum Action {
         /// Parent revision that this revision replaces.
         parent: Option<RevisionId>,
         /// Signature over the revision blob.
+        #[serde(with = "signature")]
         signature: Signature,
     },
     RevisionEdit {
@@ -80,6 +81,7 @@ pub enum Action {
     RevisionAccept {
         revision: RevisionId,
         /// Signature over the blob.
+        #[serde(with = "signature")]
         signature: Signature,
     },
     #[serde(rename = "revision.reject")]
@@ -95,6 +97,7 @@ impl CobAction for Action {
 }
 
 /// Error applying an operation onto a state.
+#[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum ApplyError {
     /// Causal dependency missing.
@@ -121,14 +124,32 @@ pub enum ApplyError {
     DuplicateVerdict,
     #[error("revision is in an unexpected state")]
     UnexpectedState,
-    #[error("revision has been redacted")]
-    Redacted,
+    #[error("delegate already accepted a sibling revision '{revision}'")]
+    SiblingAccepted { revision: RevisionId },
     #[error("document does not contain any changes to current identity")]
     DocUnchanged,
     #[error("git: {0}")]
     Git(#[from] git::raw::Error),
     #[error("identity document error: {0}")]
     Doc(#[from] DocError),
+    #[error("{author} is not a delegate, and only delegates are allowed to {action}")]
+    NonDelegateUnauthorized { author: Did, action: String },
+}
+
+impl ApplyError {
+    fn non_delegate_unauthorized(author: Did, action: &Action) -> Self {
+        let action = match action {
+            Action::Revision { .. } => "create a revision",
+            Action::RevisionEdit { .. } => "edit a revision",
+            Action::RevisionAccept { .. } => "accept a revision",
+            Action::RevisionReject { .. } => "reject a revision",
+            Action::RevisionRedact { .. } => "redact a revision",
+        };
+        Self::NonDelegateUnauthorized {
+            author,
+            action: action.to_string(),
+        }
+    }
 }
 
 /// Error updating or creating proposals.
@@ -150,20 +171,14 @@ pub enum Error {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Identity {
-    /// The canonical identifier for this identity.
-    /// This is the object id of the initial document blob.
-    pub id: RepoId,
     /// The current revision of the document.
     /// Equal to the head of the identity branch.
     pub current: RevisionId,
     /// The initial revision of the document.
     pub root: RevisionId,
-    /// The latest revision that each delegate has accepted.
-    /// Delegates can only accept one revision at a time.
-    pub heads: BTreeMap<Did, RevisionId>,
 
     /// Revisions.
-    revisions: BTreeMap<RevisionId, Option<Revision>>,
+    revisions: HashMap<RevisionId, Revision>,
     /// Timeline of events.
     timeline: Vec<EntryId>,
 }
@@ -183,51 +198,48 @@ impl std::ops::Deref for Identity {
 }
 
 impl Identity {
-    pub fn new(revision: Revision) -> Self {
-        let root = revision.id;
+    fn new(root: Revision) -> Self {
+        let root_id = root.id;
+        let founder = *root.author.id();
+
+        debug_assert_eq!(
+            *root.doc.delegates(),
+            crate::identity::doc::Delegates::from(founder)
+        );
 
         Self {
-            id: revision.blob.into(),
-            root,
-            current: root,
-            heads: revision
-                .delegates()
-                .iter()
-                .copied()
-                .map(|did| (did, root))
-                .collect(),
-            revisions: BTreeMap::from_iter([(root, Some(revision))]),
-            timeline: vec![root],
+            root: root_id,
+            current: root_id,
+            revisions: HashMap::from_iter([(root_id, root)]),
+            timeline: vec![root_id],
         }
     }
 
-    pub fn initialize<'a, R, G>(
+    pub fn initialize<'a, 'b, Repo, Signer>(
         doc: &Doc,
-        store: &'a R,
-        signer: &Device<G>,
-    ) -> Result<IdentityMut<'a, R>, cob::store::Error>
+        store: &'a Repo,
+        signer: &'b Signer,
+    ) -> Result<IdentityMut<'a, 'b, Repo, Signer>, cob::store::Error>
     where
-        G: crypto::signature::Signer<crypto::Signature>,
-        R: WriteRepository + cob::Store<Namespace = NodeId>,
+        Repo: WriteRepository + cob::Store<Namespace = NodeId>,
+        Signer: crypto::Signer,
     {
-        let mut store = cob::store::Store::open(store)?;
-        let (id, identity) = Transaction::<Identity, _>::initial(
-            "Initialize identity",
-            &mut store,
-            signer,
-            |tx, repo| {
-                tx.revision(
-                    // SAFETY: "Initial revision" is a valid title
-                    #[allow(clippy::unwrap_used)]
-                    cob::Title::new("Initial revision").unwrap(),
-                    "",
-                    doc,
-                    None,
-                    repo,
-                    signer,
-                )
-            },
-        )?;
+        let mut store = cob::store::Store::open(store, WriteAs::new(signer))?;
+
+        #[allow(clippy::unwrap_used)]
+        let title = cob::Title::new("Initial revision").unwrap();
+
+        #[allow(deprecated)]
+        let (actions, embeds) = {
+            let repo = store.repo();
+            let signer = store.signer();
+            Transaction::new_revision(title, "", doc, None, repo, signer)?.into_inner()
+        };
+
+        let actions = NonEmpty::from_vec(actions)
+            .expect("Transaction::initial: transaction must contain at least one action");
+
+        let (id, identity) = store.create("Initialize identity", actions, embeds)?;
 
         Ok(IdentityMut {
             id,
@@ -236,10 +248,10 @@ impl Identity {
         })
     }
 
-    pub fn get<R: ReadRepository + cob::Store>(
-        object: &ObjectId,
-        repo: &R,
-    ) -> Result<Identity, store::Error> {
+    pub fn get<Repo>(object: &ObjectId, repo: &Repo) -> Result<Identity, store::Error>
+    where
+        Repo: ReadRepository + cob::Store,
+    {
         use cob::store::CobWithType;
 
         cob::get::<Self, _>(repo, Self::type_name(), object)
@@ -248,12 +260,17 @@ impl Identity {
     }
 
     /// Get a proposal mutably.
-    pub fn get_mut<'a, R: WriteRepository + cob::Store<Namespace = NodeId>>(
+    pub fn get_mut<'a, 'b, Repo, Signer>(
         id: &ObjectId,
-        repo: &'a R,
-    ) -> Result<IdentityMut<'a, R>, store::Error> {
+        repo: &'a Repo,
+        signer: &'b Signer,
+    ) -> Result<IdentityMut<'a, 'b, Repo, Signer>, store::Error>
+    where
+        Repo: WriteRepository + cob::Store<Namespace = NodeId>,
+        Signer: crypto::Signer,
+    {
         let obj = Self::get(id, repo)?;
-        let store = cob::store::Store::open(repo)?;
+        let store = cob::store::Store::open(repo, WriteAs::new(signer))?;
 
         Ok(IdentityMut {
             id: *id,
@@ -269,20 +286,26 @@ impl Identity {
         Self::get(&oid, repo).map_err(RepositoryError::from)
     }
 
-    pub fn load_mut<R: WriteRepository + cob::Store<Namespace = NodeId>>(
-        repo: &R,
-    ) -> Result<IdentityMut<'_, R>, RepositoryError> {
+    pub fn load_mut<'a, 'b, Repo, Signer>(
+        repo: &'a Repo,
+        signer: &'b Signer,
+    ) -> Result<IdentityMut<'a, 'b, Repo, Signer>, RepositoryError>
+    where
+        Repo: WriteRepository + cob::Store<Namespace = NodeId>,
+        Signer: crypto::Signer,
+    {
         let oid = repo.identity_root()?;
         let oid = ObjectId::from(oid);
 
-        Self::get_mut(&oid, repo).map_err(RepositoryError::from)
+        Self::get_mut(&oid, repo, signer).map_err(RepositoryError::from)
     }
 }
 
 impl Identity {
     /// The repository identifier.
+    #[deprecated]
     pub fn id(&self) -> RepoId {
-        self.id
+        self.root().blob.into()
     }
 
     /// The current document.
@@ -310,18 +333,66 @@ impl Identity {
 
     /// A specific [`Revision`], that may be redacted.
     pub fn revision(&self, revision: &RevisionId) -> Option<&Revision> {
-        self.revisions.get(revision).and_then(|r| r.as_ref())
+        let result = self.revisions.get(revision);
+        debug_assert!(result.is_none_or(|result| &result.id == revision));
+        result
     }
 
     /// All the [`Revision`]s that have not been redacted.
     pub fn revisions(&self) -> impl DoubleEndedIterator<Item = &Revision> {
-        self.timeline
-            .iter()
-            .filter_map(|id| self.revisions.get(id).and_then(|o| o.as_ref()))
+        self.timeline.iter().filter_map(|id| {
+            self.revisions
+                .get(id)
+                .filter(|revision| !matches!(revision.state, State::Redacted(_)))
+        })
     }
 
     pub fn latest_by(&self, who: &Did) -> Option<&Revision> {
         self.revisions().rev().find(|r| r.author.id() == who)
+    }
+
+    #[inline]
+    fn children_of(&self, id: &RevisionId) -> impl Iterator<Item = &RevisionId> {
+        self.revision(id)
+            .map(|revision| &revision.children)
+            .into_iter()
+            .flatten()
+    }
+
+    #[inline]
+    fn siblings_of(&self, id: &RevisionId) -> impl Iterator<Item = &RevisionId> {
+        self.revision(id)
+            .and_then(|revision| revision.parent.as_ref())
+            .map(|parent_id| {
+                self.children_of(parent_id)
+                    .filter(move |child| *child != id)
+            })
+            .into_iter()
+            .flatten()
+    }
+
+    /// Checks if the `delegate` has already accepted any child of the provided
+    /// `parent` that is active.
+    ///
+    /// The [`RevisionId`] is returned if one was found.
+    ///
+    /// Used to enforce the invariant that no two sibling, active [`Revision`]s
+    /// should have an accepted vote from the same delegate.
+    pub(crate) fn has_accepted_active_sibling(
+        &self,
+        parent: &RevisionId,
+        delegate: &Did,
+    ) -> Option<RevisionId> {
+        self.children_of(parent).find_map(|child_id| {
+            self.revision(child_id)
+                .filter(|child| child.is_active())
+                .and_then(|child| {
+                    child
+                        .accepted()
+                        .any(|did| did == *delegate)
+                        .then_some(*child_id)
+                })
+        })
     }
 }
 
@@ -401,19 +472,14 @@ impl store::Cob for Identity {
         let concurrent = concurrent.into_iter().collect::<Vec<_>>();
 
         for action in op.actions {
-            match self.action(action, id, op.author, op.timestamp, &concurrent, repo) {
+            match self.action(action, id, op.author, op.timestamp, repo) {
                 Ok(()) => {}
                 // This particular error is returned when there is a mismatch between the expected
                 // and the actual state of a revision, which can happen concurrently. Therefore
                 // if there are other concurrent ops, it is not fatal and we simply ignore it.
-                Err(ApplyError::UnexpectedState) => {
-                    if concurrent.is_empty() {
-                        return Err(ApplyError::UnexpectedState);
-                    }
-                }
-                // It's not a user error if the revision happens to be redacted by
+                Err(ApplyError::UnexpectedState) if !concurrent.is_empty() => {}
+                // It is not a user error if the revision happens to be redacted by
                 // the time this action is processed.
-                Err(ApplyError::Redacted) => {}
                 Err(other) => return Err(other),
             }
             debug_assert!(!self.timeline.contains(&id));
@@ -431,138 +497,220 @@ impl Identity {
     /// * There is only ever one accepted revision; this is the "current" revision.
     /// * There can be zero or more active revisions, up to the number of delegates.
     /// * An active revision is one that can be "voted" on.
-    /// * An active revision always has the current revision as parent.
-    /// * Only the active revision can be accepted, rejected or edited.
+    /// * Only an active revision can be accepted, rejected or edited.
     fn action<R: ReadRepository>(
         &mut self,
         action: Action,
-        entry: EntryId,
+        id: EntryId,
         author: ActorId,
         timestamp: Timestamp,
-        _concurrent: &[&cob::Entry],
         repo: &R,
     ) -> Result<(), ApplyError> {
-        let current = self.current().clone();
+        let did = author.into();
 
-        if !current.is_delegate(&author.into()) {
-            return Err(ApplyError::UnexpectedState);
-        }
         match action {
-            Action::RevisionAccept {
-                revision,
-                signature,
-            } => {
-                let id = revision;
-                let Some(revision) = lookup::revision_mut(&mut self.revisions, &id)? else {
-                    return Err(ApplyError::Redacted);
+            Action::RevisionAccept { revision: id, .. }
+            | Action::RevisionReject { revision: id } => {
+                let noun = match action {
+                    Action::RevisionAccept { .. } => "acceptance",
+                    Action::RevisionReject { .. } => "rejection",
+                    _ => unreachable!(),
                 };
-                if !revision.is_active() {
-                    // You can't vote on an inactive revision.
-                    return Err(ApplyError::UnexpectedState);
+
+                let revision = self.revision(&id).ok_or(ApplyError::Missing(id))?;
+
+                match revision.state {
+                    state @ (State::Accepted | State::Rejected(_) | State::Redacted(_)) => {
+                        log::debug!(
+                            "Skipping {noun} of revision {id} by {did} because it already is {}.",
+                            state.display_with_reason()
+                        );
+                    }
+                    State::Active => {
+                        let parent_id = revision.parent.ok_or(ApplyError::MissingParent)?;
+                        let parent = self
+                            .revision(&parent_id)
+                            .ok_or(ApplyError::Missing(parent_id))?;
+
+                        if !parent.is_delegate(&did) {
+                            return Err(ApplyError::non_delegate_unauthorized(did, &action));
+                        }
+
+                        log::trace!("Applying {noun} of active revision {id} by {did}.");
+
+                        match action {
+                            Action::RevisionAccept { signature, .. } => {
+                                // A delegate may only accept one Active child
+                                // of a given parent. If they already accepted a
+                                // sibling, silently skip this vote.
+                                // This handles old histories where the
+                                // invariant was not enforced.
+                                if let Some(revision_id) =
+                                    self.has_accepted_active_sibling(&parent_id, &did)
+                                {
+                                    log::debug!(
+                                        "Skipping accept of {id} by {did}: \
+                                         already accepted an active revision '{revision_id}'.",
+                                    );
+                                    return Ok(());
+                                }
+
+                                parent
+                                    .verify_signature(&author, &signature, revision.blob)
+                                    .map_err(|_source| {
+                                        ApplyError::InvalidSignature(author, revision.blob)
+                                    })?;
+
+                                if self
+                                    .revision_mut(&id)?
+                                    .verdicts
+                                    .insert(author, Verdict::Accept(signature))
+                                    .is_some()
+                                {
+                                    return Err(ApplyError::DuplicateVerdict);
+                                }
+
+                                self.adopt(id);
+                            }
+                            Action::RevisionReject { .. } => {
+                                let rejection_threshold =
+                                    parent.delegates().len() - parent.majority();
+
+                                let revision = self.revision_mut(&id)?;
+                                if revision.verdicts.insert(author, Verdict::Reject).is_some() {
+                                    return Err(ApplyError::DuplicateVerdict);
+                                }
+
+                                if revision.rejected().count() > rejection_threshold {
+                                    revision.state = State::Rejected(RejectedBy::Vote);
+                                    self.cascade(id, State::Rejected(RejectedBy::Parent))
+                                }
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
                 }
-                assert_eq!(revision.parent, Some(current.id));
-
-                self.heads.insert(author.into(), id);
-                revision.accept(author, signature, &current)?;
-
-                self.adopt(id);
-            }
-            Action::RevisionReject { revision } => {
-                let Some(revision) = lookup::revision_mut(&mut self.revisions, &revision)? else {
-                    return Err(ApplyError::Redacted);
-                };
-                if !revision.is_active() {
-                    // You can't vote on an inactive revision.
-                    return Err(ApplyError::UnexpectedState);
-                }
-                assert_eq!(revision.parent, Some(current.id));
-
-                revision.reject(author)?;
             }
             Action::RevisionEdit {
                 title,
                 description,
-                revision,
+                revision: id,
             } => {
-                if revision == self.current {
-                    return Err(ApplyError::NotAuthorized);
-                }
-                let Some(revision) = lookup::revision_mut(&mut self.revisions, &revision)? else {
-                    return Err(ApplyError::Redacted);
-                };
+                let revision = self.revision_mut(&id)?;
                 if !revision.is_active() {
-                    // You can't edit an inactive revision.
+                    log::debug!("Cannot edit revision {id} because it is not active.",);
                     return Err(ApplyError::UnexpectedState);
                 }
                 if revision.author.public_key() != &author {
-                    // Can't edit someone else's revision.
+                    log::debug!(
+                        "{} cannot edit revision created by {}.",
+                        author,
+                        revision.author.public_key()
+                    );
                     // Since the author never changes, we can safely mark this as invalid.
                     return Err(ApplyError::NotAuthorized);
                 }
-                assert_eq!(revision.parent, Some(current.id));
 
                 revision.title = title;
                 revision.description = description;
             }
-            Action::RevisionRedact { revision } => {
-                if revision == self.current {
-                    // Can't redact the current revision.
-                    return Err(ApplyError::UnexpectedState);
+            Action::RevisionRedact { revision: id } => {
+                let revision = self.revision_mut(&id)?;
+
+                if revision.author.public_key() != &author {
+                    log::debug!(
+                        "{author} cannot redact revision created by {}.",
+                        revision.author.public_key()
+                    );
+                    // Since the author never changes, we can safely mark this as invalid.
+                    return Err(ApplyError::NotAuthorized);
                 }
-                if let Some(revision) = self.revisions.get_mut(&revision) {
-                    if let Some(r) = revision {
-                        if r.is_accepted() {
-                            // You can't redact an accepted revision.
-                            return Err(ApplyError::UnexpectedState);
-                        }
-                        if r.author.public_key() != &author {
-                            // Can't redact someone else's revision.
-                            // Since the author never changes, we can safely mark this as invalid.
-                            return Err(ApplyError::NotAuthorized);
-                        }
-                        *revision = None;
-                    }
-                } else {
-                    return Err(ApplyError::Missing(revision));
+
+                if !revision.is_active() {
+                    log::debug!("Cannot redact inactive revision {id}.");
+                    return Ok(());
                 }
+
+                log::debug!("Redacting revision {id}.");
+                revision.state = State::Redacted(RedactedBy::Author);
+
+                self.cascade(id, State::Redacted(RedactedBy::Parent));
             }
             Action::Revision {
                 title,
                 description,
                 blob,
                 signature,
-                parent,
+                parent: parent_id,
             } => {
-                debug_assert!(!self.revisions.contains_key(&entry));
+                debug_assert_eq!(self.revisions.get(&id), None, "revision visited twice");
 
-                let doc = repo.blob(blob)?;
-                let doc = Doc::from_blob(&doc)?;
+                let doc = Doc::from_blob(&repo.blob(blob)?)?;
+
                 // All revisions but the first one must have a parent.
-                let Some(parent) = parent else {
-                    return Err(ApplyError::MissingParent);
-                };
-                let Some(parent) = lookup::revision(&self.revisions, &parent)? else {
-                    return Err(ApplyError::Redacted);
-                };
-                // If the parent of this revision is no longer the current document, this
-                // revision can be marked as outdated.
-                let state = if parent.id == current.id {
-                    // If the revision is not outdated, we expect it to make a change to the
-                    // current version.
-                    if doc == parent.doc {
-                        return Err(ApplyError::DocUnchanged);
-                    }
-                    State::Active
-                } else {
-                    State::Stale
-                };
+                let parent_id = parent_id.ok_or(ApplyError::MissingParent)?;
+                let parent = self.revision(&parent_id).ok_or(ApplyError::MissingParent)?;
+
+                if !parent.is_delegate(&did) {
+                    return Err(ApplyError::NonDelegateUnauthorized {
+                        author: author.into(),
+                        action: "create a revision".to_string(),
+                    });
+                }
+
+                // We expect the revision to make a change compared to its parent.
+                if doc == parent.doc {
+                    return Err(ApplyError::DocUnchanged);
+                }
 
                 // Verify signature over new blob, using trusted delegates.
                 if parent.verify_signature(&author, &signature, blob).is_err() {
                     return Err(ApplyError::InvalidSignature(author, blob));
                 }
+
+                // If the parent is already rejected or redacted, this revision is dead on arrival.
+                // Furthermore, if the parent is accepted but is NO LONGER the current revision,
+                // it means a sibling was already adopted and this is a late-arriving fork.
+                let state = match parent.state {
+                    state @ (State::Rejected(RejectedBy::Parent)
+                    | State::Redacted(RedactedBy::Parent)) => state,
+                    State::Rejected(RejectedBy::Vote | RejectedBy::Sibling(_)) => {
+                        State::Rejected(RejectedBy::Parent)
+                    }
+                    State::Redacted(RedactedBy::Author) => State::Redacted(RedactedBy::Parent),
+                    State::Accepted => {
+                        match parent
+                            .children
+                            .iter()
+                            .find(|id| {
+                                self.revisions
+                                    .get(id)
+                                    .is_some_and(|r| r.state == State::Accepted)
+                            })
+                            .copied()
+                        {
+                            Some(sibling) => {
+                                log::debug!(
+                                    "Revision {id} is rejected because sibling {sibling} was already accepted.",
+                                );
+                                State::Rejected(RejectedBy::Sibling(sibling))
+                            }
+                            None => State::Active,
+                        }
+                    }
+                    State::Active => State::Active,
+                };
+
+                // Check BEFORE inserting the new revision, so it doesn't count
+                // as its own sibling. If the author already has an accept on an
+                // Active sibling, their implicit author accept will be stripped
+                // after creation.
+                let should_strip_author_accept = matches!(state, State::Active)
+                    .then(|| self.has_accepted_active_sibling(&parent_id, &did))
+                    .flatten();
+
                 let revision = Revision::new(
-                    entry,
+                    id,
                     title,
                     description,
                     author.into(),
@@ -570,13 +718,20 @@ impl Identity {
                     doc,
                     state,
                     signature,
-                    Some(parent.id),
+                    Some(parent_id),
                     timestamp,
                 );
-                let id = revision.id;
 
-                self.heads.insert(author.into(), id);
-                self.revisions.insert(id, Some(revision));
+                self.revisions.insert(id, revision);
+                self.revision_mut(&parent_id)?.children.push(id);
+
+                if let Some(revision_id) = should_strip_author_accept {
+                    log::debug!(
+                        "Stripping implicit accept from revision {id} by {did}: \
+                         already accepted the active revision {revision_id}.",
+                    );
+                    self.revision_mut(&id)?.verdicts.remove(&author);
+                }
 
                 if state == State::Active {
                     self.adopt(id);
@@ -586,42 +741,134 @@ impl Identity {
         Ok(())
     }
 
-    /// Try to adopt a revision as the current one.
+    /// Try to adopt an active revision as the current one.
+    ///
+    /// # Panics
+    ///
+    /// If the revision with the given ID is not active or lookup from
+    /// `self.revisions` returns a revision with a different ID.
+    ///
+    /// If the parent revision of the revision with given ID does not exist.
     fn adopt(&mut self, id: RevisionId) {
         if self.current == id {
             return;
         }
-        let votes = self
-            .heads
-            .values()
-            .filter(|revision| **revision == id)
-            .count();
-        if self.is_majority(votes) {
-            self.current = id;
-            self.current_mut().state = State::Accepted;
 
-            // Void all other active revisions.
-            for r in self
-                .revisions
-                .iter_mut()
-                .filter_map(|(_, r)| r.as_mut())
-                .filter(|r| r.state == State::Active)
-            {
-                r.state = State::Stale;
+        let candidate = self.revision(&id).expect("revision exists");
+
+        assert_eq!(candidate.state, State::Active);
+
+        let parent = candidate.parent.expect("revision has parent");
+        if parent != self.current {
+            log::debug!(
+                "Cannot adopt revision {} because its parent {} is not the current revision {}.",
+                id,
+                parent,
+                self.current
+            );
+            return;
+        }
+
+        let votes = candidate.accepted().count();
+        if !self.is_majority(votes) {
+            log::trace!(
+                "Revision {} has {} votes, but needs {} to be adopted.",
+                id,
+                votes,
+                self.majority()
+            );
+            return;
+        }
+
+        for sibling in self.siblings_of(&id).copied().collect::<Vec<_>>() {
+            let Some(revision) = self.revisions.get_mut(&sibling) else {
+                continue;
+            };
+
+            if revision.state != State::Active {
+                continue;
             }
+
+            log::debug!(
+                "Adoption of {} causes {} (a sibling) to be rejected.",
+                id,
+                sibling
+            );
+
+            revision.state = State::Rejected(RejectedBy::Sibling(id));
+
+            self.cascade(sibling, State::Rejected(RejectedBy::Parent));
+        }
+
+        self.current = id;
+        self.revision_mut(&id)
+            .expect("current revision exists")
+            .state = State::Accepted;
+
+        // Re-evaluate active children under the new quorum rules.
+        // Because `self.current` just changed, the delegate list
+        // might have changed, thus `self.majority()` might have changed.
+        let children_to_adopt = self
+            .children_of(&id)
+            .filter(|child| {
+                self.revisions.get(child).is_some_and(|r| {
+                    r.state == State::Active
+                        && self
+                            .is_majority(r.accepted().filter(|did| self.is_delegate(did)).count())
+                })
+            })
+            .copied()
+            .collect::<Vec<_>>();
+
+        // Recursively adopt any children that now meet the quorum.
+        for child in children_to_adopt {
+            self.adopt(child);
+        }
+    }
+
+    /// Apply state to all active children of the given revision, recursively.
+    fn cascade(&mut self, parent: RevisionId, state: State) {
+        debug_assert!(matches!(
+            state,
+            State::Rejected(RejectedBy::Parent) | State::Redacted(RedactedBy::Parent)
+        ));
+
+        let mut descendants = self.children_of(&parent).copied().collect::<Vec<_>>();
+
+        while let Some(next) = descendants.pop() {
+            let Some(revision) = self.revisions.get_mut(&next) else {
+                continue;
+            };
+
+            if revision.state != State::Active {
+                continue;
+            }
+
+            log::trace!(
+                "Cascading state from {} causes {} to be {}.",
+                parent,
+                next,
+                state,
+            );
+            revision.state = state;
+            descendants.extend(self.children_of(&next));
         }
     }
 
     /// A specific [`Revision`], mutably.
-    fn revision_mut(&mut self, revision: &RevisionId) -> Option<&mut Revision> {
-        self.revisions.get_mut(revision).and_then(|r| r.as_mut())
-    }
+    ///
+    /// # Errors
+    ///
+    /// Returns `ApplyError::Missing` if the revision is not found.
+    fn revision_mut(&mut self, id: &RevisionId) -> Result<&mut Revision, ApplyError> {
+        let revision = self.revisions.get_mut(id).ok_or(ApplyError::Missing(*id));
 
-    /// The current revision, mutably.
-    fn current_mut(&mut self) -> &mut Revision {
-        let current = self.current;
-        self.revision_mut(&current)
-            .expect("Identity::current_mut: the current revision must always exist")
+        #[cfg(debug_assertions)]
+        if let Some(actual_id) = revision.as_ref().ok().map(|r| r.id) {
+            debug_assert_eq!(actual_id, *id)
+        }
+
+        revision
     }
 }
 
@@ -652,7 +899,7 @@ impl<R: ReadRepository> cob::Evaluate<R> for Identity {
 pub enum Verdict {
     /// An accepting verdict must supply the [`Signature`] over the
     /// new proposed [`Doc`].
-    Accept(Signature),
+    Accept(#[serde(with = "signature")] Signature),
     /// Rejecting the proposed [`Doc`].
     Reject,
 }
@@ -661,18 +908,49 @@ pub enum Verdict {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum State {
-    /// The revision is actively being voted on. From here, it can go into any of the
-    /// other states.
+    /// The initial state of any revision.
+    ///
+    /// If a revision receives a majority of accepting votes, it is adopted and
+    /// transitions to [`Self::Accepted`]. Also, all its sibling revisions
+    /// transition to [`Self::Rejected`].
+    ///
+    /// If a revision receives a majority of rejecting votes,
+    /// it transitions to [`Self::Rejected`]. This has no impact on sibling
+    /// revisions.
+    ///
+    /// If a revision is redacted (this can only be done by its authoring
+    /// delegate), it transitions to [`Self::Redacted`]. From there, no further
+    /// state transitions are possible. This can be viewed as a form of
+    /// withdrawal of the revision.
     Active,
-    /// The revision has been accepted by a majority of delegates. Once accepted,
-    /// a revision doesn't change state.
+    /// The revision was accepted by a majority of delegates.
+    /// Accepted revisions cannot be redacted or rejected.
     Accepted,
-    /// The revision was rejected by a majority of delegates. Once rejected,
-    /// a revision doesn't change state.
-    Rejected,
-    /// The revision was active, but has been replaced by another revision,
-    /// and is now outdated. Once stale, a revision doesn't change state.
-    Stale,
+    /// The revision was rejected by a majority of delegates, or
+    /// a sibling revision was accepted by a majority of delegates or
+    /// an ancestor was rejected.
+    Rejected(RejectedBy),
+    /// The author decided to redact/withdraw the revision, or
+    /// an ancestor was redacted.
+    Redacted(RedactedBy),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum RejectedBy {
+    /// Rejected due to majority of delegates rejecting this revision.
+    Vote,
+    /// Rejected due to the parent revision being rejected.
+    Parent,
+    /// Rejected due to a sibling revision being accepted.
+    Sibling(RevisionId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum RedactedBy {
+    /// Redacted by the author.
+    Author,
+    /// Redacted due to the parent revision being redacted.
+    Parent,
 }
 
 impl std::fmt::Display for State {
@@ -680,8 +958,43 @@ impl std::fmt::Display for State {
         match self {
             Self::Active => write!(f, "active"),
             Self::Accepted => write!(f, "accepted"),
-            Self::Rejected => write!(f, "rejected"),
-            Self::Stale => write!(f, "stale"),
+            Self::Rejected(_) => write!(f, "rejected"),
+            Self::Redacted(_) => write!(f, "redacted"),
+        }
+    }
+}
+
+impl std::fmt::Display for RejectedBy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RejectedBy::Vote => write!(f, "vote"),
+            RejectedBy::Parent => write!(f, "parent"),
+            RejectedBy::Sibling(oid) => write!(f, "sibling '{oid}'"),
+        }
+    }
+}
+
+impl std::fmt::Display for RedactedBy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RedactedBy::Author => write!(f, "author"),
+            RedactedBy::Parent => write!(f, "parent"),
+        }
+    }
+}
+
+impl State {
+    /// The implementation of [`std::fmt::Display`] for [`State`] only displays
+    /// the state itself, but in some contexts it is useful to also display the
+    /// reason for rejection or redaction, if applicable.
+    /// This function returns a [`std::fmt::Display`] implementation that
+    /// includes the reason for [`Self::Rejected`] or [`Self::Redacted`].
+    pub fn display_with_reason(&self) -> impl std::fmt::Display {
+        const BY: &str = "by";
+        match self {
+            Self::Active | Self::Accepted => self.to_string(),
+            Self::Rejected(by) => format!("{self} {BY} {by}"),
+            Self::Redacted(by) => format!("{self} {BY} {by}"),
         }
     }
 }
@@ -714,7 +1027,10 @@ pub struct Revision {
     pub parent: Option<RevisionId>,
 
     /// Signatures and rejections given by the delegates.
-    verdicts: BTreeMap<PublicKey, Verdict>,
+    verdicts: HashMap<PublicKey, Verdict>,
+
+    /// Children of this revision.
+    children: Vec<RevisionId>,
 }
 
 impl std::ops::Deref for Revision {
@@ -756,10 +1072,7 @@ impl Revision {
         })
     }
 
-    pub fn sign<G: crypto::signature::Signer<crypto::Signature>>(
-        &self,
-        signer: &G,
-    ) -> Result<Signature, DocError> {
+    pub fn sign(&self, signer: &impl crypto::Signer) -> Result<Signature, DocError> {
         self.doc.signature_of(signer)
     }
 }
@@ -778,7 +1091,7 @@ impl Revision {
         parent: Option<RevisionId>,
         timestamp: Timestamp,
     ) -> Self {
-        let verdicts = BTreeMap::from_iter([(*author.public_key(), Verdict::Accept(signature))]);
+        let verdicts = HashMap::from_iter([(*author.public_key(), Verdict::Accept(signature))]);
 
         Self {
             id,
@@ -790,44 +1103,9 @@ impl Revision {
             state,
             verdicts,
             parent,
+            children: Vec::new(),
             timestamp,
         }
-    }
-
-    fn accept(
-        &mut self,
-        author: PublicKey,
-        signature: Signature,
-        current: &Revision,
-    ) -> Result<(), ApplyError> {
-        // Check that this is a valid signature over the new document blob id.
-        if current
-            .verify_signature(&author, &signature, self.blob)
-            .is_err()
-        {
-            return Err(ApplyError::InvalidSignature(author, self.blob));
-        }
-        if self
-            .verdicts
-            .insert(author, Verdict::Accept(signature))
-            .is_some()
-        {
-            return Err(ApplyError::DuplicateVerdict);
-        }
-        Ok(())
-    }
-
-    fn reject(&mut self, key: PublicKey) -> Result<(), ApplyError> {
-        if self.verdicts.insert(key, Verdict::Reject).is_some() {
-            return Err(ApplyError::DuplicateVerdict);
-        }
-        // Mark as rejected if it's impossible for this revision to be accepted
-        // with the current delegate set. Note that if the delegate set changes,
-        // this proposal will be marked as `stale` anyway.
-        if self.is_active() && self.rejected().count() > self.delegates().len() - self.majority() {
-            self.state = State::Rejected;
-        }
-        Ok(())
     }
 }
 
@@ -865,44 +1143,48 @@ impl<R: ReadRepository> store::Transaction<Identity, R> {
     }
 }
 
-impl<R: WriteRepository> store::Transaction<Identity, R> {
-    pub fn revision<G: crypto::signature::Signer<crypto::Signature>>(
-        &mut self,
+impl<Repo: WriteRepository> store::Transaction<Identity, Repo> {
+    pub fn new_revision(
         title: cob::Title,
         description: impl ToString,
         doc: &Doc,
         parent: Option<RevisionId>,
-        repo: &R,
-        signer: &Device<G>,
-    ) -> Result<(), store::Error> {
+        repo: &Repo,
+        signer: &impl crypto::Signer,
+    ) -> Result<Self, store::Error> {
+        let mut tx = Transaction::default();
+
         let (blob, bytes, signature) = doc.sign(signer).map_err(store::Error::Identity)?;
         // Store document blob in repository.
         let embed =
             Embed::<Uri>::store("radicle.json", &bytes, repo.raw()).map_err(store::Error::Git)?;
+
         debug_assert_eq!(embed.content, Uri::from(blob)); // Make sure we pre-computed the correct OID for the blob.
 
         // Identity document.
-        self.embed([embed])?;
+        tx.embed([embed])?;
 
         // Revision metadata.
-        self.push(Action::Revision {
+        tx.push(Action::Revision {
             title,
             description: description.to_string(),
             blob,
             parent,
             signature,
-        })
+        })?;
+
+        Ok(tx)
     }
 }
 
-pub struct IdentityMut<'a, R> {
+pub struct IdentityMut<'a, 'b, Repo, Signer: crypto::Signer> {
     pub id: ObjectId,
 
     identity: Identity,
-    store: store::Store<'a, Identity, R>,
+    store: store::Store<'a, Identity, Repo, WriteAs<'b, Signer>>,
 }
 
-impl<R> fmt::Debug for IdentityMut<'_, R> {
+impl<Repo, Signer: crypto::Signer> fmt::Debug for IdentityMut<'_, '_, Repo, Signer> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("IdentityMut")
             .field("id", &self.id)
@@ -911,11 +1193,12 @@ impl<R> fmt::Debug for IdentityMut<'_, R> {
     }
 }
 
-impl<R> IdentityMut<'_, R>
+impl<Repo, Signer: crypto::Signer> IdentityMut<'_, '_, Repo, Signer>
 where
-    R: WriteRepository + cob::Store<Namespace = NodeId>,
+    Repo: WriteRepository + cob::Store<Namespace = NodeId>,
 {
     /// Reload the identity data from storage.
+    #[cfg(test)]
     pub fn reload(&mut self) -> Result<(), store::Error> {
         self.identity = self
             .store
@@ -925,91 +1208,109 @@ where
         Ok(())
     }
 
-    pub fn transaction<G, F>(
-        &mut self,
-        message: &str,
-        signer: &Device<G>,
-        operations: F,
-    ) -> Result<EntryId, Error>
+    pub fn transaction<F>(&mut self, message: &str, operations: F) -> Result<EntryId, Error>
     where
-        G: crypto::signature::Signer<crypto::Signature>,
-        F: FnOnce(&mut Transaction<Identity, R>, &R) -> Result<(), store::Error>,
+        F: FnOnce(&mut Transaction<Identity, Repo>, &Repo) -> Result<(), store::Error>,
     {
         let mut tx = Transaction::default();
         operations(&mut tx, self.store.as_ref())?;
 
-        let (doc, commit) = tx.commit(message, self.id, &mut self.store, signer)?;
+        let (doc, commit) = tx.commit(message, self.id, &mut self.store)?;
         self.identity = doc;
 
         Ok(commit)
     }
 
     /// Update the identity by proposing a new revision.
-    /// If the signer is the only delegate, the revision is accepted automatically.
-    pub fn update<G>(
+    ///
+    /// If the signer is the only delegate, the revision is adopted automatically.
+    ///
+    /// # Errors
+    ///
+    /// [`SiblingAccepted`]: If the delegate has already accepted an active
+    /// revision that shares the same parent as the provided `revision`.
+    ///
+    /// [`SiblingAccepted`]: ApplyError::SiblingAccepted
+    pub fn update(
         &mut self,
         title: cob::Title,
         description: impl ToString,
         doc: &Doc,
-        signer: &Device<G>,
-    ) -> Result<RevisionId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        let parent = self.current;
-        let id = self.transaction("Propose revision", signer, |tx, repo| {
-            tx.revision(title, description, doc, Some(parent), repo, signer)
-        })?;
+    ) -> Result<RevisionId, Error> {
+        #[allow(deprecated)]
+        let did: Did = self.store.signer().public_key().into();
+        if let Some(revision_id) = self.has_accepted_active_sibling(&self.current, &did) {
+            return Err(Error::Apply(ApplyError::SiblingAccepted {
+                revision: revision_id,
+            }));
+        }
 
-        Ok(id)
+        let parent = Some(self.current);
+
+        #[allow(deprecated)]
+        let tx = {
+            let signer = self.store.signer();
+            let repo = self.store.repo();
+            Transaction::new_revision(title, description, doc, parent, repo, signer)?
+        };
+        let (doc, commit) = tx.commit("Propose revision", self.id, &mut self.store)?;
+        self.identity = doc;
+
+        Ok(commit)
     }
 
     /// Accept an active revision.
-    pub fn accept<G>(&mut self, revision: &RevisionId, signer: &Device<G>) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
+    ///
+    /// # Errors
+    ///
+    /// [`SiblingAccepted`]: If the delegate has already accepted an active
+    /// revision that shares the same parent as the provided `revision`.
+    ///
+    /// [`SiblingAccepted`]: ApplyError::SiblingAccepted
+    pub fn accept(&mut self, revision: &RevisionId) -> Result<EntryId, Error> {
         let id = *revision;
         let revision = self.revision(revision).ok_or(Error::NotFound(id))?;
-        let signature = revision.sign(signer)?;
 
-        self.transaction("Accept revision", signer, |tx, _| tx.accept(id, signature))
+        if let Some(parent_id) = revision.parent {
+            #[allow(deprecated)]
+            let did: Did = self.store.signer().public_key().into();
+            if let Some(revision_id) = self.has_accepted_active_sibling(&parent_id, &did) {
+                return Err(Error::Apply(ApplyError::SiblingAccepted {
+                    revision: revision_id,
+                }));
+            }
+        }
+
+        #[allow(deprecated)]
+        let signature = revision.sign(self.store.signer())?;
+
+        self.transaction("Accept revision", |tx, _| tx.accept(id, signature))
     }
 
     /// Reject an active revision.
-    pub fn reject<G>(&mut self, revision: RevisionId, signer: &Device<G>) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("Reject revision", signer, |tx, _| tx.reject(revision))
+    pub fn reject(&mut self, revision: RevisionId) -> Result<EntryId, Error> {
+        self.transaction("Reject revision", |tx, _| tx.reject(revision))
     }
 
     /// Redact a revision.
-    pub fn redact<G>(&mut self, revision: RevisionId, signer: &Device<G>) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("Redact revision", signer, |tx, _| tx.redact(revision))
+    pub fn redact(&mut self, revision: RevisionId) -> Result<EntryId, Error> {
+        self.transaction("Redact revision", |tx, _| tx.redact(revision))
     }
 
     /// Edit an active revision's title or description.
-    pub fn edit<G>(
+    pub fn edit(
         &mut self,
         revision: RevisionId,
         title: cob::Title,
         description: String,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("Edit revision", signer, |tx, _| {
+    ) -> Result<EntryId, Error> {
+        self.transaction("Edit revision", |tx, _| {
             tx.edit(revision, title, description)
         })
     }
 }
 
-impl<R> Deref for IdentityMut<'_, R> {
+impl<Repo, Signer: crypto::Signer> Deref for IdentityMut<'_, '_, Repo, Signer> {
     type Target = Identity;
 
     fn deref(&self) -> &Self::Target {
@@ -1017,49 +1318,68 @@ impl<R> Deref for IdentityMut<'_, R> {
     }
 }
 
-mod lookup {
-    use super::*;
-
-    pub fn revision_mut<'a>(
-        revisions: &'a mut BTreeMap<RevisionId, Option<Revision>>,
-        revision: &RevisionId,
-    ) -> Result<Option<&'a mut Revision>, ApplyError> {
-        match revisions.get_mut(revision) {
-            Some(Some(revision)) => Ok(Some(revision)),
-            // Redacted.
-            Some(None) => Ok(None),
-            // Missing. Causal error.
-            None => Err(ApplyError::Missing(*revision)),
-        }
+/// This module defines functions to serialize and deserialize [`Signature`]
+/// to/from a Unicode string in [multibase format].
+///
+/// Serialization to `base58btc` uses  [`multibase::encode`] with
+/// [`multibase::Base::Base58Btc`] and deserialization uses [`multibase::decode`].
+///
+/// The names of these functions are so that the module can be consumed via
+/// `serde_derive`'s `with`, see <https://serde.rs/field-attrs.html#with>. This
+/// is done in particular for variants of [`Action`] and [`Verdict`] that carry
+/// a [`Signature`].
+///
+/// This module exists because, historically, [`Signature`] was a type that did
+/// implement [`serde::Serialize`] and [`serde::Deserialize`], but it was
+/// changed to refer to `ed25519::Signature` in order to maximize compatibility,
+/// which does not implement these traits.
+/// So, for backwards compatibility, this module fills the gap by providing a
+/// way to (de)serialize [`Signature`].
+///
+/// [multibase format]: https://datatracker.ietf.org/doc/draft-multiformats-multibase/
+mod signature {
+    pub fn serialize<Serializer>(
+        signature: &crypto::Signature,
+        serializer: Serializer,
+    ) -> Result<Serializer::Ok, Serializer::Error>
+    where
+        Serializer: serde::Serializer,
+    {
+        serializer.serialize_str(&multibase::encode(
+            multibase::Base::Base58Btc,
+            signature.to_bytes(),
+        ))
     }
 
-    pub fn revision<'a>(
-        revisions: &'a BTreeMap<RevisionId, Option<Revision>>,
-        revision: &RevisionId,
-    ) -> Result<Option<&'a Revision>, ApplyError> {
-        match revisions.get(revision) {
-            Some(Some(revision)) => Ok(Some(revision)),
-            // Redacted.
-            Some(None) => Ok(None),
-            // Missing. Causal error.
-            None => Err(ApplyError::Missing(*revision)),
-        }
+    pub fn deserialize<'de, Deserializer>(
+        deserializer: Deserializer,
+    ) -> Result<crypto::Signature, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        use serde::Deserialize;
+
+        let (_, bytes) = multibase::decode(String::deserialize(deserializer)?)
+            .map_err(serde::de::Error::custom)?;
+        crypto::Signature::from_slice(bytes.as_slice()).map_err(serde::de::Error::custom)
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod test {
+    mod property;
+
     use qcheck_macros::quickcheck;
 
     use crate::cob::{self, Title};
-    use crate::crypto::PublicKey;
-    use crate::identity::did::Did;
-    use crate::identity::doc::PayloadId;
+    use crate::crypto::{PublicKey, Signer as _, SigningKey};
     use crate::identity::Visibility;
+    use crate::identity::did::Did;
+    use crate::identity::doc::{GetPayload as _, PayloadId};
     use crate::rad;
+    use crate::storage::ReadStorage as _;
     use crate::storage::git::Storage;
-    use crate::storage::ReadStorage;
     use crate::test::fixtures;
     use crate::test::setup::{Network, NodeWithRepo};
 
@@ -1078,11 +1398,11 @@ mod test {
     }
 
     #[test]
-    fn test_identity_updates() {
+    fn identity_updates() {
         let NodeWithRepo { node, repo } = NodeWithRepo::default();
-        let bob = Device::mock();
+        let bob = SigningKey::mock(103);
         let signer = &node.signer;
-        let mut identity = Identity::load_mut(&*repo).unwrap();
+        let mut identity = Identity::load_mut(&*repo, signer).unwrap();
         let mut doc = identity.doc().clone().edit();
         let title = Title::new("Identity update").unwrap();
         let description = "";
@@ -1092,12 +1412,7 @@ mod test {
         assert!(identity.current().is_accepted());
         // Using an identical document to the current one fails.
         identity
-            .update(
-                title.clone(),
-                description,
-                &doc.clone().verified().unwrap(),
-                signer,
-            )
+            .update(title.clone(), description, &doc.clone().verified().unwrap())
             .unwrap_err();
         assert_eq!(identity.current, r0);
 
@@ -1110,12 +1425,7 @@ mod test {
         doc.delegate(bob.public_key().into());
         // The update should go through now.
         let r1 = identity
-            .update(
-                title.clone(),
-                description,
-                &doc.clone().verified().unwrap(),
-                signer,
-            )
+            .update(title.clone(), description, &doc.clone().verified().unwrap())
             .unwrap();
         assert!(identity.revision(&r1).unwrap().is_accepted());
         assert_eq!(identity.current, r1);
@@ -1124,12 +1434,7 @@ mod test {
         // signs it.
         doc.visibility = Visibility::private([]);
         let r2 = identity
-            .update(
-                title.clone(),
-                description,
-                &doc.clone().verified().unwrap(),
-                signer,
-            )
+            .update(title.clone(), description, &doc.clone().verified().unwrap())
             .unwrap();
         // R1 is still the head.
         assert_eq!(identity.current, r1);
@@ -1140,7 +1445,10 @@ mod test {
             &Visibility::Public
         );
         // Now let's add a signature on R2 from Bob.
-        identity.accept(&r2, &bob).unwrap();
+        let mut bob_identity = Identity::load_mut(&*repo, &bob).unwrap();
+        bob_identity.accept(&r2).unwrap();
+
+        identity.reload().unwrap();
 
         // R2 is now the head.
         assert_eq!(identity.current, r2);
@@ -1153,12 +1461,13 @@ mod test {
     }
 
     #[test]
-    fn test_identity_update_rejected() {
+    fn identity_update_rejected() {
         let NodeWithRepo { node, repo } = NodeWithRepo::default();
-        let bob = Device::mock();
-        let eve = Device::mock();
+        let bob = SigningKey::mock(200);
+        let eve = SigningKey::mock(201);
         let signer = &node.signer;
-        let mut identity = Identity::load_mut(&*repo).unwrap();
+
+        let mut identity = Identity::load_mut(&*repo, signer).unwrap();
         let mut doc = identity.doc().clone().edit();
         let description = "";
 
@@ -1169,7 +1478,6 @@ mod test {
                 cob::Title::new("Identity update").unwrap(),
                 description,
                 &doc.clone().verified().unwrap(),
-                signer,
             )
             .unwrap();
         assert_eq!(identity.current, r1);
@@ -1180,14 +1488,19 @@ mod test {
                 cob::Title::new("Make private").unwrap(),
                 description,
                 &doc.clone().verified().unwrap(),
-                &node.signer,
             )
             .unwrap();
 
+        let mut bob_identity = Identity::load_mut(&*repo, &bob).unwrap();
+
         // 1/2 rejected means that we can never reach the required 2/2 votes.
-        identity.reject(r2, &bob).unwrap();
-        let r2 = identity.revision(&r2).unwrap();
-        assert_eq!(r2.state, State::Rejected);
+        bob_identity.reject(r2).unwrap();
+        let r2 = bob_identity.revision(&r2).unwrap();
+        assert_eq!(r2.state, State::Rejected(RejectedBy::Vote));
+
+        // Reload so Alice sees r2 is rejected (no longer Active).
+        // This allows her to propose a new sibling.
+        identity.reload().unwrap();
 
         // Now let's add another delegate.
         doc.delegate(eve.public_key().into());
@@ -1196,10 +1509,13 @@ mod test {
                 cob::Title::new("Add Eve").unwrap(),
                 description,
                 &doc.clone().verified().unwrap(),
-                &node.signer,
             )
             .unwrap();
-        let _ = identity.accept(&r3, &bob).unwrap();
+
+        bob_identity.reload().unwrap();
+        let _ = bob_identity.accept(&r3).unwrap();
+
+        identity.reload().unwrap();
         assert_eq!(identity.current, r3);
 
         doc.visibility = Visibility::Public;
@@ -1208,28 +1524,29 @@ mod test {
                 cob::Title::new("Make public").unwrap(),
                 description,
                 &doc.verified().unwrap(),
-                &node.signer,
             )
             .unwrap();
 
         // 1/3 rejected means that we can still reach the 2/3 required votes.
-        identity.reject(r3, &bob).unwrap();
+        bob_identity.reject(r3).unwrap();
         let r3 = identity.revision(&r3).unwrap().clone();
         assert_eq!(r3.state, State::Active); // Still active.
 
+        let mut eve_identity = Identity::load_mut(&*repo, &eve).unwrap();
+
         // 2/3 rejected means that we can no longer reach the 2/3 required votes.
-        identity.reject(r3.id, &eve).unwrap();
-        let r3 = identity.revision(&r3.id).unwrap();
-        assert_eq!(r3.state, State::Rejected);
+        eve_identity.reject(r3.id).unwrap();
+        let r3 = eve_identity.revision(&r3.id).unwrap();
+        assert_eq!(r3.state, State::Rejected(RejectedBy::Vote));
     }
 
     #[test]
-    fn test_identity_updates_concurrent() {
+    fn identity_updates_concurrent() {
         let network = Network::default();
         let alice = &network.alice;
         let bob = &network.bob;
 
-        let mut alice_identity = Identity::load_mut(&*alice.repo).unwrap();
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
         let mut alice_doc = alice_identity.doc().clone().edit();
 
         alice_doc.delegate(bob.signer.public_key().into());
@@ -1238,13 +1555,12 @@ mod test {
                 cob::Title::new("Add Bob").unwrap(),
                 "",
                 &alice_doc.clone().verified().unwrap(),
-                &alice.signer,
             )
             .unwrap();
 
         bob.repo.fetch(alice);
 
-        let mut bob_identity = Identity::load_mut(&*bob.repo).unwrap();
+        let bob_identity = Identity::load(&*bob.repo).unwrap();
         let bob_doc = bob_identity.doc().clone();
         assert!(bob_doc.is_delegate(&bob.signer.public_key().into()));
 
@@ -1255,16 +1571,19 @@ mod test {
                 cob::Title::new("Change visibility").unwrap(),
                 "",
                 &alice_doc.clone().clone().verified().unwrap(),
-                &alice.signer,
             )
             .unwrap();
+
+        let bob_identity_mut = Identity::load_mut(&*bob.repo, &bob.signer).unwrap();
+        assert_eq!(*bob_identity_mut, bob_identity);
+        let mut bob_identity = bob_identity_mut;
+
         // Bob makes the same change without knowing Alice already did.
         let b1 = bob_identity
             .update(
                 cob::Title::new("Make private").unwrap(),
                 "",
                 &alice_doc.verified().unwrap(),
-                &bob.signer,
             )
             .unwrap();
 
@@ -1281,22 +1600,26 @@ mod test {
         assert_eq!(bob_identity.revision(&a2).unwrap().state, State::Active);
         assert_eq!(bob_identity.revision(&b1).unwrap().state, State::Active);
 
-        // Now Bob accepts Alice's proposal. This voids his own.
-        bob_identity.accept(&a2, &bob.signer).unwrap();
+        // Bob must redact his revision, before he accepts Alice's proposal.
+        bob_identity.redact(b1).unwrap();
+        bob_identity.accept(&a2).unwrap();
         assert_eq!(bob_identity.current, a2);
         assert_eq!(bob_identity.revision(&a1).unwrap().state, State::Accepted);
         assert_eq!(bob_identity.revision(&a2).unwrap().state, State::Accepted);
-        assert_eq!(bob_identity.revision(&b1).unwrap().state, State::Stale);
+        assert_eq!(
+            bob_identity.revision(&b1).unwrap().state,
+            State::Redacted(RedactedBy::Author)
+        );
     }
 
     #[test]
-    fn test_identity_redact_revision() {
+    fn identity_redact_revision() {
         let network = Network::default();
         let alice = &network.alice;
         let bob = &network.bob;
         let eve = &network.eve;
 
-        let mut alice_identity = Identity::load_mut(&*alice.repo).unwrap();
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
         let mut alice_doc = alice_identity.doc().clone().edit();
 
         alice_doc.delegate(bob.signer.public_key().into());
@@ -1306,7 +1629,6 @@ mod test {
                 cob::Title::new("Add Bob").unwrap(),
                 "Eh.",
                 &alice_doc.clone().clone().verified().unwrap(),
-                &alice.signer,
             )
             .unwrap();
 
@@ -1316,20 +1638,16 @@ mod test {
                 cob::Title::new("Change visibility").unwrap(),
                 "Eh.",
                 &alice_doc.verified().unwrap(),
-                &alice.signer,
             )
             .unwrap();
 
         bob.repo.fetch(alice);
-        let a3 = cob::stable::with_advanced_timestamp(|| {
-            alice_identity.redact(a2, &alice.signer).unwrap()
-        });
+        let a3 = cob::stable::with_advanced_timestamp(|| alice_identity.redact(a2).unwrap());
         assert!(alice_identity.revision(&a1).is_some());
         assert_eq!(alice_identity.timeline, vec![a0, a1, a2, a3]);
 
-        let mut bob_identity = Identity::load_mut(&*bob.repo).unwrap();
-        let b1 =
-            cob::stable::with_advanced_timestamp(|| bob_identity.accept(&a2, &bob.signer).unwrap());
+        let mut bob_identity = Identity::load_mut(&*bob.repo, &bob.signer).unwrap();
+        let b1 = cob::stable::with_advanced_timestamp(|| bob_identity.accept(&a2).unwrap());
 
         assert_eq!(bob_identity.timeline, vec![a0, a1, a2, b1]);
         assert_eq!(bob_identity.revision(&a2).unwrap().state, State::Accepted);
@@ -1337,52 +1655,132 @@ mod test {
         bob_identity.reload().unwrap();
 
         assert_eq!(bob_identity.timeline, vec![a0, a1, a2, a3, b1]);
-        assert_eq!(bob_identity.revision(&a2), None);
+        assert_eq!(
+            bob_identity.revision(&a2).unwrap().state,
+            State::Redacted(RedactedBy::Author)
+        );
         assert_eq!(bob_identity.current, a1);
     }
 
     #[test]
-    fn test_identity_remove_delegate_concurrent() {
+    fn redact_parent_cascades() {
+        let network = Network::default();
+        let alice = &network.alice;
+        let bob = &network.bob;
+
+        // Alice adds Bob.
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
+        let mut alice_doc = alice_identity.doc().clone().edit();
+        alice_doc.delegate(bob.signer.public_key().into());
+        let _a1 = alice_identity
+            .update(
+                cob::Title::new("Add Bob").unwrap(),
+                "",
+                &alice_doc.verified().unwrap(),
+            )
+            .unwrap();
+
+        // Alice proposes A₂. Since there are 2 delegates now, it stays Active.
+        let mut alice_doc2 = alice_identity.doc().clone().edit();
+        alice_doc2.visibility = Visibility::private([]);
+        let a2 = alice_identity
+            .update(
+                cob::Title::new("A₂").unwrap(),
+                "",
+                &alice_doc2.verified().unwrap(),
+            )
+            .unwrap();
+
+        // Bob fetches and proposes B₁ as a child of A₂.
+        bob.repo.fetch(alice);
+        let mut bob_identity = Identity::load_mut(&*bob.repo, &bob.signer).unwrap();
+
+        let mut bob_doc = bob_identity.doc().clone().edit();
+        bob_doc.visibility = Visibility::private([alice.signer.public_key().into()]);
+
+        // We use a manual transaction to force B₁ to be a child of the Active A₂,
+        // rather than the Accepted A₁.
+        let b1 = bob_identity
+            .transaction("B₁", |tx, repo| {
+                *tx = Transaction::new_revision(
+                    cob::Title::new("B₁").unwrap(),
+                    "",
+                    &bob_doc.verified().unwrap(),
+                    Some(a2),
+                    repo,
+                    &bob.signer,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        // Alice redacts A₂.
+        alice_identity.redact(a2).unwrap();
+
+        // Bob fetches Alice's redaction.
+        bob.repo.fetch(alice);
+        bob_identity.reload().unwrap();
+
+        //     b1   (Propose "B₁") 1/2 (RedactedBy::Parent due to parent A₂ being redacted)
+        //     |
+        //     a2   (Propose "A₂") 1/2 (RedactedBy::Author by Alice)
+        //     |
+        //     a1   (Add Bob) 1/1 (Accepted)
+        //     |
+        //     a0
+
+        assert_eq!(
+            bob_identity.revision(&a2).unwrap().state,
+            State::Redacted(RedactedBy::Author)
+        );
+        assert_eq!(
+            bob_identity.revision(&b1).unwrap().state,
+            State::Redacted(RedactedBy::Parent)
+        );
+    }
+
+    /// When a sibling revision is accepted, competing siblings from other
+    /// delegates are rejected with `Rejected(Sibling)`.
+    #[test]
+    fn accepted_sibling_causes_rejection() {
         let network = Network::default();
         let alice = &network.alice;
         let bob = &network.bob;
         let eve = &network.eve;
 
-        let mut alice_identity = Identity::load_mut(&*alice.repo).unwrap();
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
         let mut alice_doc = alice_identity.doc().clone().edit();
 
         alice_doc.delegate(bob.signer.public_key().into());
         alice_doc.delegate(eve.signer.public_key().into());
-        let a0 = alice_identity.root;
-        let a1 = alice_identity // Change description to change traversal order.
+
+        let _a1 = alice_identity
             .update(
                 cob::Title::new("Add Bob and Eve").unwrap(),
                 "Eh#!",
                 &alice_doc.clone().verified().unwrap(),
-                &alice.signer,
             )
             .unwrap();
 
-        alice_doc.rescind(&eve.signer.public_key().into()).unwrap();
-        let a2 = alice_identity
-            .update(
-                cob::Title::new("Remove Eve").unwrap(),
-                "",
-                &alice_doc.verified().unwrap(),
-                &alice.signer,
-            )
-            .unwrap();
-
-        bob.repo.fetch(eve);
         bob.repo.fetch(alice);
-        eve.repo.fetch(bob);
+        eve.repo.fetch(alice);
 
-        let mut bob_identity = Identity::load_mut(&*bob.repo).unwrap();
-        let b1 =
-            cob::stable::with_advanced_timestamp(|| bob_identity.accept(&a2, &bob.signer).unwrap());
-        assert_eq!(bob_identity.current, a2);
+        // Bob proposes b1.
+        let mut bob_identity = Identity::load_mut(&*bob.repo, &bob.signer).unwrap();
+        let mut bob_doc = bob_identity.doc().clone().edit();
+        bob_doc.visibility = Visibility::private([]);
+        let b1 = cob::stable::with_advanced_timestamp(|| {
+            bob_identity
+                .update(
+                    cob::Title::new("Make private").unwrap(),
+                    "",
+                    &bob_doc.verified().unwrap(),
+                )
+                .unwrap()
+        });
 
-        let mut eve_identity = Identity::load_mut(&*eve.repo).unwrap();
+        // Eve proposes e1 (a competing sibling from a different delegate).
+        let mut eve_identity = Identity::load_mut(&*eve.repo, &eve.signer).unwrap();
         let mut eve_doc = eve_identity.doc().clone().edit();
         eve_doc.visibility = Visibility::private([eve.signer.public_key().into()]);
         let e1 = cob::stable::with_advanced_timestamp(|| {
@@ -1391,11 +1789,82 @@ mod test {
                     cob::Title::new("Change visibility").unwrap(),
                     "",
                     &eve_doc.verified().unwrap(),
-                    &eve.signer,
+                )
+                .unwrap()
+        });
+
+        // Eve fetches Bob's proposal. She redacts her own proposal e1
+        // before accepting Bob's b1 (sibling-accept invariant).
+        eve.repo.fetch(bob);
+        eve_identity.reload().unwrap();
+        cob::stable::with_advanced_timestamp(|| eve_identity.redact(e1).unwrap());
+        cob::stable::with_advanced_timestamp(|| eve_identity.accept(&b1).unwrap());
+
+        // b1 is accepted (Bob + Eve = 2/3), becomes current.
+        assert_eq!(eve_identity.current, b1);
+        // e1 was redacted by Eve.
+        assert_eq!(
+            eve_identity.revision(&e1).unwrap().state,
+            State::Redacted(RedactedBy::Author)
+        );
+    }
+
+    #[test]
+    fn remove_delegate_concurrent() {
+        let network = Network::default();
+        let alice = &network.alice;
+        let bob = &network.bob;
+        let eve = &network.eve;
+
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
+        let mut alice_doc = alice_identity.doc().clone().edit();
+
+        alice_doc.delegate(bob.signer.public_key().into());
+        alice_doc.delegate(eve.signer.public_key().into());
+        assert_eq!(alice_doc.delegates.len(), 3);
+
+        let a0 = alice_identity.root;
+        let a1 = alice_identity // Change description to change traversal order.
+            .update(
+                cob::Title::new("Add Bob and Eve").unwrap(),
+                "Eh#!",
+                &alice_doc.clone().verified().unwrap(),
+            )
+            .unwrap();
+
+        alice_doc.rescind(&eve.signer.public_key().into()).unwrap();
+        assert_eq!(alice_doc.delegates.len(), 2);
+
+        let a2 = alice_identity
+            .update(
+                cob::Title::new("Remove Eve").unwrap(),
+                "",
+                &alice_doc.verified().unwrap(),
+            )
+            .unwrap();
+
+        bob.repo.fetch(eve);
+        bob.repo.fetch(alice);
+        eve.repo.fetch(bob);
+
+        let mut bob_identity = Identity::load_mut(&*bob.repo, &bob.signer).unwrap();
+        let b1 = cob::stable::with_advanced_timestamp(|| bob_identity.accept(&a2).unwrap());
+        assert_eq!(bob_identity.current, a2);
+
+        let mut eve_identity = Identity::load_mut(&*eve.repo, &eve.signer).unwrap();
+        let mut eve_doc = eve_identity.doc().clone().edit();
+        eve_doc.visibility = Visibility::private([eve.signer.public_key().into()]);
+        let e1 = cob::stable::with_advanced_timestamp(|| {
+            eve_identity
+                .update(
+                    cob::Title::new("Change visibility").unwrap(),
+                    "",
+                    &eve_doc.verified().unwrap(),
                 )
                 .unwrap()
         });
         // Eve's revision is active.
+        assert_eq!(eve_identity.timeline, vec![a0, a1, a2, e1]);
         assert!(eve_identity.revision(&e1).unwrap().is_active());
 
         //  b1      (Accept "Remove Eve") 2/2
@@ -1412,18 +1881,21 @@ mod test {
         // Now that Eve reloaded, since Bob's vote to remove Eve went through first (b1 < e1),
         // her revision is no longer valid.
         assert_eq!(eve_identity.timeline, vec![a0, a1, a2, b1, e1]);
-        assert_eq!(eve_identity.revision(&e1), None);
+        assert_eq!(
+            eve_identity.revision(&e1).unwrap().state,
+            State::Rejected(RejectedBy::Sibling(a2))
+        );
         assert!(!eve_identity.is_delegate(&eve.signer.public_key().into()));
     }
 
     #[test]
-    fn test_identity_reject_concurrent() {
+    fn reject_concurrent() {
         let network = Network::default();
         let alice = &network.alice;
         let bob = &network.bob;
         let eve = &network.eve;
 
-        let mut alice_identity = Identity::load_mut(&*alice.repo).unwrap();
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
         let mut alice_doc = alice_identity.doc().clone().edit();
 
         alice_doc.delegate(bob.signer.public_key().into());
@@ -1434,7 +1906,6 @@ mod test {
                 cob::Title::new("Add Bob and Eve").unwrap(),
                 "Eh!#",
                 &alice_doc.clone().verified().unwrap(),
-                &alice.signer,
             )
             .unwrap();
 
@@ -1444,7 +1915,6 @@ mod test {
                 cob::Title::new("Change visibility").unwrap(),
                 "",
                 &alice_doc.verified().unwrap(),
-                &alice.signer,
             )
             .unwrap();
 
@@ -1453,14 +1923,12 @@ mod test {
         eve.repo.fetch(bob);
 
         // Bob accepts alice's revision.
-        let mut bob_identity = Identity::load_mut(&*bob.repo).unwrap();
-        let b1 =
-            cob::stable::with_advanced_timestamp(|| bob_identity.accept(&a2, &bob.signer).unwrap());
+        let mut bob_identity = Identity::load_mut(&*bob.repo, &bob.signer).unwrap();
+        let b1 = cob::stable::with_advanced_timestamp(|| bob_identity.accept(&a2).unwrap());
 
         // Eve rejects the revision, not knowing.
-        let mut eve_identity = Identity::load_mut(&*eve.repo).unwrap();
-        let e1 =
-            cob::stable::with_advanced_timestamp(|| eve_identity.reject(a2, &eve.signer).unwrap());
+        let mut eve_identity = Identity::load_mut(&*eve.repo, &eve.signer).unwrap();
+        let e1 = cob::stable::with_advanced_timestamp(|| eve_identity.reject(a2).unwrap());
         assert!(eve_identity.revision(&a2).unwrap().is_active());
 
         // Then she submits a new revision.
@@ -1471,19 +1939,21 @@ mod test {
                 cob::Title::new("Change visibility").unwrap(),
                 "",
                 &eve_doc.verified().unwrap(),
-                &eve.signer,
             )
             .unwrap();
-        assert!(eve_identity.revision(&e2).unwrap().is_active());
 
-        //     e2   (Propose "Change visibility") 1/2
+        let eve_revision = eve_identity.revision(&e2).unwrap();
+        assert_eq!(eve_revision.state, State::Active);
+        assert_eq!(eve_revision.parent, Some(a1));
+
+        //     e2   (Propose "Change visibility") 1/3
         //     |
-        //     e1   (Reject "Change visibility")  1/2
-        //  b1 |    (Accept "Change visibility")  2/2
+        //     e1   (Reject "Change visibility")  1/3
+        //  b1 |    (Accept "Change visibility")  2/3
         //  | /
-        //  a2      (Propose "Change visibility") 1/2
+        //  a2      (Propose "Change visibility") 1/3
         //  |
-        //  a1      (Add Bob and Eve)
+        //  a1      (Add Bob and Eve) 1/1
         //  |
         //  a0
 
@@ -1495,21 +1965,20 @@ mod test {
         eve_identity.reload().unwrap();
         assert_eq!(eve_identity.timeline, vec![a0, a1, a2, b1, e1, e2]);
 
-        // Her revision is there, although stale, since another revision was accepted since.
-        // However, it wasn't pruned, even though rejecting an accepted revision is an error.
+        // Her revision is there, but rejected, since a sibling revision was already accepted.
         let e2 = eve_identity.revision(&e2).unwrap();
-        assert_eq!(e2.state, State::Stale);
+        assert_eq!(e2.state, State::Rejected(RejectedBy::Sibling(a2)));
         assert!(eve_identity.revision(&a2).unwrap().is_accepted());
     }
 
     #[test]
-    fn test_identity_updates_concurrent_outdated() {
+    fn identity_updates_concurrent_outdated() {
         let network = Network::default();
         let alice = &network.alice;
         let bob = &network.bob;
         let eve = &network.eve;
 
-        let mut alice_identity = Identity::load_mut(&*alice.repo).unwrap();
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
         let mut alice_doc = alice_identity.doc().clone().edit();
 
         alice.repo.fetch(bob);
@@ -1522,14 +1991,13 @@ mod test {
                 cob::Title::new("Add Bob and Eve").unwrap(),
                 "",
                 &alice_doc.verified().unwrap(),
-                &alice.signer,
             )
             .unwrap();
 
         bob.repo.fetch(alice);
         eve.repo.fetch(alice);
 
-        let mut bob_identity = Identity::load_mut(&*bob.repo).unwrap();
+        let mut bob_identity = Identity::load_mut(&*bob.repo, &bob.signer).unwrap();
         let mut bob_doc = bob_identity.doc().clone().edit();
         assert!(bob_doc.is_delegate(&bob.signer.public_key().into()));
 
@@ -1548,14 +2016,14 @@ mod test {
                 cob::Title::new("Change visibility #1").unwrap(),
                 "",
                 &bob_doc.verified().unwrap(),
-                &bob.signer,
             )
             .unwrap();
+
         alice.repo.fetch(bob);
         eve.repo.fetch(bob);
 
         // In the meantime, Eve does the same thing on her side.
-        let mut eve_identity = Identity::load_mut(&*eve.repo).unwrap();
+        let mut eve_identity = Identity::load_mut(&*eve.repo, &eve.signer).unwrap();
         let mut eve_doc = eve_identity.doc().clone().edit();
         eve_doc.visibility = Visibility::private([]);
         let e1 = eve_identity
@@ -1563,32 +2031,553 @@ mod test {
                 cob::Title::new("Change visibility #2").unwrap(),
                 "Woops",
                 &eve_doc.verified().unwrap(),
-                &eve.signer,
             )
             .unwrap();
         assert_eq!(eve_identity.revisions().count(), 4);
         assert_eq!(eve_identity.revision(&e1).unwrap().state, State::Active);
 
         alice_identity.reload().unwrap();
-        let a2 = cob::stable::with_advanced_timestamp(|| {
-            alice_identity.accept(&b1, &alice.signer).unwrap()
-        });
+        let a2 = cob::stable::with_advanced_timestamp(|| alice_identity.accept(&b1).unwrap());
 
         eve.repo.fetch(alice);
+
         eve_identity.reload().unwrap();
 
         assert_eq!(eve_identity.timeline, vec![a0, a1, b1, e1, a2]);
-        assert_eq!(eve_identity.revision(&e1).unwrap().state, State::Stale);
+        assert_eq!(
+            eve_identity.revision(&e1).unwrap().state,
+            State::Rejected(RejectedBy::Sibling(b1))
+        );
     }
 
     #[test]
-    fn test_valid_identity() {
+    fn cascading_rejections() {
+        let network = Network::default();
+        let alice = &network.alice;
+        let bob = &network.bob;
+        let eve = &network.eve;
+
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
+        let mut alice_doc = alice_identity.doc().clone().edit();
+        alice_doc.delegate(bob.signer.public_key().into());
+        alice_doc.delegate(eve.signer.public_key().into());
+        let _a1 = alice_identity
+            .update(
+                cob::Title::new("Add Bob and Eve").unwrap(),
+                "",
+                &alice_doc.verified().unwrap(),
+            )
+            .unwrap();
+
+        bob.repo.fetch(alice);
+        eve.repo.fetch(alice);
+
+        // Bob proposes B1 (child of A1, the current revision).
+        let mut bob_identity = Identity::load_mut(&*bob.repo, &bob.signer).unwrap();
+        let mut bob_doc = bob_identity.doc().clone().edit();
+        bob_doc.visibility = Visibility::private([]);
+        let b1 = bob_identity
+            .update(
+                cob::Title::new("B1").unwrap(),
+                "",
+                &bob_doc.clone().verified().unwrap(),
+            )
+            .unwrap();
+
+        // Bob proposes B2 as a **child of B1** (not A1).
+        // We use a manual transaction to set B1 as the parent, since `update()`
+        // always uses `self.current` (= A1, because B1 hasn't been accepted).
+        let mut bob_doc2 = bob_doc.clone();
+        bob_doc2.visibility = Visibility::private([bob.signer.public_key().into()]);
+        let b2 = bob_identity
+            .transaction("B2", |tx, repo| {
+                *tx = Transaction::new_revision(
+                    cob::Title::new("B2").unwrap(),
+                    "",
+                    &bob_doc2.verified().unwrap(),
+                    Some(b1),
+                    repo,
+                    &bob.signer,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        // Eve proposes E1 (child of A1, sibling of B1).
+        let mut eve_identity = Identity::load_mut(&*eve.repo, &eve.signer).unwrap();
+        let mut eve_doc = eve_identity.doc().clone().edit();
+        eve_doc.visibility = Visibility::private([eve.signer.public_key().into()]);
+        let e1 = eve_identity
+            .update(
+                cob::Title::new("E1").unwrap(),
+                "",
+                &eve_doc.verified().unwrap(),
+            )
+            .unwrap();
+
+        // Alice accepts E1 → E1 reaches 2/3 → adopted.
+        alice.repo.fetch(eve);
+        alice_identity.reload().unwrap();
+        alice_identity.accept(&e1).unwrap();
+
+        // Eve syncs with everyone.
+        eve.repo.fetch(bob);
+        eve.repo.fetch(alice);
+        eve_identity.reload().unwrap();
+
+        //     b2   (Propose "B2")  [Rejected(Parent) — cascaded from B1]
+        //     |
+        //     b1   (Propose "B1")  [Rejected(Sibling(E1)) — sibling E1 accepted]
+        //  e1 |    (Propose "E1")  [Accepted, 2/3]
+        //  | /
+        //  a1      (Add Bob and Eve)
+        //  |
+        //  a0
+
+        assert_eq!(eve_identity.current, e1);
+        assert_eq!(eve_identity.revision(&e1).unwrap().state, State::Accepted);
+        // B1 is rejected because its sibling E1 was accepted.
+        assert_eq!(
+            eve_identity.revision(&b1).unwrap().state,
+            State::Rejected(RejectedBy::Sibling(e1))
+        );
+        // B2 is rejected because its **parent** B1 was rejected (cascading).
+        assert_eq!(
+            eve_identity.revision(&b2).unwrap().state,
+            State::Rejected(RejectedBy::Parent)
+        );
+
+        // Verify convergence across all nodes.
+        alice.repo.fetch(bob);
+        bob.repo.fetch(alice);
+        bob.repo.fetch(eve);
+
+        alice_identity.reload().unwrap();
+        bob_identity.reload().unwrap();
+
+        assert_eq!(alice_identity.current, e1);
+        assert_eq!(
+            alice_identity.revision(&b1).unwrap().state,
+            State::Rejected(RejectedBy::Sibling(e1))
+        );
+        assert_eq!(
+            alice_identity.revision(&b2).unwrap().state,
+            State::Rejected(RejectedBy::Parent)
+        );
+
+        assert_eq!(bob_identity.current, e1);
+        assert_eq!(
+            bob_identity.revision(&b1).unwrap().state,
+            State::Rejected(RejectedBy::Sibling(e1))
+        );
+        assert_eq!(
+            bob_identity.revision(&b2).unwrap().state,
+            State::Rejected(RejectedBy::Parent)
+        );
+    }
+
+    #[test]
+    fn terminal_states_concurrent() {
+        let network = Network::default();
+        let alice = &network.alice;
+        let bob = &network.bob;
+        let eve = &network.eve;
+
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
+        let mut alice_doc = alice_identity.doc().clone().edit();
+        alice_doc.delegate(bob.signer.public_key().into());
+        alice_doc.delegate(eve.signer.public_key().into());
+        let a1 = alice_identity
+            .update(
+                cob::Title::new("Add Bob and Eve").unwrap(),
+                "",
+                &alice_doc.verified().unwrap(),
+            )
+            .unwrap();
+
+        bob.repo.fetch(alice);
+        eve.repo.fetch(alice);
+
+        let mut bob_identity = Identity::load_mut(&*bob.repo, &bob.signer).unwrap();
+        let mut eve_identity = Identity::load_mut(&*eve.repo, &eve.signer).unwrap();
+
+        bob_identity.accept(&a1).unwrap();
+        eve_identity.accept(&a1).unwrap();
+
+        alice.repo.fetch(bob);
+        alice_identity.reload().unwrap();
+        assert_eq!(alice_identity.revision(&a1).unwrap().state, State::Accepted);
+
+        alice.repo.fetch(eve);
+        alice_identity.reload().unwrap();
+        assert_eq!(alice_identity.revision(&a1).unwrap().state, State::Accepted);
+
+        let mut alice_doc2 = alice_identity.doc().clone().edit();
+        alice_doc2.visibility = Visibility::private([]);
+        let a2 = alice_identity
+            .update(
+                cob::Title::new("A2").unwrap(),
+                "",
+                &alice_doc2.verified().unwrap(),
+            )
+            .unwrap();
+
+        bob.repo.fetch(alice);
+        eve.repo.fetch(alice);
+        bob_identity.reload().unwrap();
+        eve_identity.reload().unwrap();
+
+        bob_identity.reject(a2).unwrap();
+        eve_identity.reject(a2).unwrap();
+
+        alice.repo.fetch(bob);
+        alice.repo.fetch(eve);
+        alice_identity.reload().unwrap();
+        assert_eq!(
+            alice_identity.revision(&a2).unwrap().state,
+            State::Rejected(RejectedBy::Vote)
+        );
+
+        //  a2      (Propose "A2") 1/3 (Rejected by Bob and Eve)
+        //  |
+        //  a1      (Add Bob and Eve) 3/3 (Accepted by Alice, Bob, Eve)
+        //  |
+        //  a0
+
+        // Alice tries to accept the rejected revision
+        alice_identity.accept(&a2).unwrap();
+        assert_eq!(
+            alice_identity.revision(&a2).unwrap().state,
+            State::Rejected(RejectedBy::Vote)
+        );
+    }
+
+    #[test]
+    fn identity_cannot_redact_terminal_states() {
+        let network = Network::default();
+        let alice = &network.alice;
+        let bob = &network.bob;
+
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
+        let mut alice_doc = alice_identity.doc().clone().edit();
+        alice_doc.delegate(bob.signer.public_key().into());
+        let a1 = alice_identity
+            .update(
+                cob::Title::new("Add Bob").unwrap(),
+                "",
+                &alice_doc.verified().unwrap(),
+            )
+            .unwrap();
+
+        bob.repo.fetch(alice);
+        let mut bob_identity = Identity::load_mut(&*bob.repo, &bob.signer).unwrap();
+        bob_identity.accept(&a1).unwrap();
+        alice.repo.fetch(bob);
+        alice_identity.reload().unwrap();
+
+        let mut alice_doc2 = alice_identity.doc().clone().edit();
+        alice_doc2.visibility = Visibility::private([]);
+        let a2 = alice_identity
+            .update(
+                cob::Title::new("A2").unwrap(),
+                "",
+                &alice_doc2.verified().unwrap(),
+            )
+            .unwrap();
+
+        bob.repo.fetch(alice);
+        bob_identity.reload().unwrap();
+
+        bob_identity.accept(&a2).unwrap();
+        alice_identity.redact(a2).unwrap();
+
+        alice.repo.fetch(bob);
+        alice_identity.reload().unwrap();
+
+        assert_eq!(
+            alice_identity.revision(&a2).unwrap().state,
+            State::Redacted(RedactedBy::Author)
+        );
+
+        let mut alice_doc3 = alice_identity.doc().clone().edit();
+        alice_doc3.visibility = Visibility::private([alice.signer.public_key().into()]);
+        let a3 = alice_identity
+            .update(
+                cob::Title::new("A3").unwrap(),
+                "",
+                &alice_doc3.verified().unwrap(),
+            )
+            .unwrap();
+
+        bob.repo.fetch(alice);
+        bob_identity.reload().unwrap();
+        bob_identity.accept(&a3).unwrap();
+
+        alice.repo.fetch(bob);
+        alice_identity.reload().unwrap();
+        assert_eq!(alice_identity.revision(&a3).unwrap().state, State::Accepted);
+
+        alice_identity.redact(a3).unwrap();
+        assert_eq!(alice_identity.revision(&a3).unwrap().state, State::Accepted);
+
+        let mut alice_doc4 = alice_identity.doc().clone().edit();
+        alice_doc4.visibility = Visibility::private([]);
+        let a4 = alice_identity
+            .update(
+                cob::Title::new("A4").unwrap(),
+                "",
+                &alice_doc4.verified().unwrap(),
+            )
+            .unwrap();
+
+        bob.repo.fetch(alice);
+        bob_identity.reload().unwrap();
+        bob_identity.reject(a4).unwrap();
+
+        alice.repo.fetch(bob);
+        alice_identity.reload().unwrap();
+        assert_eq!(
+            alice_identity.revision(&a4).unwrap().state,
+            State::Rejected(RejectedBy::Vote)
+        );
+
+        //  a4      (Propose "A4") 1/2 (Rejected by Bob) -> Redact attempt ignored
+        //  |
+        //  a3      (Propose "A3") 2/2 (Accepted by Alice, Bob) -> Redact attempt ignored
+        //  | \
+        //  |  a2   (Propose "A2") 1/2 (Redacted by Alice concurrently with Bob's Accept)
+        //  | /
+        //  a1      (Add Bob) 2/2 (Accepted by Alice, Bob)
+        //  |
+        //  a0
+
+        alice_identity.redact(a4).unwrap();
+        assert_eq!(
+            alice_identity.revision(&a4).unwrap().state,
+            State::Rejected(RejectedBy::Vote)
+        );
+    }
+
+    /// A previously accepted revision that is no longer the current revision
+    /// cannot be redacted. It was part of the canonical history and its state
+    /// should be immutable.
+    #[test]
+    fn cannot_redact_previously_accepted_revision() {
+        let network = Network::default();
+        let alice = &network.alice;
+        let bob = &network.bob;
+
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
+        let mut alice_doc = alice_identity.doc().clone().edit();
+        alice_doc.delegate(bob.signer.public_key().into());
+        let a1 = alice_identity
+            .update(
+                cob::Title::new("A₁").unwrap(),
+                "Add Bob",
+                &alice_doc.verified().unwrap(),
+            )
+            .unwrap();
+
+        // A₁ is accepted by Bob, thus reaches 2/2 votes, is accepted
+        // and becomes the current revision.
+        bob.repo.fetch(alice);
+        let mut bob_identity = Identity::load_mut(&*bob.repo, &bob.signer).unwrap();
+        bob_identity.accept(&a1).unwrap();
+        alice.repo.fetch(bob);
+        alice_identity.reload().unwrap();
+        assert_eq!(alice_identity.current, a1);
+        assert_eq!(alice_identity.revision(&a1).unwrap().state, State::Accepted);
+
+        // A₂ is proposed and accepted, is acceptedy by Bob, thus reaches 2/2 votes,
+        // is accepted, and becomes the current revision, superseding A₁.
+        let mut alice_doc2 = alice_identity.doc().clone().edit();
+        alice_doc2.visibility = Visibility::private([]);
+        let a2 = alice_identity
+            .update(
+                cob::Title::new("A₂").unwrap(),
+                "",
+                &alice_doc2.verified().unwrap(),
+            )
+            .unwrap();
+        bob.repo.fetch(alice);
+        bob_identity.reload().unwrap();
+        bob_identity.accept(&a2).unwrap();
+        alice.repo.fetch(bob);
+        alice_identity.reload().unwrap();
+        assert_eq!(alice_identity.current, a2);
+
+        // A₁ is now previously accepted but not current anymore.
+        //
+        //  A₂   [Accepted, current]
+        //  |
+        //  A₁   [Accepted, previously current]
+        //  |
+        //  A₀
+        assert_eq!(alice_identity.revision(&a1).unwrap().state, State::Accepted);
+        assert_ne!(alice_identity.current, a1);
+
+        // Attempting to redact A₁ should be silently ignored.
+        alice_identity.redact(a1).unwrap();
+        assert_eq!(alice_identity.revision(&a1).unwrap().state, State::Accepted);
+        assert_eq!(alice_identity.current, a2);
+    }
+
+    /// When Alice redacts a revision and Bob concurrently accepts it,
+    /// the outcome depends on CRDT evaluation order (timestamp-based).
+    /// Regardless of which node syncs first, both must converge.
+    #[test]
+    fn concurrent_redact_and_accept_converge() {
+        let network = Network::default();
+        let alice = &network.alice;
+        let bob = &network.bob;
+
+        // Setup: Alice adds Bob as delegate. A₁ is auto-accepted (1/1 votes).
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
+        let mut alice_doc = alice_identity.doc().clone().edit();
+        alice_doc.delegate(bob.signer.public_key().into());
+        let a1 = alice_identity
+            .update(
+                cob::Title::new("A₁").unwrap(),
+                "Add Bob",
+                &alice_doc.verified().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(alice_identity.current, a1);
+
+        // Alice proposes A₂. With 2 delegates, needs 2/2 votes. Stays Active.
+        let mut alice_doc2 = alice_identity.doc().clone().edit();
+        alice_doc2.visibility = Visibility::private([]);
+        let a2 = alice_identity
+            .update(
+                cob::Title::new("A₂").unwrap(),
+                "",
+                &alice_doc2.verified().unwrap(),
+            )
+            .unwrap();
+
+        // Bob fetches and sees A₂.
+        bob.repo.fetch(alice);
+
+        // Concurrent actions (no sync between them):
+        // Alice redacts A₂ (timestamp T).
+        let _a3 = cob::stable::with_advanced_timestamp(|| alice_identity.redact(a2).unwrap());
+
+        // Bob accepts A₂ (timestamp T+1, later than Alice's redaction).
+        let mut bob_identity = Identity::load_mut(&*bob.repo, &bob.signer).unwrap();
+        let _b1 = cob::stable::with_advanced_timestamp(|| bob_identity.accept(&a2).unwrap());
+
+        // Before sync: each node has a different local view.
+        // Alice: A₂ is Redacted(Author), current = A₁.
+        assert_eq!(
+            alice_identity.revision(&a2).unwrap().state,
+            State::Redacted(RedactedBy::Author)
+        );
+        assert_eq!(alice_identity.current, a1);
+
+        // Bob: A₂ is Accepted (2/2 votes locally), current = A₂.
+        assert_eq!(bob_identity.revision(&a2).unwrap().state, State::Accepted);
+        assert_eq!(bob_identity.current, a2);
+
+        // Now sync: Bob fetches Alice, Alice fetches Bob.
+        bob.repo.fetch(alice);
+        bob_identity.reload().unwrap();
+
+        alice.repo.fetch(bob);
+        alice_identity.reload().unwrap();
+
+        // After sync: both must agree.
+        // The redaction (earlier timestamp) is processed before the accept.
+        // When the accept is processed, A₂ is already Redacted → accept is skipped.
+        assert_eq!(
+            alice_identity.revision(&a2).unwrap().state,
+            bob_identity.revision(&a2).unwrap().state,
+            "Alice and Bob must agree on A₂'s state"
+        );
+        assert_eq!(
+            alice_identity.current, bob_identity.current,
+            "Alice and Bob must agree on the current revision"
+        );
+
+        // The redaction wins (earlier timestamp), so current reverts to A₁.
+        assert_eq!(
+            alice_identity.revision(&a2).unwrap().state,
+            State::Redacted(RedactedBy::Author)
+        );
+        assert_eq!(alice_identity.current, a1);
+    }
+
+    /// Companion to `concurrent_redact_and_accept_converge`: here Bob
+    /// acts first (earlier timestamp) and Alice redacts second (later
+    /// timestamp). The accept is processed first and wins.
+    #[test]
+    fn concurrent_accept_before_redact_converge() {
+        let network = Network::default();
+        let alice = &network.alice;
+        let bob = &network.bob;
+
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
+        let mut alice_doc = alice_identity.doc().clone().edit();
+        alice_doc.delegate(bob.signer.public_key().into());
+        let _a1 = alice_identity
+            .update(
+                cob::Title::new("A₁").unwrap(),
+                "Add Bob",
+                &alice_doc.verified().unwrap(),
+            )
+            .unwrap();
+
+        let mut alice_doc2 = alice_identity.doc().clone().edit();
+        alice_doc2.visibility = Visibility::private([]);
+        let a2 = alice_identity
+            .update(
+                cob::Title::new("A₂").unwrap(),
+                "",
+                &alice_doc2.verified().unwrap(),
+            )
+            .unwrap();
+
+        bob.repo.fetch(alice);
+
+        // Bob accepts FIRST (earlier timestamp).
+        let mut bob_identity = Identity::load_mut(&*bob.repo, &bob.signer).unwrap();
+        let _b1 = cob::stable::with_advanced_timestamp(|| bob_identity.accept(&a2).unwrap());
+
+        // Alice redacts SECOND (later timestamp).
+        let _a3 = cob::stable::with_advanced_timestamp(|| alice_identity.redact(a2).unwrap());
+
+        // Sync both directions.
+        bob.repo.fetch(alice);
+        bob_identity.reload().unwrap();
+
+        alice.repo.fetch(bob);
+        alice_identity.reload().unwrap();
+
+        // Both must agree.
+        assert_eq!(
+            alice_identity.revision(&a2).unwrap().state,
+            bob_identity.revision(&a2).unwrap().state,
+            "Alice and Bob must agree on A₂'s state"
+        );
+        assert_eq!(
+            alice_identity.current, bob_identity.current,
+            "Alice and Bob must agree on the current revision"
+        );
+
+        // The accept (earlier timestamp) is processed first.
+        // A₂ reaches 2/2 votes → Accepted. Current becomes A₂.
+        // Then the redaction is processed: A₂ is Accepted (not Active) → skipped.
+        assert_eq!(alice_identity.revision(&a2).unwrap().state, State::Accepted);
+        assert_eq!(alice_identity.current, a2);
+    }
+
+    #[test]
+    fn valid_identity() {
         let tempdir = tempfile::tempdir().unwrap();
         let mut rng = fastrand::Rng::new();
 
-        let alice = Device::mock_rng(&mut rng);
-        let bob = Device::mock_rng(&mut rng);
-        let eve = Device::mock_rng(&mut rng);
+        let alice = SigningKey::mock(rng.usize(..));
+        let bob = SigningKey::mock(rng.usize(..));
+        let eve = SigningKey::mock(rng.usize(..));
 
         let storage = Storage::open(tempdir.path().join("storage"), fixtures::user()).unwrap();
         let (id, _, _, _) =
@@ -1599,21 +2588,21 @@ mod test {
         rad::fork_remote(id, alice.public_key(), &eve, &storage).unwrap();
 
         let repo = storage.repository(id).unwrap();
-        let mut identity = Identity::load_mut(&repo).unwrap();
+        let mut identity = Identity::load_mut(&repo, &alice).unwrap();
         let doc = identity.doc().clone();
-        let prj = doc.project().unwrap();
+        let prj = doc.project().unwrap().unwrap();
         let mut doc = doc.edit();
 
         // Make a change to the description and sign it.
         let desc = prj.description().to_owned() + "!";
         let prj = prj.update(None, desc, None).unwrap();
-        doc.payload.insert(PayloadId::project(), prj.clone().into());
+        doc.payload
+            .insert(PayloadId::project().clone(), prj.clone().into());
         identity
             .update(
                 cob::Title::new("Update description").unwrap(),
                 "",
                 &doc.clone().verified().unwrap(),
-                &alice,
             )
             .unwrap();
 
@@ -1625,7 +2614,6 @@ mod test {
                 cob::Title::new("Add bob").unwrap(),
                 "",
                 &doc.clone().verified().unwrap(),
-                &alice,
             )
             .unwrap();
 
@@ -1638,25 +2626,26 @@ mod test {
                 cob::Title::new("Add eve").unwrap(),
                 "",
                 &doc.clone().verified().unwrap(),
-                &alice,
             )
             .unwrap();
-        identity.accept(&revision, &bob).unwrap();
+
+        let mut bob_identity = Identity::load_mut(&repo, &bob).unwrap();
+        bob_identity.accept(&revision).unwrap();
 
         // Update description again with signatures by Eve and Bob.
         let desc = prj.description().to_owned() + "?";
         let prj = prj.update(None, desc, None).unwrap();
-        doc.payload.insert(PayloadId::project(), prj.into());
-
-        let revision = identity
+        doc.payload.insert(PayloadId::project().clone(), prj.into());
+        let revision = bob_identity
             .update(
                 cob::Title::new("Update description again").unwrap(),
                 "Bob's repository",
                 &doc.verified().unwrap(),
-                &bob,
             )
             .unwrap();
-        identity.accept(&revision, &eve).unwrap();
+
+        let mut eve_identity = Identity::load_mut(&repo, &eve).unwrap();
+        eve_identity.accept(&revision).unwrap();
 
         let identity: Identity = Identity::load(&repo).unwrap();
         let root = repo.identity_root().unwrap();
@@ -1664,17 +2653,630 @@ mod test {
 
         assert_eq!(identity.signatures().count(), 2);
         assert_eq!(identity.revisions().count(), 5);
-        assert_eq!(identity.id(), id);
+        assert_eq!(RepoId::from(identity.root().blob), id);
         assert_eq!(identity.root().id, root);
         assert_eq!(identity.current().blob, doc.blob);
         assert_eq!(identity.current().description.as_str(), "Bob's repository");
         assert_eq!(identity.head(), revision);
         assert_eq!(identity.doc(), &*doc);
         assert_eq!(
-            identity.doc().project().unwrap().description(),
+            identity.doc().project().unwrap().unwrap().description(),
             "Acme's repository!?"
         );
 
-        assert_eq!(doc.project().unwrap().description(), "Acme's repository!?");
+        assert_eq!(
+            doc.project().unwrap().unwrap().description(),
+            "Acme's repository!?"
+        );
+    }
+
+    #[test]
+    fn evaluates_queued_children() {
+        let network = Network::default();
+        let alice = &network.alice;
+        let bob = &network.bob;
+        let eve = &network.eve;
+
+        // Setup. Alice, Bob, and Eve are delegates. Majority required is 2.
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
+        let mut alice_doc = alice_identity.doc().clone().edit();
+        alice_doc.delegate(bob.signer.public_key().into());
+        alice_doc.delegate(eve.signer.public_key().into());
+        let a0 = alice_identity
+            .update(
+                cob::Title::new("Add Bob and Eve").unwrap(),
+                "",
+                &alice_doc.verified().unwrap(),
+            )
+            .unwrap();
+
+        bob.repo.fetch(alice);
+        eve.repo.fetch(alice);
+        let mut bob_identity = Identity::load_mut(&*bob.repo, &bob.signer).unwrap();
+        let mut eve_identity = Identity::load_mut(&*eve.repo, &eve.signer).unwrap();
+        bob_identity.accept(&a0).unwrap();
+        eve_identity.accept(&a0).unwrap();
+
+        alice.repo.fetch(bob);
+        alice_identity.reload().unwrap();
+        assert_eq!(alice_identity.current, a0);
+
+        // Alice proposes A1 and B1
+        let mut doc_a1 = alice_identity.doc().clone().edit();
+        doc_a1.visibility = Visibility::private([]);
+        let a1 = alice_identity
+            .update(
+                cob::Title::new("A1").unwrap(),
+                "",
+                &doc_a1.clone().verified().unwrap(),
+            )
+            .unwrap();
+
+        let mut doc_b1 = doc_a1.clone();
+        doc_b1.visibility = Visibility::private([bob.signer.public_key().into()]);
+        let b1 = alice_identity
+            .transaction("B1", |tx, repo| {
+                *tx = Transaction::new_revision(
+                    cob::Title::new("B1").unwrap(),
+                    "",
+                    &doc_b1.verified().unwrap(),
+                    Some(a1),
+                    repo,
+                    &alice.signer,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        // Bob fetches and accepts B1.
+        // B1 now has 2 votes (Alice + Bob). The majority required is 2.
+        // However, B1's parent (A1) is not yet accepted.
+        bob.repo.fetch(alice);
+        bob_identity.reload().unwrap();
+        bob_identity.accept(&b1).unwrap();
+
+        // B1 is queued and not yet accepted
+        assert_eq!(bob_identity.revision(&b1).unwrap().state, State::Active);
+
+        // Bob accepts A1.
+        // A1 reaches 2 votes and is Accepted.
+        // B1 already has 2 votes, so it should be
+        // automatically accepted.
+        //
+        //     b1   [Accepted, 2/2 votes]
+        //     |
+        //     a1   [Accepted, 2/2 votes]
+        //     |
+        //     a0   [Accepted]
+        bob_identity.accept(&a1).unwrap();
+
+        assert_eq!(bob_identity.revision(&a1).unwrap().state, State::Accepted);
+
+        assert_eq!(bob_identity.revision(&b1).unwrap().state, State::Accepted);
+        assert_eq!(bob_identity.current, b1);
+    }
+
+    /// When a revision is adopted that changes the delegate set, the majority
+    /// threshold may change. Queued children should be re-evaluated under the
+    /// new quorum rules.
+    ///
+    /// This test exercises the case where a delegate is removed, lowering
+    /// the majority from 3 (for 4 delegates) to 2 (for 3 delegates), which
+    /// enables a queued child to be automatically adopted.
+    #[test]
+    fn evaluates_queued_children_with_new_delegate() {
+        use crate::test::setup::{Node, NodeRepo};
+        use tempfile::tempdir;
+
+        let network = Network::default();
+        let alice = &network.alice;
+        let bob = &network.bob;
+        let eve = &network.eve;
+
+        // Create Dave as a 4th participant.
+        let mut dave_node = Node::new(tempdir().unwrap(), SigningKey::mock(3), "dave");
+        dave_node.clone(network.rid, alice);
+        let dave_repo = NodeRepo {
+            repo: dave_node.storage.repository(network.rid).unwrap(),
+            checkout: None,
+        };
+
+        // A1: Alice adds Bob, Eve, and Dave as delegates.
+        // Alice is the sole delegate, so this is auto-accepted.
+        // Result: 4 delegates {Alice, Bob, Eve, Dave}, majority = 3.
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
+        let mut alice_doc = alice_identity.doc().clone().edit();
+        alice_doc.delegate(bob.signer.public_key().into());
+        alice_doc.delegate(eve.signer.public_key().into());
+        alice_doc.delegate(dave_node.signer.public_key().into());
+        let a1 = alice_identity
+            .update(
+                cob::Title::new("Add Bob, Eve, and Dave").unwrap(),
+                "",
+                &alice_doc.verified().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(alice_identity.current, a1);
+        assert_eq!(alice_identity.doc().delegates().len(), 4);
+
+        // Sync everyone.
+        bob.repo.fetch(alice);
+        eve.repo.fetch(alice);
+        dave_repo.fetch(alice);
+
+        // A2: Alice proposes removing Dave.
+        // Under A1's rules (4 delegates), majority = 3. Alice has 1 vote. Active.
+        let mut doc_a2 = alice_identity.doc().clone().edit();
+        doc_a2
+            .rescind(&dave_node.signer.public_key().into())
+            .unwrap();
+        let a2 = alice_identity
+            .update(
+                cob::Title::new("Remove Dave").unwrap(),
+                "",
+                &doc_a2.clone().verified().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(alice_identity.revision(&a2).unwrap().state, State::Active);
+
+        // B1: Alice proposes a child of A2 (changes visibility).
+        // B1's parent is A2 (Active, not current), so we use a manual transaction.
+        let mut doc_b1 = doc_a2.clone();
+        doc_b1.visibility = Visibility::private([]);
+        let b1 = alice_identity
+            .transaction("B1", |tx, repo| {
+                *tx = Transaction::new_revision(
+                    cob::Title::new("B1: Change visibility").unwrap(),
+                    "",
+                    &doc_b1.verified().unwrap(),
+                    Some(a2),
+                    repo,
+                    &alice.signer,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        // Bob fetches Alice's changes and accepts B1.
+        // B1 now has 2 votes (Alice + Bob). Both are delegates in A2's doc.
+        // But B1's parent A2 is not yet current, so B1 stays Active.
+        bob.repo.fetch(alice);
+        let mut bob_identity = Identity::load_mut(&*bob.repo, &bob.signer).unwrap();
+        bob_identity.accept(&b1).unwrap();
+        assert_eq!(bob_identity.revision(&b1).unwrap().state, State::Active);
+
+        // Bob accepts A2. A2 now has 2/4 votes. Still needs 3.
+        bob_identity.accept(&a2).unwrap();
+        assert_eq!(bob_identity.revision(&a2).unwrap().state, State::Active);
+
+        // Eve fetches from Alice and Bob, then accepts A2.
+        // A2 reaches 3/4 votes (Alice + Bob + Eve) → adopted!
+        // A2's doc has 3 delegates {Alice, Bob, Eve}, majority = 2.
+        // Re-evaluate children: B1 has 2 votes (Alice + Bob), 2 >= 2 → adopted!
+        //
+        //     b1   [Accepted, 2 votes (Alice + Bob), majority 2 under A2's doc]
+        //     |
+        //     a2   [Accepted, 3 votes (Alice + Bob + Eve), majority 3 under A1's doc]
+        //     |
+        //     a1   [Accepted, 4 delegates]
+        //     |
+        //     a0
+        eve.repo.fetch(alice);
+        eve.repo.fetch(bob);
+        let mut eve_identity = Identity::load_mut(&*eve.repo, &eve.signer).unwrap();
+        eve_identity.accept(&a2).unwrap();
+
+        assert_eq!(eve_identity.revision(&a2).unwrap().state, State::Accepted);
+        assert_eq!(eve_identity.doc().delegates().len(), 3);
+        assert_eq!(eve_identity.revision(&b1).unwrap().state, State::Accepted);
+        assert_eq!(eve_identity.current, b1);
+    }
+
+    /// Demonstrates that authorization to vote on a revision is strictly governed
+    /// by its parent, not by the currently accepted identity document.
+    #[test]
+    fn authorization_based_on_parent_not_current() {
+        use crate::test::setup::{Node, NodeRepo};
+        use tempfile::tempdir;
+
+        let network = Network::default();
+        let alice = &network.alice;
+        let bob = &network.bob;
+        let eve = &network.eve;
+
+        // Create Dave as a 4th participant.
+        let mut dave_node = Node::new(tempdir().unwrap(), SigningKey::mock(3), "dave");
+        dave_node.clone(network.rid, alice);
+        let dave_repo = NodeRepo {
+            repo: dave_node.storage.repository(network.rid).unwrap(),
+            checkout: None,
+        };
+
+        // Revision A₁ lists 4 delegates: Alice, Bob, Eve, and Dave.
+        // Since alice is the only delegate initially, A₁ is immediately accepted
+        // and becomes the current revision.
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
+        let mut alice_doc = alice_identity.doc().clone().edit();
+        alice_doc.delegate(bob.signer.public_key().into());
+        alice_doc.delegate(eve.signer.public_key().into());
+        alice_doc.delegate(dave_node.signer.public_key().into());
+        let _a1 = alice_identity
+            .update(
+                cob::Title::new("A₁").unwrap(),
+                "Add Bob, Eve, and Dave",
+                &alice_doc.verified().unwrap(),
+            )
+            .unwrap();
+
+        bob.repo.fetch(alice);
+        eve.repo.fetch(alice);
+        dave_repo.fetch(alice);
+
+        // Revision A₂ lists 3 delegates: Alice, Bob, and Eve.
+        // Dave is removed in this proposal.
+        let mut doc_a2 = alice_identity.doc().clone().edit();
+        doc_a2
+            .rescind(&dave_node.signer.public_key().into())
+            .unwrap();
+        let a2 = alice_identity
+            .update(
+                cob::Title::new("A₂").unwrap(),
+                "Remove Dave",
+                &doc_a2.clone().verified().unwrap(),
+            )
+            .unwrap();
+
+        // Revision A₃ is a child of A₂.
+        // Note that at this point, A₁ is still the currently accepted revision,
+        // meaning Dave is a delegate according to the currently accepted revision.
+        let mut doc_a3 = doc_a2.clone();
+        doc_a3.visibility = Visibility::private([]);
+        let a3 = alice_identity
+            .transaction("A₃", |tx, repo| {
+                *tx = Transaction::new_revision(
+                    cob::Title::new("A₃").unwrap(),
+                    "Set visibility to private",
+                    &doc_a3.verified().unwrap(),
+                    Some(a2),
+                    repo,
+                    &alice.signer,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        // Dave fetches and attempts to accept A₃.
+        // Even though Dave is a delegate in the currently accepted revision (A₁),
+        // authorization is governed by the parent of A₃, which is A₂.
+        // Because A₂ removed Dave, this action must error.
+        dave_repo.fetch(alice);
+        let mut dave_identity = Identity::load_mut(&*dave_repo, &dave_node.signer).unwrap();
+
+        let err = dave_identity.accept(&a3).unwrap_err();
+        let is_unauthorized =
+            std::iter::successors::<&dyn std::error::Error, _>(Some(&err), |err| err.source()).any(
+                |source| {
+                    matches!(
+                        source.downcast_ref::<ApplyError>(),
+                        Some(ApplyError::NonDelegateUnauthorized { .. })
+                    )
+                },
+            );
+
+        assert!(
+            is_unauthorized,
+            "Dave should be unauthorized because he was removed in the parent (A₂). Actual error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn has_accepted_active_sibling_returns_true_when_sibling_accepted() {
+        let network = Network::default();
+        let alice = &network.alice;
+        let bob = &network.bob;
+
+        // Setup: Alice adds Bob as delegate.
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
+        let mut alice_doc = alice_identity.doc().clone().edit();
+        alice_doc.delegate(bob.signer.public_key().into());
+        let _a1 = alice_identity
+            .update(
+                cob::Title::new("Add Bob").unwrap(),
+                "",
+                &alice_doc.verified().unwrap(),
+            )
+            .unwrap();
+
+        // Alice proposes a revision (child of current). Alice has an implicit accept.
+        let mut doc1 = alice_identity.doc().clone().edit();
+        doc1.visibility = Visibility::private([]);
+        let child = alice_identity
+            .update(
+                cob::Title::new("Child 1").unwrap(),
+                "",
+                &doc1.verified().unwrap(),
+            )
+            .unwrap();
+
+        let alice_did: Did = alice.signer.public_key().into();
+        assert_eq!(
+            alice_identity.has_accepted_active_sibling(&alice_identity.current, &alice_did),
+            Some(child)
+        );
+
+        let bob_did: Did = bob.signer.public_key().into();
+        assert_eq!(
+            alice_identity.has_accepted_active_sibling(&alice_identity.current, &bob_did),
+            None
+        );
+    }
+
+    /// Old histories may contain a delegate explicitly accepting two
+    /// siblings. The evaluation layer must handle this gracefully by
+    /// silently skipping the second accept — the vote must not be recorded.
+    #[test]
+    fn evaluation_skips_sibling_accept_in_old_history() {
+        let network = Network::default();
+        let alice = &network.alice;
+        let bob = &network.bob;
+
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
+        let mut alice_doc = alice_identity.doc().clone().edit();
+        alice_doc.delegate(bob.signer.public_key().into());
+        let _a1 = alice_identity
+            .update(
+                cob::Title::new("Add Bob").unwrap(),
+                "",
+                &alice_doc.verified().unwrap(),
+            )
+            .unwrap();
+
+        // Bob proposes child_a (gets implicit accept).
+        bob.repo.fetch(alice);
+        let mut bob_identity = Identity::load_mut(&*bob.repo, &bob.signer).unwrap();
+        let mut bob_doc = bob_identity.doc().clone().edit();
+        bob_doc.visibility = Visibility::private([]);
+        let child_a = bob_identity
+            .update(
+                cob::Title::new("Child A").unwrap(),
+                "",
+                &bob_doc.verified().unwrap(),
+            )
+            .unwrap();
+
+        // Alice proposes child_b (sibling, gets implicit accept).
+        let mut alice_doc2 = alice_identity.doc().clone().edit();
+        alice_doc2.visibility = Visibility::private([alice.signer.public_key().into()]);
+        let _child_b = alice_identity
+            .update(
+                cob::Title::new("Child B").unwrap(),
+                "",
+                &alice_doc2.verified().unwrap(),
+            )
+            .unwrap();
+
+        // Alice fetches Bob's child_a and explicitly accepts it
+        // (simulating old history — she already has an accept on child_b).
+        alice.repo.fetch(bob);
+        alice_identity.reload().unwrap();
+
+        // Use transaction to bypass the API guard (simulating old history).
+        let sig = alice_identity
+            .revision(&child_a)
+            .unwrap()
+            .sign(&alice.signer)
+            .unwrap();
+        alice_identity
+            .transaction("Accept child_a", |tx, _| tx.accept(child_a, sig))
+            .unwrap();
+
+        let alice_did: Did = alice.signer.public_key().into();
+
+        // Alice's accept on child_a should be skipped because she already
+        // has an accept on the Active sibling child_b.
+        assert!(
+            !alice_identity
+                .revision(&child_a)
+                .unwrap()
+                .accepted()
+                .any(|did| did == alice_did),
+            "Alice's accept on child_a should have been skipped (she already accepted sibling child_b)"
+        );
+    }
+
+    /// When replaying an old history where a delegate created two sibling
+    /// revisions, the second revision's implicit author accept is stripped.
+    #[test]
+    fn evaluation_strips_author_accept_for_sibling_creation() {
+        let network = Network::default();
+        let alice = &network.alice;
+        let bob = &network.bob;
+
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
+        let mut alice_doc = alice_identity.doc().clone().edit();
+        alice_doc.delegate(bob.signer.public_key().into());
+        let _a1 = alice_identity
+            .update(
+                cob::Title::new("Add Bob").unwrap(),
+                "",
+                &alice_doc.verified().unwrap(),
+            )
+            .unwrap();
+
+        // Alice proposes first child (gets implicit accept).
+        let mut doc1 = alice_identity.doc().clone().edit();
+        doc1.visibility = Visibility::private([]);
+        let child1 = alice_identity
+            .update(
+                cob::Title::new("Child 1").unwrap(),
+                "",
+                &doc1.clone().verified().unwrap(),
+            )
+            .unwrap();
+
+        // Alice proposes second child via transaction (simulating old history).
+        let mut doc2 = doc1.clone();
+        doc2.visibility = Visibility::private([alice.signer.public_key().into()]);
+        let current = alice_identity.current;
+        let child2 = alice_identity
+            .transaction("Child 2", |tx, repo| {
+                *tx = Transaction::new_revision(
+                    cob::Title::new("Child 2").unwrap(),
+                    "",
+                    &doc2.verified().unwrap(),
+                    Some(current),
+                    repo,
+                    &alice.signer,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let alice_did: Did = alice.signer.public_key().into();
+
+        // child1 has Alice's accept (she was the first to propose under this parent).
+        assert!(
+            alice_identity
+                .revision(&child1)
+                .unwrap()
+                .accepted()
+                .any(|did| did == alice_did),
+            "child1 should have Alice's accept"
+        );
+        // child2's implicit accept was stripped because Alice already accepted child1.
+        assert!(
+            !alice_identity
+                .revision(&child2)
+                .unwrap()
+                .accepted()
+                .any(|did| did == alice_did),
+            "child2 should NOT have Alice's accept"
+        );
+        // child2 still exists and is Active (just has 0 accept votes).
+        assert_eq!(
+            alice_identity.revision(&child2).unwrap().state,
+            State::Active
+        );
+    }
+
+    /// The `accept()` API rejects an accept if the delegate already
+    /// accepted an Active sibling.
+    #[test]
+    fn accept_rejects_sibling_accept() {
+        let network = Network::default();
+        let alice = &network.alice;
+        let bob = &network.bob;
+        let eve = &network.eve;
+        let dave = &network.dave;
+
+        // 4 delegates, majority = 3. This ensures Alice's accept of child_a
+        // doesn't immediately adopt it (Bob + Alice = 2 < 3).
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
+        let mut alice_doc = alice_identity.doc().clone().edit();
+        alice_doc.delegate(bob.signer.public_key().into());
+        alice_doc.delegate(eve.signer.public_key().into());
+        alice_doc.delegate(dave.signer.public_key().into());
+        let _a0 = alice_identity
+            .update(
+                cob::Title::new("Add delegates").unwrap(),
+                "",
+                &alice_doc.verified().unwrap(),
+            )
+            .unwrap();
+
+        // Bob proposes child_a.
+        bob.repo.fetch(alice);
+        let mut bob_identity = Identity::load_mut(&*bob.repo, &bob.signer).unwrap();
+        let mut bob_doc = bob_identity.doc().clone().edit();
+        bob_doc.visibility = Visibility::private([]);
+        let child_a = bob_identity
+            .update(
+                cob::Title::new("Child A").unwrap(),
+                "",
+                &bob_doc.verified().unwrap(),
+            )
+            .unwrap();
+
+        // Eve proposes child_b (sibling of child_a).
+        eve.repo.fetch(alice);
+        let mut eve_identity = Identity::load_mut(&*eve.repo, &eve.signer).unwrap();
+        let mut eve_doc = eve_identity.doc().clone().edit();
+        eve_doc.visibility = Visibility::private([eve.signer.public_key().into()]);
+        let child_b = eve_identity
+            .update(
+                cob::Title::new("Child B").unwrap(),
+                "",
+                &eve_doc.verified().unwrap(),
+            )
+            .unwrap();
+
+        // Alice fetches both and accepts child_a.
+        // child_a stays Active (Bob + Alice = 2/3, needs 3).
+        alice.repo.fetch(bob);
+        alice.repo.fetch(eve);
+        alice_identity.reload().unwrap();
+        alice_identity.accept(&child_a).unwrap();
+        assert_eq!(
+            alice_identity.revision(&child_a).unwrap().state,
+            State::Active
+        );
+
+        // Alice tries to accept child_b — should fail.
+        let err = alice_identity.accept(&child_b).unwrap_err();
+        assert!(
+            std::iter::successors(Some(&err as &dyn std::error::Error), |e| e.source())
+                .filter_map(|e| e.downcast_ref::<ApplyError>())
+                .any(|e| matches!(e, ApplyError::SiblingAccepted { .. })),
+            "Expected SiblingAccepted error, got: {err:?}"
+        );
+    }
+
+    /// The `update()` API rejects a second proposal if the delegate already
+    /// has an accept on an Active sibling (child of current).
+    #[test]
+    fn update_rejects_second_sibling_proposal() {
+        let network = Network::default();
+        let alice = &network.alice;
+        let bob = &network.bob;
+
+        let mut alice_identity = Identity::load_mut(&*alice.repo, &alice.signer).unwrap();
+        let mut alice_doc = alice_identity.doc().clone().edit();
+        alice_doc.delegate(bob.signer.public_key().into());
+        let _a1 = alice_identity
+            .update(
+                cob::Title::new("Add Bob").unwrap(),
+                "",
+                &alice_doc.verified().unwrap(),
+            )
+            .unwrap();
+
+        // Alice proposes first child.
+        let mut doc1 = alice_identity.doc().clone().edit();
+        doc1.visibility = Visibility::private([]);
+        let _child1 = alice_identity
+            .update(
+                cob::Title::new("Child 1").unwrap(),
+                "",
+                &doc1.verified().unwrap(),
+            )
+            .unwrap();
+
+        // Alice tries to propose a second child (sibling) — should fail.
+        let mut doc2 = alice_identity.doc().clone().edit();
+        doc2.visibility = Visibility::private([alice.signer.public_key().into()]);
+        let err = alice_identity
+            .update(
+                cob::Title::new("Child 2").unwrap(),
+                "",
+                &doc2.verified().unwrap(),
+            )
+            .unwrap_err();
+
+        assert!(
+            std::iter::successors(Some(&err as &dyn std::error::Error), |e| e.source())
+                .filter_map(|e| e.downcast_ref::<ApplyError>())
+                .any(|e| matches!(e, ApplyError::SiblingAccepted { .. })),
+            "Expected SiblingAccepted error, got: {err:?}"
+        );
     }
 }

@@ -4,7 +4,7 @@ use std::ops::Deref;
 use std::{io, vec};
 
 use crate::cell::Cell;
-use crate::{viewport, Color, Filled, Label, Style};
+use crate::{Color, Filled, Label, Style, viewport};
 
 /// Rendering constraint.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -84,8 +84,12 @@ pub trait Element: fmt::Debug + Send + Sync {
 
     /// Print this element to stdout.
     fn print(&self) {
+        use std::io::Write;
+
+        let mut stdout = io::stdout().lock();
         for line in self.render(Constraint::from_env().unwrap_or_default()) {
-            println!("{}", line.to_string().trim_end());
+            let _ = writeln!(stdout, "{}", line.to_string().trim_end())
+                .or_else(crate::io::swallow_broken_pipe_stdout);
         }
     }
 
@@ -374,7 +378,7 @@ mod test {
     use super::*;
 
     #[test]
-    fn test_truncate() {
+    fn truncate() {
         let line = Line::default().item("banana").item("peach").item("apple");
 
         let mut actual = line.clone();
@@ -395,7 +399,7 @@ mod test {
     }
 
     #[test]
-    fn test_width() {
+    fn width() {
         // Nb. This might not display correctly in some editors or terminals.
         let line = Line::new("Radicle Heartwood Protocol & Stack ❤️🪵");
         assert_eq!(line.width(), 39, "{line}");
@@ -406,7 +410,7 @@ mod test {
     }
 
     #[test]
-    fn test_spaced() {
+    fn spaced() {
         let line = Line::spaced(["banana", "peach", "apple"].into_iter().map(Label::new));
 
         let iterated: Vec<_> = line.into_iter().collect();

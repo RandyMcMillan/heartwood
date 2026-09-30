@@ -1,6 +1,6 @@
 mod args;
 
-use anyhow::{anyhow, Context as _};
+use anyhow::anyhow;
 
 use radicle::cob;
 use radicle::identity::{Identity, Visibility};
@@ -8,40 +8,34 @@ use radicle::node::Handle as _;
 use radicle::storage::{SignRepository, ValidateRepository, WriteRepository, WriteStorage};
 
 use crate::terminal as term;
+use crate::terminal::args::rid_or_cwd;
 
 pub use args::Args;
-pub(crate) use args::ABOUT;
 
 pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
     let profile = ctx.profile()?;
-    let rid = match args.rid {
-        Some(rid) => rid,
-        None => radicle::rad::cwd()
-            .map(|(_, rid)| rid)
-            .context("Current directory is not a Radicle repository")?,
-    };
+    let (_, rid) = rid_or_cwd(args.repo)?;
 
     let repo = profile.storage.repository_mut(rid)?;
-    let mut identity = Identity::load_mut(&repo)?;
+    let signer = profile.signer()?;
+    let mut identity = Identity::load_mut(&repo, &signer)?;
     let doc = identity.doc();
 
     if doc.is_public() {
-        return Err(term::Error::WithHint {
-            err: anyhow!("repository is already public"),
-            hint: "to announce the repository to the network, run `rad sync --inventory`",
-        }
+        return Err(term::Error::with_hint(
+            anyhow!("repository is already public"),
+            "to announce the repository to the network, run `rad sync --inventory`",
+        )
         .into());
     }
     if !doc.is_delegate(&profile.id().into()) {
         return Err(anyhow!("only the repository delegate can publish it"));
     }
     if doc.delegates().len() > 1 {
-        return Err(term::Error::WithHint {
-            err: anyhow!(
-                "only repositories with a single delegate can be published with this command"
-            ),
-            hint: "see `rad id --help` to publish repositories with more than one delegate",
-        }
+        return Err(term::Error::with_hint(
+            anyhow!("only repositories with a single delegate can be published with this command"),
+            "see `rad id --help` to publish repositories with more than one delegate",
+        )
         .into());
     }
     let signer = profile.signer()?;
@@ -54,12 +48,7 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
     // SAFETY: the `Title` here is guaranteed to be nonempty and does not
     // contain `\n` or `\r`.
     #[allow(clippy::unwrap_used)]
-    identity.update(
-        cob::Title::new("Publish repository").unwrap(),
-        "",
-        &doc,
-        &signer,
-    )?;
+    identity.update(cob::Title::new("Publish repository").unwrap(), "", &doc)?;
     repo.sign_refs(&signer)?;
     repo.set_identity_head()?;
     let validations = repo.validate()?;
@@ -70,7 +59,7 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
         }
         anyhow::bail!("fatal: repository storage is corrupt");
     }
-    let mut node = radicle::Node::new(profile.socket());
+    let mut node = radicle::Node::new(profile.socket_from_env());
     let spinner = term::spinner("Updating inventory..");
 
     // The repository is now part of our inventory.

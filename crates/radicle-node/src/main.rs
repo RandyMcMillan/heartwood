@@ -4,22 +4,21 @@ use std::path::PathBuf;
 use std::process::exit;
 use std::str::FromStr;
 
-use crossbeam_channel as chan;
 use thiserror::Error;
 
-use radicle::node::device::Device;
+use radicle::crypto::Signer as _;
+use radicle::crypto::ssh::keystore::Keystore;
+use radicle::node::NodeId;
 use radicle::profile;
 
-use radicle_node::crypto::ssh::keystore::{Keystore, MemorySigner};
 use radicle_node::fingerprint::{Fingerprint, FingerprintVerification};
-use radicle_node::{Runtime, VERSION};
-#[cfg(unix)]
+use radicle_node::{VERSION, runtime::Runtime};
 use radicle_signals as signals;
 
 const HELP_MSG: &str = r#"
 Usage
 
-   radicle-node [<option>...]
+   radicle-node [<option>…]
 
    If you're running a public seed node, make sure to use `--listen` to bind a listening socket to
    eg. `0.0.0.0:8776`, and add your external addresses in your configuration.
@@ -42,6 +41,10 @@ Options
     --help                                          Print help
 "#;
 
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 #[derive(Debug, Clone)]
 enum Logger {
     Radicle,
@@ -51,6 +54,9 @@ enum Logger {
     Systemd,
 }
 
+// Required for Mac and potentially Windows as clippy complains because of the OS specific
+// guard below.
+#[allow(clippy::derivable_impls)]
 impl Default for Logger {
     fn default() -> Self {
         #[cfg(all(feature = "systemd", target_os = "linux"))]
@@ -139,7 +145,9 @@ fn parse_options() -> Result<Options, lexopt::Error> {
             }
             Long("log") | Long("log-level") => {
                 if matches!(arg, Long("log")) {
-                    eprintln!("Warning: The option `--log` is deprecated and will be removed. Please use `--log-level` instead.");
+                    eprintln!(
+                        "Warning: The option `--log` is deprecated and will be removed. Please use `--log-level` instead."
+                    );
                 }
                 log_level = Some(parser.value()?.parse_with(log::Level::from_str)?);
             }
@@ -200,11 +208,56 @@ enum ExecutionError {
         path: PathBuf,
         source: radicle::crypto::ssh::keystore::Error,
     },
-    #[error("failed to load secret key '{secret}': fingerprint of corresponding public key is different from '{fingerprint}'")]
+    #[error(
+        "failed to load secret key '{secret}': fingerprint of corresponding public key is different from '{fingerprint}'"
+    )]
     FingerprintMismatch {
         secret: PathBuf,
         fingerprint: Fingerprint,
     },
+}
+
+/// Loads the path to a credential from systemd, if available.
+///
+/// The credential ID should only be given as a suffix, as this function will
+/// try different prefixes for backwards compatibility reasons.
+///
+/// The prefix `dev.radicle.node` is the preferred prefix, and should be used
+/// for new credentials, while the prefix `xyz.radicle.node` is deprecated and
+/// should be migrated away from. If it is used, a warning is logged.
+#[cfg(all(feature = "systemd", target_os = "linux"))]
+fn load_credential(id_suffix: &str) -> Option<PathBuf> {
+    const INFIX_NODE: &str = ".radicle.node.";
+    const PREFIX_DEV: &str = "dev";
+    const PREFIX_XYZ: &str = "xyz";
+
+    let id_dev = format!("{}{}{}", PREFIX_DEV, INFIX_NODE, id_suffix);
+
+    match radicle_systemd::credential::path(&id_dev) {
+        Ok(option @ Some(_)) => return option,
+        Ok(None) => {
+            // Fall through and try `PREFIX_XYZ` for backwards compatibility.
+        }
+        Err(err) => {
+            log::warn!(target: "node", "Failed to obtain of the systemd credential with ID '{id_dev}': {err}");
+        }
+    };
+
+    let id_xyz = format!("{}{}{}", PREFIX_XYZ, INFIX_NODE, id_suffix);
+    match radicle_systemd::credential::path(&id_xyz) {
+        Ok(option @ Some(_)) => {
+            log::warn!(target: "node", "Obtained path of the systemd credential with ID '{id_xyz}'. Using this credential ID is discouraged. Please change the ID to '{id_dev}'.");
+            option
+        }
+        Ok(None) => {
+            // No credential found with either ID.
+            None
+        }
+        Err(err) => {
+            log::warn!(target: "node", "Failed to obtain path of the systemd credential with ID '{id_xyz}': {err}");
+            None
+        }
+    }
 }
 
 fn execute(options: Options) -> Result<(), ExecutionError> {
@@ -238,39 +291,22 @@ fn execute(options: Options) -> Result<(), ExecutionError> {
     let passphrase = None;
 
     #[cfg(all(feature = "systemd", target_os = "linux"))]
-    let passphrase = passphrase.or_else(|| {
-        const ID: &str = "xyz.radicle.node.passphrase";
-        match radicle_systemd::credential::path(ID) {
+    let passphrase = passphrase.or_else(|| load_credential("passphrase").and_then(|path| {
+        match std::fs::read_to_string(&path) {
+            Ok(passphrase) => Some(passphrase.into()),
             Err(err) => {
-                log::warn!(target: "node", "Failed to obtain path of the passphrase file via systemd credential with '{ID}': {err}");
+                log::warn!(target: "node", "Failed to read passphrase from '{}': {err}", path.display());
                 None
-            },
-            Ok(Some(ref path)) => match std::fs::read_to_string(path) {
-                Ok(passphrase) => Some(passphrase.into()),
-                Err(err) => {
-                    log::warn!(target: "node", "Failed to read passphrase from '{}': {err}", path.display());
-                    None
-                }
             }
-            Ok(None) => None,
         }
-    });
+    }));
 
     let passphrase = passphrase.or_else(profile::env::passphrase);
 
     let secret_path = options.secret;
 
     #[cfg(all(feature = "systemd", target_os = "linux"))]
-    let secret_path = secret_path.or_else(|| {
-        const ID: &str = "xyz.radicle.node.secret";
-        match radicle_systemd::credential::path(ID) {
-            Err(err) => {
-                log::warn!(target: "node", "Failed to obtain path of the secret key via systemd credential with ID '{ID}': {err}");
-                None
-            },
-            Ok(path) => path
-        }
-    });
+    let secret_path = secret_path.or_else(|| load_credential("secret"));
 
     let secret_path = secret_path
         .or_else(|| config.node.secret.clone())
@@ -278,7 +314,7 @@ fn execute(options: Options) -> Result<(), ExecutionError> {
 
     let keystore = Keystore::from_secret_path(&secret_path);
 
-    let secret_key = keystore
+    let signer = keystore
         .secret_key(passphrase.clone())
         .map_err(|err| ExecutionError::SecretLoading {
             path: secret_path.clone(),
@@ -290,7 +326,7 @@ fn execute(options: Options) -> Result<(), ExecutionError> {
 
     if let Some(fp) = Fingerprint::read(&home)? {
         log::debug!(target: "node", "Verifying fingerprint..");
-        if fp.verify(&secret_key) != FingerprintVerification::Match {
+        if fp.verify(&signer) != FingerprintVerification::Match {
             return Err(ExecutionError::FingerprintMismatch {
                 secret: keystore.secret_key_path().to_path_buf(),
                 fingerprint: fp,
@@ -298,11 +334,10 @@ fn execute(options: Options) -> Result<(), ExecutionError> {
         }
     } else {
         log::info!(target: "node", "Initializing fingerprint..");
-        Fingerprint::init(&home, &secret_key)?;
+        Fingerprint::init(&home, &signer)?;
     }
 
-    let signer = Device::from(MemorySigner::from_secret(secret_key));
-    log::info!(target: "node", "Node ID is {}", signer.public_key());
+    log::info!(target: "node", "Node ID is {}", NodeId::from(*signer.public_key()));
 
     // Add the preferred seeds as persistent peers so that we reconnect to them automatically.
     config.node.connect.extend(config.preferred_seeds);
@@ -317,25 +352,18 @@ fn execute(options: Options) -> Result<(), ExecutionError> {
         log::warn!(target: "node", "Unable to set process open file limit: {e}");
     }
 
-    #[cfg(unix)]
     let signals = {
-        let (notify, signals) = chan::bounded(1);
+        let (notify, signals) = std::sync::mpsc::sync_channel(1);
         signals::install(notify)?;
         signals
     };
 
-    #[cfg(windows)]
-    let signals = {
-        let (_, signals) = chan::bounded(1);
-        log::warn!(target: "node", "Signal handlers not installed.");
-        signals
-    };
-
+    let socket = home.socket_from_env();
     if options.force {
         log::debug!(target: "node", "Removing existing control socket..");
-        std::fs::remove_file(home.socket()).ok();
+        std::fs::remove_file(&socket).ok();
     }
-    Runtime::init(home, config.node, listen, signals, signer)?.run()?;
+    Runtime::init(home, config.node, socket, listen, signals, signer)?.run()?;
 
     Ok(())
 }
@@ -347,13 +375,18 @@ fn initialize_logging(options: &LogOptions) -> Result<(), Box<dyn std::error::Er
         match options.logger {
             #[cfg(feature = "structured-logger")]
             Logger::Structured => {
-                use structured_logger::{json, Builder};
+                use structured_logger::{Builder, json};
 
                 let writer = match options.format.unwrap_or(LogFormat::Json) {
                     LogFormat::Json => json::new_writer(io::stdout()),
                 };
 
-                Box::new(Builder::new().with_default_writer(writer).build())
+                // Set to trace (via `Level::max`) and defer to log::set_max_level for filtering
+                Box::new(
+                    Builder::with_level(log::Level::max().as_str())
+                        .with_default_writer(writer)
+                        .build(),
+                )
             }
             #[cfg(all(feature = "systemd", target_os = "linux"))]
             Logger::Systemd => {
@@ -375,7 +408,7 @@ fn initialize_logging(options: &LogOptions) -> Result<(), Box<dyn std::error::Er
                 const SYSLOG_IDENTIFIER: &str = "radicle-node";
                 logger::<&str, &str, _>(SYSLOG_IDENTIFIER.to_string(), []).map_err(Box::new)?
             }
-            Logger::Radicle => Box::new(radicle::logger::Logger::new(level)),
+            Logger::Radicle => Box::new(radicle_log::Logger::new()),
         }
     };
 
@@ -419,6 +452,9 @@ fn panic_hook(info: &std::panic::PanicHookInfo) {
 }
 
 fn main() {
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::new_heap();
+
     let options = parse_options().unwrap_or_else(|err| {
         // The lexopt errors read nicely with a comma.
         eprintln!("Failed to parse options, {err:#}");

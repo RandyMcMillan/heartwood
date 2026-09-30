@@ -15,9 +15,10 @@ use serde_json as json;
 
 use crate::crypto::PublicKey;
 use crate::identity::RepoId;
+use crate::storage::refs;
 
-use super::events::Event;
 use super::NodeId;
+use super::events::Event;
 
 /// Default timeout when waiting for the node to respond with data.
 pub const DEFAULT_TIMEOUT: time::Duration = time::Duration::from_secs(30);
@@ -40,10 +41,6 @@ pub enum Command {
         rid: RepoId,
 
         /// The namespaces for which references should be announced.
-        #[cfg_attr(
-            feature = "schemars",
-            schemars(with = "HashSet<crate::schemars_ext::crypto::PublicKey>")
-        )]
         namespaces: HashSet<PublicKey>,
     },
 
@@ -54,7 +51,7 @@ pub enum Command {
     /// Update node's inventory.
     AddInventory { rid: RepoId },
 
-    /// Get the current node condiguration.
+    /// Get the current node configuration.
     Config,
 
     /// Get the node's listen addresses.
@@ -69,13 +66,7 @@ pub enum Command {
 
     /// Disconnect from a node.
     #[serde(rename_all = "camelCase")]
-    Disconnect {
-        #[cfg_attr(
-            feature = "schemars",
-            schemars(with = "crate::schemars_ext::crypto::PublicKey")
-        )]
-        nid: NodeId,
-    },
+    Disconnect { nid: NodeId },
 
     /// Look up seeds for the given repository in the routing table.
     #[serde(rename_all = "camelCase")]
@@ -91,10 +82,6 @@ pub enum Command {
         rid: RepoId,
 
         /// The namespaces for which references should be announced.
-        #[cfg_attr(
-            feature = "schemars",
-            schemars(with = "HashSet<crate::schemars_ext::crypto::PublicKey>")
-        )]
         namespaces: HashSet<PublicKey>,
     },
 
@@ -102,24 +89,15 @@ pub enum Command {
     Sessions,
 
     /// Get a specific peer session.
-    Session {
-        #[cfg_attr(
-            feature = "schemars",
-            schemars(with = "crate::schemars_ext::crypto::PublicKey")
-        )]
-        nid: NodeId,
-    },
+    Session { nid: NodeId },
 
     /// Fetch the given repository from the network.
     #[serde(rename_all = "camelCase")]
     Fetch {
         rid: RepoId,
-        #[cfg_attr(
-            feature = "schemars",
-            schemars(with = "crate::schemars_ext::crypto::PublicKey")
-        )]
         nid: NodeId,
         timeout: time::Duration,
+        signed_references_minimum_feature_level: Option<refs::FeatureLevel>,
     },
 
     /// Seed the given repository.
@@ -136,23 +114,17 @@ pub enum Command {
     /// Follow the given node.
     #[serde(rename_all = "camelCase")]
     Follow {
-        #[cfg_attr(
-            feature = "schemars",
-            schemars(with = "crate::schemars_ext::crypto::PublicKey")
-        )]
         nid: NodeId,
         alias: Option<super::Alias>,
     },
 
     /// Unfollow the given node.
     #[serde(rename_all = "camelCase")]
-    Unfollow {
-        #[cfg_attr(
-            feature = "schemars",
-            schemars(with = "crate::schemars_ext::crypto::PublicKey")
-        )]
-        nid: NodeId,
-    },
+    Unfollow { nid: NodeId },
+
+    /// Block the given node.
+    #[serde(rename_all = "camelCase")]
+    Block { nid: NodeId },
 
     /// Get the node's status.
     Status,
@@ -203,7 +175,7 @@ impl Default for ConnectOptions {
 pub enum CommandResult<T> {
     /// Response on node socket indicating that a command was carried out successfully.
     Okay(T),
-    /// Response on node socket indicating that an error occured.
+    /// Response on node socket indicating that an error occurred.
     Error {
         /// The reason for the error.
         #[serde(rename = "error")]
@@ -313,7 +285,6 @@ mod test {
             &serde_json::to_string(&CommandResult::Okay(State::Connected {
                 since: LocalTime::now(),
                 ping: Default::default(),
-                fetching: Default::default(),
                 latencies: VecDeque::default(),
                 stable: false,
             }))
@@ -329,7 +300,7 @@ mod test {
         );
         assert_matches!(
             json::from_str::<CommandResult<Seeds>>(
-                r#"[{"nid":"z6MksmpU5b1dS7oaqF2bHXhQi1DWy2hB7Mh9CuN7y1DN6QSz","addrs":[{"addr":"seed.radicle.example.com:8776","source":"peer","lastSuccess":1699983994234,"lastAttempt":1699983994000,"banned":false}],"state":{"connected":{"since":1699983994,"fetching":[]}}}]"#
+                r#"[{"nid":"z6MksmpU5b1dS7oaqF2bHXhQi1DWy2hB7Mh9CuN7y1DN6QSz","addrs":[{"addr":"seed.radicle.example.com:8776","source":"peer","lastSuccess":1699983994234,"lastAttempt":1699983994000,"banned":false}],"state":{"connected":{"since":1699983994}}}]"#
             ),
             Ok(CommandResult::Okay(_))
         );

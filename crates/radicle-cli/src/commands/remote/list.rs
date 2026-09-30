@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 
+use radicle::Profile;
 use radicle::git::Url;
 use radicle::identity::{Did, RepoId};
 use radicle::node::{Alias, AliasStore as _, NodeId};
 use radicle::storage::ReadStorage as _;
-use radicle::Profile;
 use radicle_term::{Element, Table};
 
 use crate::git;
@@ -37,7 +37,7 @@ pub struct Untracked {
     alias: Option<Alias>,
 }
 
-pub fn tracked(working: &git::Repository) -> anyhow::Result<Vec<Tracked>> {
+pub fn tracked(working: &radicle::git::raw::Repository) -> anyhow::Result<Vec<Tracked>> {
     Ok(git::rad_remotes(working)?
         .into_iter()
         .flat_map(|remote| {

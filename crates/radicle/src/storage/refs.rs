@@ -1,61 +1,49 @@
+pub mod sigrefs;
+
+#[cfg(any(test, feature = "test"))]
+pub mod arbitrary;
+
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::io;
 use std::io::{BufRead, BufReader};
-use std::marker::PhantomData;
-use std::ops::{Deref, DerefMut};
-use std::path::Path;
+use std::ops::Deref;
 use std::str::FromStr;
 
-use crypto::signature::Signer;
-use crypto::{PublicKey, Signature, Unverified, Verified};
+use crypto::PublicKey;
+use crypto::Signature;
+use radicle_core::NodeId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::git;
-use crate::git::raw::ErrorExt as _;
 use crate::git::Oid;
-use crate::node::device::Device;
-use crate::profile::env;
+use crate::git::raw::ErrorExt as _;
 use crate::storage;
-use crate::storage::{ReadRepository, RemoteId, RepoId, WriteRepository};
+use crate::storage::RemoteId;
+use crate::storage::refs::sigrefs::read::Tip;
 
 pub use crate::git::refs::storage::*;
+
+use super::HasRepoId;
 
 /// File in which the signed references are stored, in the `refs/rad/sigrefs` branch.
 pub const REFS_BLOB_PATH: &str = "refs";
 /// File in which the signature over the references is stored in the `refs/rad/sigrefs` branch.
 pub const SIGNATURE_BLOB_PATH: &str = "signature";
 
-#[derive(Debug)]
-pub enum Updated {
-    /// The computed [`Refs`] were stored as a new commit.
-    Updated { oid: Oid },
-    /// The stored [`Refs`] were the same as the computed ones, so no new commit
-    /// was created.
-    Unchanged { oid: Oid },
-}
-
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("invalid signature: {0}")]
-    InvalidSignature(#[from] crypto::Error),
-    #[error("signer error: {0}")]
-    Signer(#[from] crypto::signature::Error),
-    #[error("canonical refs: {0}")]
-    Canonical(#[from] canonical::Error),
     #[error("invalid reference")]
     InvalidRef,
-    #[error("missing identity root reference '{0}'")]
-    MissingIdentityRoot(git::fmt::RefString),
-    #[error("missing identity object '{0}'")]
-    MissingIdentity(Oid),
-    #[error("mismatched identity: local {local}, remote {remote}")]
-    MismatchedIdentity { local: RepoId, remote: RepoId },
     #[error("invalid reference: {0}")]
     Ref(#[from] git::RefError),
     #[error(transparent)]
     Git(#[from] git::raw::Error),
+    #[error(transparent)]
+    Read(#[from] sigrefs::read::error::Read),
+    #[error(transparent)]
+    Write(#[from] sigrefs::write::error::Write),
 }
 
 impl Error {
@@ -63,6 +51,7 @@ impl Error {
     pub fn is_not_found(&self) -> bool {
         match self {
             Self::Git(e) => e.is_not_found(),
+            Self::Read(sigrefs::read::error::Read::MissingSigrefs { .. }) => true,
             _ => false,
         }
     }
@@ -75,26 +64,73 @@ impl Error {
 pub struct Refs(BTreeMap<git::fmt::RefString, Oid>);
 
 impl Refs {
-    /// Verify the given signature on these refs, and return [`SignedRefs`] on success.
-    pub fn verified<R: ReadRepository>(
-        self,
-        signer: PublicKey,
-        signature: Signature,
-        repo: &R,
-    ) -> Result<SignedRefs<Verified>, Error> {
-        SignedRefs::new(self, signer, signature).verified(repo)
+    pub fn new() -> Self {
+        Self(BTreeMap::new())
     }
 
-    /// Sign these refs with the given signer and return [`SignedRefs`].
-    pub fn signed<G>(self, device: &Device<G>) -> Result<SignedRefs<Unverified>, Error>
+    /// Save the signed refs to disk.
+    /// This creates a new commit on the signed refs branch, and updates the branch pointer.
+    pub fn save<Repo>(
+        self,
+        namespace: NodeId,
+        committer: sigrefs::git::Committer,
+        repo: &Repo,
+        signer: &impl crypto::Signer,
+    ) -> Result<SignedRefs, Error>
     where
-        G: Signer<crypto::Signature>,
+        Repo: sigrefs::git::object::Reader + sigrefs::git::object::Writer,
+        Repo: sigrefs::git::reference::Reader + sigrefs::git::reference::Writer,
+        Repo: HasRepoId,
     {
-        let refs = self;
-        let msg = refs.canonical();
-        let signature = device.try_sign(&msg)?;
+        self.save_with(namespace, committer, repo, signer, false)
+    }
 
-        Ok(SignedRefs::new(refs, *device.public_key(), signature))
+    /// Save the signed refs to disk, even if the refs are unchanged.
+    pub fn force_save<Repo>(
+        self,
+        namespace: NodeId,
+        committer: sigrefs::git::Committer,
+        repo: &Repo,
+        signer: &impl crypto::Signer,
+    ) -> Result<SignedRefs, Error>
+    where
+        Repo: sigrefs::git::object::Reader + sigrefs::git::object::Writer,
+        Repo: sigrefs::git::reference::Reader + sigrefs::git::reference::Writer,
+        Repo: HasRepoId,
+    {
+        self.save_with(namespace, committer, repo, signer, true)
+    }
+
+    fn save_with<Repo>(
+        self,
+        namespace: NodeId,
+        committer: sigrefs::git::Committer,
+        repo: &Repo,
+        signer: &impl crypto::Signer,
+        force: bool,
+    ) -> Result<SignedRefs, Error>
+    where
+        Repo: sigrefs::git::object::Reader + sigrefs::git::object::Writer,
+        Repo: sigrefs::git::reference::Reader + sigrefs::git::reference::Writer,
+        Repo: HasRepoId,
+    {
+        let msg = "Update signed refs\n";
+        let reflog = format!("Save {} signed references", self.len());
+        let writer =
+            sigrefs::write::SignedRefsWriter::new(self, repo.rid(), namespace, repo, signer);
+        let update = if force {
+            writer.force_write(committer, msg.to_string(), reflog)?
+        } else {
+            writer.write(committer, msg.to_string(), reflog)?
+        };
+        match update {
+            sigrefs::write::Update::Changed { entry, level } => {
+                Ok(entry.into_sigrefs_at(namespace, level))
+            }
+            sigrefs::write::Update::Unchanged { verified } => {
+                Ok(verified.into_sigrefs_at(namespace))
+            }
+        }
     }
 
     /// Get a particular ref.
@@ -109,7 +145,7 @@ impl Refs {
     }
 
     /// Create refs from a canonical representation.
-    pub fn from_canonical(bytes: &[u8]) -> Result<Self, canonical::Error> {
+    fn from_canonical(bytes: &[u8]) -> Result<Self, canonical::Error> {
         let reader = BufReader::new(bytes);
         let mut refs = BTreeMap::new();
 
@@ -122,24 +158,81 @@ impl Refs {
             let name = git::fmt::RefString::try_from(name)?;
             let oid = Oid::from_str(oid).map_err(|_| canonical::Error::InvalidFormat)?;
 
-            if oid.is_zero() {
+            if oid.is_zero() || name.as_refstr() == SIGREFS_BRANCH.as_ref() {
                 continue;
             }
+
             refs.insert(name, oid);
         }
         Ok(Self(refs))
     }
 
-    pub fn canonical(&self) -> Vec<u8> {
+    fn canonical(&self) -> Vec<u8> {
         let mut buf = String::new();
 
-        for (name, oid) in self.iter() {
+        for (name, oid) in self.0.iter() {
+            debug_assert!(!oid.is_zero());
+            debug_assert_ne!(name, &SIGREFS_BRANCH.to_ref_string());
+
             buf.push_str(&oid.to_string());
             buf.push(' ');
             buf.push_str(name);
             buf.push('\n');
         }
+
         buf.into_bytes()
+    }
+
+    pub fn insert(&mut self, refname: git::fmt::RefString, target: Oid) -> Option<Oid> {
+        if target.is_zero() {
+            self.0.remove(&refname)
+        } else {
+            self.0.insert(refname, target)
+        }
+    }
+
+    pub(crate) fn keys<'a>(
+        &'a self,
+    ) -> std::collections::btree_map::Keys<'a, git::fmt::RefString, Oid> {
+        self.0.keys()
+    }
+
+    #[cfg(any(test, feature = "test"))]
+    pub(crate) fn values<'a>(
+        &'a self,
+    ) -> std::collections::btree_map::Values<'a, git::fmt::RefString, Oid> {
+        self.0.values()
+    }
+
+    pub fn iter<'a>(&'a self) -> std::collections::btree_map::Iter<'a, git::fmt::RefString, Oid> {
+        self.0.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(super) fn remove_sigrefs(&mut self) -> Option<Oid> {
+        self.0.remove(&SIGREFS_BRANCH.to_ref_string())
+    }
+
+    /// Add a reference with name [`crate::git::refs::storage::SIGREFS_PARENT`]
+    /// and given target OID to this set of refs.
+    #[inline]
+    fn add_parent(&mut self, commit: Oid) -> Option<Oid> {
+        self.0.insert(SIGREFS_PARENT.to_ref_string(), commit)
+    }
+
+    /// Removes reference with name [`crate::git::refs::storage::SIGREFS_PARENT`]
+    /// from this set of refs, if it exists.
+    /// Absence of a reference with such name is ignored.
+    #[inline]
+    fn remove_parent(&mut self) -> Option<Oid> {
+        self.0.remove(&SIGREFS_PARENT.to_ref_string())
     }
 }
 
@@ -158,244 +251,106 @@ impl From<Refs> for BTreeMap<git::fmt::RefString, Oid> {
     }
 }
 
-impl<V> From<SignedRefs<V>> for Refs {
-    fn from(signed: SignedRefs<V>) -> Self {
-        signed.refs
+impl<I> From<I> for Refs
+where
+    I: Iterator<Item = (git::fmt::RefString, Oid)>,
+{
+    fn from(value: I) -> Self {
+        let mut refs = Self::new();
+        for (refname, target) in value {
+            refs.insert(refname, target);
+        }
+        refs
     }
 }
 
-impl From<BTreeMap<git::fmt::RefString, Oid>> for Refs {
-    fn from(refs: BTreeMap<git::fmt::RefString, Oid>) -> Self {
-        Self(refs)
-    }
-}
-
-impl Deref for Refs {
-    type Target = BTreeMap<git::fmt::RefString, Oid>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for Refs {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-/// Combination of [`Refs`] and a [`Signature`]. The signature is a cryptographic
-/// signature over the refs. This allows us to easily verify if a set of refs
-/// came from a particular key.
+/// The Signed References feature has evolved over time.
+/// This enum captures the corresponding "feature level".
 ///
-/// The type parameter keeps track of whether the signature was [`Verified`] or
-/// [`Unverified`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct SignedRefs<V> {
-    /// The signed refs.
-    pub refs: Refs,
-    /// The signature of the signer over the refs.
-    #[serde(skip)]
-    pub signature: Signature,
-    /// This is the remote under which these refs exist, and the public key of the signer.
-    pub id: PublicKey,
+/// Feature levels are monotonic, in the sense that a greater feature level
+/// encompasses all the features of smaller ones.
+#[derive(
+    Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Default, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub enum FeatureLevel {
+    /// The lowest feature level, with least security. It is vulnerable to
+    /// graft attacks and replay attacks.
+    #[default]
+    None,
 
-    #[serde(skip)]
-    _verified: PhantomData<V>,
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(description = "\
+        An intermediate feature level, which protects against graft attacks \
+        but is vulnerable to replay attacks. \
+        Introduced in Radicle 1.1.0, in commit \
+        `989edacd564fa658358f5ccfd08c243c5ebd8cda`.\
+    ")
+    )]
+    /// Requires [`IDENTITY_ROOT`].
+    Root,
+
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(description = "\
+        The highest feature level known, which protects against graft attacks \
+        and replay attacks. \
+        Introduced in Radicle 1.7.0, in commit \
+        `d3bc868e84c334f113806df1737f52cc57c5453d`.\
+    ")
+    )]
+    /// Requires [`SIGREFS_PARENT`].
+    Parent,
 }
 
-impl SignedRefs<Unverified> {
-    pub fn new(refs: Refs, author: PublicKey, signature: Signature) -> Self {
-        Self {
-            refs,
-            signature,
-            id: author,
-            _verified: PhantomData,
-        }
-    }
-
-    pub fn verified<R: ReadRepository>(self, repo: &R) -> Result<SignedRefs<Verified>, Error> {
-        match self.verify(repo) {
-            Ok(()) => Ok(SignedRefs {
-                refs: self.refs,
-                signature: self.signature,
-                id: self.id,
-                _verified: PhantomData,
-            }),
-            Err(e) => Err(e),
-        }
-    }
-
-    pub fn verify<R: ReadRepository>(&self, repo: &R) -> Result<(), Error> {
-        let canonical = self.refs.canonical();
-        let local = repo.id();
-
-        // Verify signature.
-        if let Err(e) = self.id.verify(canonical, &self.signature) {
-            return Err(e.into());
-        }
-        // If the identity root was signed, verify it points to the right place.
-        if let Some(id_root) = self.refs.get(&IDENTITY_ROOT) {
-            // Get the identity at the given oid.
-            let Ok(doc) = repo.identity_doc_at(id_root) else {
-                return Err(Error::MissingIdentity(id_root));
-            };
-            let remote = RepoId::from(doc.blob);
-
-            // Make sure the signed identity points to the local repo identity.
-            if remote != local {
-                return Err(Error::MismatchedIdentity { local, remote });
-            }
-        } else {
-            // TODO(cloudhead): Make this into a hard error (`Error::MissingIdentityRoot`) for
-            // repos that have migrated to the new identity document schema.
-            log::debug!(
-                target: "storage",
-                "Signed ref verification for {} in {local}: {} is not provided",
-                self.id, *IDENTITY_ROOT
-            );
-        }
-        Ok(())
-    }
+impl FeatureLevel {
+    pub const LATEST: Self = FeatureLevel::Parent;
 }
 
-impl SignedRefs<Verified> {
-    pub fn load<S>(remote: RemoteId, repo: &S) -> Result<Self, Error>
-    where
-        S: ReadRepository,
-    {
-        let oid = repo.reference_oid(&remote, &SIGREFS_BRANCH)?;
-
-        SignedRefs::load_at(oid, remote, repo)
-    }
-
-    pub fn load_at<S>(oid: Oid, remote: RemoteId, repo: &S) -> Result<Self, Error>
-    where
-        S: storage::ReadRepository,
-    {
-        let refs = repo.blob_at(oid, Path::new(REFS_BLOB_PATH))?;
-        let signature = repo.blob_at(oid, Path::new(SIGNATURE_BLOB_PATH))?;
-        let signature: crypto::Signature = signature.content().try_into()?;
-        let refs = Refs::from_canonical(refs.content())?;
-
-        SignedRefs::new(refs, remote, signature).verified(repo)
-    }
-
-    /// Save the signed refs to disk.
-    /// This creates a new commit on the signed refs branch, and updates the branch pointer.
-    pub fn save<S: WriteRepository>(&self, repo: &S) -> Result<Updated, Error> {
-        let sigref = &SIGREFS_BRANCH;
-        let remote = &self.id;
-        let raw = repo.raw();
-
-        // N.b. if the signatures match then there are no updates
-        let parent = match SignedRefsAt::load(*remote, repo)? {
-            Some(SignedRefsAt { sigrefs, at }) if sigrefs.signature == self.signature => {
-                return Ok(Updated::Unchanged { oid: at });
-            }
-            Some(SignedRefsAt { at, .. }) => Some(raw.find_commit(at.into())?),
-            None => None,
+impl std::fmt::Display for FeatureLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match &self {
+            Self::None => "none",
+            Self::Root => "root",
+            Self::Parent => "parent",
         };
-
-        let tree = {
-            let refs_blob_oid = raw.blob(&self.canonical())?;
-            let sig_blob_oid = raw.blob(self.signature.as_ref())?;
-
-            let mut builder = raw.treebuilder(None)?;
-            builder.insert(REFS_BLOB_PATH, refs_blob_oid, 0o100_644)?;
-            builder.insert(SIGNATURE_BLOB_PATH, sig_blob_oid, 0o100_644)?;
-
-            let oid = builder.write()?;
-
-            raw.find_tree(oid)
-        }?;
-
-        let sigref = sigref.with_namespace(remote.into());
-        let author = if let Ok(s) = env::var(env::GIT_COMMITTER_DATE) {
-            let Ok(timestamp) = s.trim().parse::<i64>() else {
-                panic!(
-                    "Invalid timestamp value {s:?} for `{}`",
-                    env::GIT_COMMITTER_DATE
-                );
-            };
-            let time = git::raw::Time::new(timestamp, 0);
-            git::raw::Signature::new("radicle", remote.to_string().as_str(), &time)?
-        } else {
-            raw.signature()?
-        };
-
-        let commit = raw.commit(
-            Some(&sigref),
-            &author,
-            &author,
-            "Update signed refs\n",
-            &tree,
-            &parent.iter().collect::<Vec<&git::raw::Commit>>(),
-        );
-
-        match commit {
-            Ok(oid) => Ok(Updated::Updated { oid: oid.into() }),
-            Err(e) => match (e.class(), e.code()) {
-                (git::raw::ErrorClass::Object, git::raw::ErrorCode::Modified) => {
-                    log::warn!("Concurrent modification of refs: {e:?}");
-
-                    Err(Error::Git(e))
-                }
-                _ => Err(e.into()),
-            },
-        }
-    }
-
-    pub fn unverified(self) -> SignedRefs<Unverified> {
-        SignedRefs {
-            refs: self.refs,
-            signature: self.signature,
-            id: self.id,
-            _verified: PhantomData,
-        }
-    }
-}
-
-impl<V> Deref for SignedRefs<V> {
-    type Target = Refs;
-
-    fn deref(&self) -> &Self::Target {
-        &self.refs
+        f.write_str(s)
     }
 }
 
 /// The content-addressable information required to load a remote's
 /// `rad/sigrefs`.
 ///
-/// Use [`RefsAt::load`] to produce a [`SignedRefsAt`].
+/// Use [`RefsAt::remote`] and [`RefsAt::at`] with [`SignedRefs::load_at`] to
+/// attempt loading the expected signed references.
 ///
 /// `RefsAt` can also be used for communicating announcements of updates
 /// references to other nodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct RefsAt {
     /// The remote namespace of the `rad/sigrefs`.
-    #[cfg_attr(
-        feature = "schemars",
-        schemars(with = "crate::schemars_ext::crypto::PublicKey")
-    )]
     pub remote: RemoteId,
     /// The commit SHA that `rad/sigrefs` points to.
     pub at: Oid,
 }
 
 impl RefsAt {
-    pub fn new<S: ReadRepository>(
-        repo: &S,
-        remote: RemoteId,
-    ) -> Result<Self, crate::git::raw::Error> {
-        let at = repo.reference_oid(&remote, &storage::refs::SIGREFS_BRANCH)?;
+    pub fn new<R>(repo: &R, remote: RemoteId) -> Result<Self, sigrefs::read::error::Read>
+    where
+        R: sigrefs::git::reference::Reader,
+    {
+        let at = repo
+            .find_reference(
+                &storage::refs::SIGREFS_BRANCH.with_namespace(git::fmt::Component::from(&remote)),
+            )
+            .map_err(sigrefs::read::error::Read::FindReference)?
+            .ok_or_else(|| sigrefs::read::error::Read::MissingSigrefs { namespace: remote })?;
         Ok(RefsAt { remote, at })
-    }
-
-    pub fn load<S: ReadRepository>(&self, repo: &S) -> Result<SignedRefsAt, Error> {
-        SignedRefsAt::load_at(self.at, self.remote, repo)
     }
 
     pub fn path(&self) -> &git::fmt::Qualified<'_> {
@@ -411,49 +366,111 @@ impl std::fmt::Display for RefsAt {
 
 /// Verified [`SignedRefs`] that keeps track of their content address
 /// [`Oid`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SignedRefsAt {
-    pub sigrefs: SignedRefs<Verified>,
+///
+/// The signature is a cryptographic signature over the refs.
+/// This allows us to easily verify if a set of refs
+/// came from a particular key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SignedRefs {
+    /// The signed refs.
+    refs: Refs,
+    /// The signature of the signer over the refs.
+    #[serde(skip)]
+    signature: Signature,
+    /// This is the remote under which these refs exist, and the public key of the signer.
+    id: PublicKey,
+
+    #[serde(skip)]
+    level: FeatureLevel,
+
+    /// The [`Oid`] of the parent commit of the commit in which.
+    #[serde(skip)]
+    parent: Option<Oid>,
+
     pub at: Oid,
 }
 
-impl SignedRefsAt {
+impl SignedRefs {
+    /// Returns the [`NodeId`] of the [`SignedRefs`].
+    pub fn id(&self) -> NodeId {
+        self.id
+    }
+
+    /// Returns the [`Refs`] of the [`SignedRefs`].
+    pub fn refs(&self) -> &Refs {
+        &self.refs
+    }
+
+    /// Returns the [`FeatureLevel`] computed for the signed references.
+    pub fn feature_level(&self) -> FeatureLevel {
+        self.level
+    }
+
+    /// The [`Oid`] of the parent commit, or [`None`] if these signed references
+    /// were found at a root commit.
+    pub fn parent(&self) -> Option<&Oid> {
+        self.parent.as_ref()
+    }
+
     /// Load the [`SignedRefs`] found under `remote`'s [`SIGREFS_BRANCH`].
     ///
     /// This will return `None` if the branch was not found, all other
     /// errors are returned.
-    pub fn load<S>(remote: RemoteId, repo: &S) -> Result<Option<Self>, Error>
+    pub fn load<R>(remote: RemoteId, repo: &R) -> Result<Option<Self>, sigrefs::read::error::Read>
     where
-        S: ReadRepository,
+        R: HasRepoId,
+        R: sigrefs::git::object::Reader + sigrefs::git::reference::Reader,
     {
-        let at = match RefsAt::new(repo, remote) {
-            Ok(RefsAt { at, .. }) => at,
-            Err(e) if e.is_not_found() => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-        Self::load_at(at, remote, repo).map(Some)
+        Self::load_internal(remote, repo, sigrefs::read::Tip::Reference(remote))
     }
 
-    pub fn load_at<S>(at: Oid, remote: RemoteId, repo: &S) -> Result<Self, Error>
+    pub fn load_at<R>(
+        oid: Oid,
+        remote: RemoteId,
+        repo: &R,
+    ) -> Result<Option<Self>, sigrefs::read::error::Read>
     where
-        S: storage::ReadRepository,
+        R: HasRepoId,
+        R: sigrefs::git::object::Reader + sigrefs::git::reference::Reader,
     {
-        Ok(Self {
-            sigrefs: SignedRefs::load_at(at, remote, repo)?,
-            at,
-        })
+        Self::load_internal(remote, repo, sigrefs::read::Tip::Commit(oid))
+    }
+
+    fn load_internal<R>(
+        remote: RemoteId,
+        repo: &R,
+        tip: Tip,
+    ) -> Result<Option<Self>, sigrefs::read::error::Read>
+    where
+        R: HasRepoId,
+        R: sigrefs::git::object::Reader + sigrefs::git::reference::Reader,
+    {
+        let root = repo.rid();
+
+        let verifier = crypto::VerifyingKey::try_from(&remote).map_err(|source| {
+            sigrefs::read::error::Read::Verify(sigrefs::read::error::Verify::Signature(source))
+        })?;
+
+        match sigrefs::SignedRefsReader::new(root, tip, repo, &verifier).read() {
+            Ok(latest) => Ok(Some(latest.into_sigrefs_at(remote))),
+            Err(sigrefs::read::error::Read::MissingSigrefs { namespace }) => {
+                debug_assert_eq!(namespace, remote);
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&git::fmt::RefString, &Oid)> {
-        self.sigrefs.refs.iter()
+        self.refs.iter()
     }
 }
 
-impl Deref for SignedRefsAt {
-    type Target = SignedRefs<Verified>;
+impl Deref for SignedRefs {
+    type Target = Refs;
 
     fn deref(&self) -> &Self::Target {
-        &self.sigrefs
+        &self.refs
     }
 }
 
@@ -477,11 +494,14 @@ pub mod canonical {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use qcheck_macros::quickcheck;
-    use storage::{git::transport, RemoteRepository, SignRepository, WriteStorage};
+    use storage::{RemoteRepository, SignRepository, WriteStorage, git::transport};
 
     use super::*;
     use crate::assert_matches;
-    use crate::{cob::identity::Identity, cob::Title, rad, test::fixtures, Storage};
+
+    use crate::crypto::{Signer as _, SigningKey};
+    use crate::storage::WriteRepository as _;
+    use crate::{Storage, cob::Title, cob::identity::Identity, rad, test::fixtures};
 
     #[quickcheck]
     fn prop_canonical_roundtrip(refs: Refs) {
@@ -499,10 +519,10 @@ mod tests {
     // to `london`. We expect that this does not cause the canonical head of the `london` repo
     // to change, despite Bob being a delegate of both repos, because the refs were signed for the
     // `paris` repo. We also don't expected the signed refs to validate without error.
-    fn test_rid_verification() {
+    fn rid_verification() {
         let tmp = tempfile::tempdir().unwrap();
-        let alice = Device::mock();
-        let bob = Device::mock();
+        let alice = SigningKey::mock(9);
+        let bob = SigningKey::mock(10);
         let storage = &Storage::open(tmp.path().join("storage"), fixtures::user()).unwrap();
 
         transport::local::register(storage.clone());
@@ -554,19 +574,19 @@ mod tests {
                 })
                 .unwrap();
 
-            let mut paris_ident = Identity::load_mut(&paris).unwrap();
-            let mut london_ident = Identity::load_mut(&london).unwrap();
+            let mut paris_ident = Identity::load_mut(&paris, &alice).unwrap();
+            let mut london_ident = Identity::load_mut(&london, &alice).unwrap();
 
             paris_ident
-                .update(Title::new("Add Bob").unwrap(), "", &paris_doc, &alice)
+                .update(Title::new("Add Bob").unwrap(), "", &paris_doc)
                 .unwrap();
             london_ident
-                .update(Title::new("Add Bob").unwrap(), "", &london_doc, &alice)
+                .update(Title::new("Add Bob").unwrap(), "", &london_doc)
                 .unwrap();
         }
 
         // Now Bob checks out a copy of the `paris` repository and pushes a commit to the
-        // default branch (master). We store the OID of that commti in `bob_head`, as this
+        // default branch (master). We store the OID of that commit in `bob_head`, as this
         // is the commit we will try to get the `london` repo to point to.
         let (bob_paris_sigrefs, bob_head) = {
             let bob_working = rad::checkout(
@@ -609,7 +629,7 @@ mod tests {
 
         {
             // Sanity check: make sure the default branches don't already match between Alice and Bob.
-            let alice_paris_sigrefs = SignedRefsAt::load(*alice.public_key(), &paris)
+            let alice_paris_sigrefs = SignedRefs::load(*alice.public_key(), &paris)
                 .unwrap()
                 .unwrap();
             assert_ne!(
@@ -643,13 +663,20 @@ mod tests {
         // only modifies his own namespace. Note that anyone (eg. Eve) could create a reference
         // under her copy of Bob's namespace, and this would only be rejected during signed ref
         // validation.
-        let result = bob_paris_sigrefs.save(&london).unwrap();
-        assert_matches!(result, Updated::Updated { .. });
+        {
+            let name = &SIGREFS_BRANCH.with_namespace(git::fmt::Component::from(bob.public_key()));
+            let id = paris.backend.refname_to_id(name.as_str()).unwrap();
+            london
+                .backend
+                .reference(name.as_str(), id, true, "Graft attack")
+                .unwrap();
+        }
 
         london
             .raw()
             .reference(
-                git::refs::storage::branch_of(bob.public_key(), &git::fmt::refname!("master"))
+                git::fmt::Qualified::from(git::fmt::lit::refs_heads(&git::fmt::refname!("master")))
+                    .with_namespace(bob.public_key().into())
                     .as_str(),
                 bob_head,
                 false,
@@ -661,11 +688,13 @@ mod tests {
         // The graft is not allowed.
         assert_matches!(
             london.remote(bob.public_key()),
-            Err(Error::MismatchedIdentity {
-                local,
-                remote,
-            })
-            if local == london_rid && remote == paris_rid
+            Err(Error::Read(sigrefs::read::error::Read::Verify(sigrefs::read::error::Verify::MismatchedIdentity {
+                expected,
+                found,
+                sigrefs_commit: _,
+                identity_commit: _,
+            })))
+            if expected == london_rid && found == paris_rid
         );
     }
 }

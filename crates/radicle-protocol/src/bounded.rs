@@ -126,7 +126,7 @@ impl<T, const N: usize> BoundedVec<T, N> {
     /// vec.push(3).expect("within limit");
     /// assert_eq!(vec, vec![1, 2, 3].try_into().unwrap());
     ///
-    /// // ...but this will exceed its limit, returning an error.
+    /// // …but this will exceed its limit, returning an error.
     /// vec.push(4).expect_err("limit exceeded");
     /// assert_eq!(vec.len(), 3);
     /// ```
@@ -177,6 +177,15 @@ impl<T: Clone, const N: usize> BoundedVec<T, N> {
         self.v.extend_from_slice(slice);
 
         Ok(())
+    }
+}
+
+impl<T, const N: usize> IntoIterator for BoundedVec<T, N> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.v.into_iter()
     }
 }
 
@@ -259,8 +268,10 @@ unsafe impl<const N: usize> bytes::BufMut for BoundedVec<u8, N> {
 
         debug_assert!(len <= N);
 
-        // Addition will not overflow since the sum is at most the capacity.
-        self.v.set_len(len);
+        // SAFETY: See bounds check above.
+        unsafe {
+            self.v.set_len(len);
+        }
     }
 
     fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {

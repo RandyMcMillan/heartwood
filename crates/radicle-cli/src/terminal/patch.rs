@@ -9,18 +9,18 @@ use std::io::IsTerminal as _;
 use thiserror::Error;
 
 use radicle::cob;
-use radicle::cob::patch;
 use radicle::cob::Title;
+use radicle::cob::patch;
 use radicle::git;
 use radicle::patch::{Patch, PatchId};
 use radicle::prelude::Profile;
 use radicle::storage::git::Repository;
-use radicle::storage::WriteRepository as _;
+use radicle::storage::{ReadRepository, WriteRepository as _};
 
 use crate::terminal as term;
 use crate::terminal::Element;
 
-pub use common::*;
+pub(crate) use common::*;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -30,8 +30,6 @@ pub enum Error {
     Git(#[from] git::raw::Error),
     #[error("i/o error: {0}")]
     Io(#[from] io::Error),
-    #[error("invalid utf-8 string")]
-    InvalidUtf8,
 }
 
 /// The user supplied `Patch` description.
@@ -140,6 +138,7 @@ blank is also okay.
 
 /// Combine the title and description fields to display to the user.
 #[inline]
+#[must_use]
 pub fn message(title: &str, description: &str) -> String {
     format!("{title}\n\n{description}").trim().to_string()
 }
@@ -151,7 +150,7 @@ fn message_from_commits(name: &str, commits: Vec<git::raw::Commit>) -> Result<St
     let Some(commit) = commits.next() else {
         return Ok(String::default());
     };
-    let commit_msg = commit.message().ok_or(Error::InvalidUtf8)?.to_string();
+    let commit_msg = commit.message()?.to_string();
 
     if count == 1 {
         return Ok(commit_msg);
@@ -171,7 +170,7 @@ fn message_from_commits(name: &str, commits: Vec<git::raw::Commit>) -> Result<St
     writeln!(&mut msg)?;
 
     for (i, commit) in commits.enumerate() {
-        let commit_msg = commit.message().ok_or(Error::InvalidUtf8)?.trim_end();
+        let commit_msg = commit.message()?.trim_end();
         let commit_num = i + 2;
 
         writeln!(&mut msg, "<!--")?;
@@ -372,6 +371,18 @@ pub fn show(
     let author = term::format::Author::new(author.id(), profile, verbose);
     let labels = patch.labels().map(|l| l.to_string()).collect::<Vec<_>>();
 
+    let doc = stored.identity_doc()?;
+    let target = patch.merge_target_branch(&doc)?;
+    let target_branch = if verbose {
+        target.to_string()
+    } else {
+        target
+            .as_str()
+            .strip_prefix("refs/heads/")
+            .unwrap_or(target.as_str())
+            .to_string()
+    };
+
     let mut attrs = term::Table::<2, term::Line>::new(term::TableOptions {
         spacing: 2,
         ..term::TableOptions::default()
@@ -401,6 +412,10 @@ pub fn show(
     attrs.push([
         term::format::tertiary("Base".to_owned()).into(),
         term::format::secondary(revision.base().to_string()).into(),
+    ]);
+    attrs.push([
+        term::format::tertiary("Target".to_owned()).into(),
+        term::format::secondary(target_branch).into(),
     ]);
     if !branches.is_empty() {
         attrs.push([
@@ -471,7 +486,7 @@ fn patch_commit_lines(
                 term::format::oid(commit.id()).into(),
             )),
             term::label(term::format::default(
-                commit.summary().unwrap_or_default().to_owned(),
+                commit.summary()?.unwrap_or_default().to_owned(),
             )),
         ]));
     }
@@ -508,7 +523,7 @@ mod test {
     }
 
     #[test]
-    fn test_create_display_message() {
+    fn create_display_message() {
         let tmpdir = tempfile::tempdir().unwrap();
         let (repo, commit_0) = fixtures::repository(&tmpdir);
         let commit_1 = commit(
@@ -524,7 +539,7 @@ mod test {
             "Commit 2\n\nDescription\n",
         );
 
-        let res = create_display_message(&repo, &commit_0, &commit_0).unwrap();
+        let res = super::create_display_message(&repo, &commit_0, &commit_0).unwrap();
         assert_eq!(
             "\
             <!--\n\
@@ -540,7 +555,7 @@ mod test {
             res
         );
 
-        let res = create_display_message(&repo, &commit_0, &commit_1).unwrap();
+        let res = super::create_display_message(&repo, &commit_0, &commit_1).unwrap();
         assert_eq!(
             "\
             Commit 1\n\
@@ -560,7 +575,7 @@ mod test {
             res
         );
 
-        let res = create_display_message(&repo, &commit_0, &commit_2).unwrap();
+        let res = super::create_display_message(&repo, &commit_0, &commit_2).unwrap();
         assert_eq!(
             "\
             <!--\n\
@@ -595,8 +610,8 @@ mod test {
     }
 
     #[test]
-    fn test_edit_display_message() {
-        let res = edit_display_message("title", "The patch description.");
+    fn edit_display_message() {
+        let res = super::edit_display_message("title", "The patch description.");
         assert_eq!(
             "\
             title\n\
@@ -618,7 +633,7 @@ mod test {
     }
 
     #[test]
-    fn test_update_display_message() {
+    fn update_display_message() {
         let tmpdir = tempfile::tempdir().unwrap();
         let (repo, commit_0) = fixtures::repository(&tmpdir);
 
@@ -631,7 +646,7 @@ mod test {
             "commit squashed",
         );
 
-        let res = update_display_message(&repo, &commit_1, &commit_1).unwrap();
+        let res = super::update_display_message(&repo, &commit_1, &commit_1).unwrap();
         assert_eq!(
             "\
             <!--\n\
@@ -642,7 +657,7 @@ mod test {
             res
         );
 
-        let res = update_display_message(&repo, &commit_1, &commit_2).unwrap();
+        let res = super::update_display_message(&repo, &commit_1, &commit_2).unwrap();
         assert_eq!(
             "\
             commit 2\n\
@@ -655,7 +670,7 @@ mod test {
             res
         );
 
-        let res = update_display_message(&repo, &commit_1, &commit_squashed).unwrap();
+        let res = super::update_display_message(&repo, &commit_1, &commit_squashed).unwrap();
         assert_eq!(
             "\
             <!--\n\

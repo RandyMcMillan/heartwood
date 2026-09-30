@@ -4,14 +4,11 @@ mod canonical;
 mod error;
 
 use std::collections::HashMap;
-use std::io::IsTerminal;
 use std::process::ExitStatus;
 use std::str::FromStr;
 use std::{assert_eq, io};
 
-use radicle::identity::crefs::GetCanonicalRefs as _;
-use radicle::identity::doc::CanonicalRefsError;
-use radicle::node::device::Device;
+use radicle::cob::store::access::WriteAs;
 use thiserror::Error;
 
 use radicle::cob;
@@ -19,27 +16,34 @@ use radicle::cob::object::ParseObjectId;
 use radicle::cob::patch;
 use radicle::cob::patch::cache::Patches as _;
 use radicle::crypto;
+use radicle::crypto::Signer as _;
 use radicle::explorer::ExplorerResource;
-use radicle::identity::{CanonicalRefs, Did};
+use radicle::identity::Did;
 use radicle::node;
-use radicle::node::{Handle, NodeId};
+use radicle::node::NodeId;
 use radicle::storage;
 use radicle::storage::git::transport::local::Url;
 use radicle::storage::{ReadRepository, SignRepository as _, WriteRepository};
-use radicle::Profile;
+use radicle::{Profile, identity};
 use radicle::{git, rad};
 use radicle_cli as cli;
-use radicle_cli::terminal as term;
+use radicle_term as term;
 
-use crate::{hint, read_line, Options, Verbosity};
+use crate::service::GitService;
+use crate::service::NodeSession;
+use crate::{Options, Verbosity, hint, warn};
+
+const PATCHES_FOR_PREFIX: &str = "refs/for/";
 
 #[derive(Debug, Error)]
-pub enum Error {
+pub(super) enum Error {
     /// Public key doesn't match the remote namespace we're pushing to.
     #[error("cannot push to remote namespace owned by {0}")]
     KeyMismatch(Did),
     /// No public key is given
-    #[error("no public key given as a remote namespace, perhaps you are attempting to push to restricted refs")]
+    #[error(
+        "no public key given as a remote namespace, perhaps you are attempting to push to restricted refs"
+    )]
     NoKey,
     /// User tried to delete the canonical branch.
     #[error("refusing to delete default branch ref '{0}'")]
@@ -50,15 +54,12 @@ pub enum Error {
     /// Identity payload error.
     #[error("payload: {0}")]
     Payload(#[from] radicle::identity::doc::PayloadError),
-    /// Invalid command received.
-    #[error("invalid command `{0}`")]
-    InvalidCommand(String),
+    /// Protocol error.
+    #[error("protocol error: {0}")]
+    Protocol(#[from] crate::protocol::Error),
     /// I/O error.
     #[error("i/o error: {0}")]
     Io(#[from] io::Error),
-    /// A command exited with an error code.
-    #[error("command '{0}' failed with status {1}")]
-    CommandFailed(String, i32),
     /// Invalid reference name.
     #[error("invalid ref: {0}")]
     InvalidRef(#[from] radicle::git::fmt::Error),
@@ -85,7 +86,7 @@ pub enum Error {
     PatchCache(#[from] patch::cache::Error),
     /// Patch edit message error.
     #[error(transparent)]
-    PatchEdit(#[from] term::patch::Error),
+    PatchEdit(#[from] cli::terminal::patch::Error),
     /// Policy config error.
     #[error("node policy: {0}")]
     Policy(#[from] node::policy::config::Error),
@@ -98,9 +99,6 @@ pub enum Error {
     /// Patch is empty.
     #[error("patch commits are already included in the base branch")]
     EmptyPatch,
-    /// Missing canonical head.
-    #[error("the canonical head is missing from your working copy; please pull before pushing")]
-    MissingCanonicalHead(git::Oid),
     /// COB store error.
     #[error(transparent)]
     Cob(#[from] radicle::cob::store::Error),
@@ -120,14 +118,29 @@ pub enum Error {
     UnknownObjectType { oid: git::Oid },
     #[error(transparent)]
     FindObjects(#[from] git::canonical::error::FindObjectsError),
+    /// Conflicting merge targets.
+    #[error("conflicting merge targets: push option '{0}' and magic ref '{1}' specified")]
+    ConflictingTargets(cob::patch::TargetBranch, cob::patch::TargetBranch),
+    /// Default branch error.
+    #[error(transparent)]
+    DefaultBranch(#[from] radicle::identity::doc::DefaultBranchError),
 
     /// Error sending pack from the working copy to storage.
-    #[error("`git send-pack` failed with exit status {status}, stderr and stdout follow:\n{stderr}\n{stdout}")]
+    #[error(
+        "`git send-pack` failed with exit status {status}, stderr and stdout follow:\n{stderr}\n{stdout}"
+    )]
     SendPackFailed {
         status: ExitStatus,
         stderr: String,
         stdout: String,
     },
+
+    /// Received an unexpected command after the first `push` command.
+    #[error("unexpected command after first `push`: {0:?}")]
+    UnexpectedCommand(crate::protocol::Command),
+
+    #[error(transparent)]
+    CommandError(#[from] CommandError),
 }
 
 /// Push command.
@@ -139,7 +152,7 @@ enum Command {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum CommandError {
+pub(super) enum CommandError {
     #[error("expected refspec of the form `[<src>]:<dst>`, got {rev}")]
     Empty { rev: String },
     #[error("failed to parse destination reference ({rev}): {err}")]
@@ -206,7 +219,9 @@ impl Command {
 }
 
 enum PushAction {
-    OpenPatch,
+    OpenPatch {
+        target: Option<cob::patch::TargetBranch>,
+    },
     UpdatePatch {
         dst: git::fmt::Qualified<'static>,
         patch: patch::PatchId,
@@ -219,7 +234,17 @@ enum PushAction {
 impl PushAction {
     fn new(dst: &git::fmt::RefString) -> Result<Self, error::PushAction> {
         if dst == &*rad::PATCHES_REFNAME {
-            Ok(Self::OpenPatch)
+            Ok(Self::OpenPatch { target: None })
+        } else if let Some(stripped) = dst.as_str().strip_prefix(PATCHES_FOR_PREFIX) {
+            let target = cob::patch::TargetBranch::try_from(stripped).map_err(|_| {
+                error::PushAction::InvalidRef {
+                    refname: dst.clone(),
+                }
+            })?;
+
+            Ok(Self::OpenPatch {
+                target: Some(target),
+            })
         } else {
             let dst = git::fmt::Qualified::from_refstr(dst)
                 .ok_or_else(|| error::PushAction::InvalidRef {
@@ -243,15 +268,20 @@ impl PushAction {
 }
 
 /// Run a git push command.
-pub fn run(
+pub(super) fn run(
     mut specs: Vec<String>,
     remote: Option<git::fmt::RefString>,
     url: Url,
     stored: &storage::git::Repository,
     profile: &Profile,
-    stdin: &io::Stdin,
+    command_reader: &mut crate::protocol::LineReader<impl io::Read>,
     opts: Options,
-) -> Result<(), Error> {
+    expected_refs: &[String],
+    git: &impl GitService,
+    node: &mut impl NodeSession,
+) -> Result<Vec<String>, Error> {
+    const LOG_MESSAGE: &str = "set-canonical-reference from git-push (radicle)";
+
     // Don't allow push if either of these conditions is true:
     //
     // 1. Our key is not in ssh-agent, which means we won't be able to sign the refs.
@@ -259,34 +289,31 @@ pub fn run(
     //    won't match the remote we're pushing to.
     // 3. The URL namespace is not set.
     let nid = url.namespace.ok_or(Error::NoKey).and_then(|ns| {
-        (profile.public_key == ns)
+        (profile.id() == &ns)
             .then_some(ns)
             .ok_or(Error::KeyMismatch(ns.into()))
     })?;
     let signer = profile.signer()?;
-    let mut line = String::new();
     let mut ok = HashMap::new();
     let hints = opts.hints || profile.hints();
+    let mut output = Vec::new();
 
     assert_eq!(signer.public_key(), &nid);
 
     // Read all the `push` lines.
-    loop {
-        let tokens = read_line(stdin, &mut line)?;
-        match tokens.as_slice() {
-            ["push", spec] => {
-                specs.push(spec.to_string());
+    for line in command_reader.by_ref() {
+        match line?? {
+            crate::protocol::Line::Blank => {
+                // An empty line means end of input.
+                break;
             }
-            // An empty line means end of input.
-            [] => break,
-            // Once the first `push` command is received, we don't expect anything else.
-            _ => return Err(Error::InvalidCommand(line.trim().to_owned())),
+            crate::protocol::Line::Valid(crate::protocol::Command::Push(spec)) => {
+                specs.push(spec);
+            }
+            crate::protocol::Line::Valid(command) => return Err(Error::UnexpectedCommand(command)),
         }
     }
     let delegates = stored.delegates()?;
-    let identity = stored.identity()?;
-    let project = identity.project()?;
-    let canonical_ref = git::refs::branch(project.default_branch());
     let mut set_canonical_refs: Vec<(git::fmt::Qualified, git::canonical::Object)> =
         Vec::with_capacity(specs.len());
 
@@ -295,9 +322,7 @@ pub fn run(
 
     // For each refspec, push a ref or delete a ref.
     for spec in specs {
-        let Ok(cmd) = Command::parse(&spec, &working) else {
-            return Err(Error::InvalidCommand(format!("push {spec}")));
-        };
+        let cmd = Command::parse(&spec, &working)?;
         let result = match &cmd {
             Command::Delete(dst) => {
                 // Delete refs.
@@ -315,21 +340,29 @@ pub fn run(
                     .map_err(Error::from)
             }
             Command::Push(git::fmt::refspec::Refspec { src, dst, force }) => {
-                let patches = crate::patches_mut(profile, stored)?;
+                let signer = profile.signer()?;
+                let patches = crate::patches_mut(profile, stored, &signer)?;
                 let action = PushAction::new(dst)?;
 
                 match action {
-                    PushAction::OpenPatch => patch_open(
-                        src,
-                        &remote,
-                        &nid,
-                        &working,
-                        stored,
-                        patches,
-                        &signer,
-                        profile,
-                        opts.clone(),
-                    ),
+                    PushAction::OpenPatch { target } => {
+                        let mut push_opts = opts.clone();
+                        if let Some(magic_target) = target {
+                            if let cob::patch::MergeTarget::Branch(opt_target) = &opts.target
+                                && magic_target != *opt_target
+                            {
+                                return Err(Error::ConflictingTargets(
+                                    opt_target.clone(),
+                                    magic_target,
+                                ));
+                            }
+                            push_opts.target = cob::patch::MergeTarget::Branch(magic_target);
+                        }
+
+                        patch_open(
+                            src, &remote, &nid, &working, stored, patches, profile, push_opts, git,
+                        )
+                    }
                     PushAction::UpdatePatch { dst, patch } => patch_update(
                         src,
                         &dst,
@@ -341,13 +374,12 @@ pub fn run(
                         patches,
                         &signer,
                         opts.clone(),
+                        expected_refs,
+                        git,
                     ),
                     PushAction::PushRef { dst } => {
                         let identity = stored.identity()?;
-                        let crefs = identity.canonical_refs_or_default(|| {
-                            let rule = identity.doc().default_branch_rule()?;
-                            Ok::<_, CanonicalRefsError>(CanonicalRefs::from_iter([rule]))
-                        })?;
+                        let crefs = identity.doc().canonical_refs()?;
                         let rules = crefs.rules();
                         let me = Did::from(nid);
 
@@ -361,6 +393,8 @@ pub fn run(
                             patches,
                             &signer,
                             opts.verbosity,
+                            expected_refs,
+                            git,
                         )?;
                         // If we're trying to update the canonical head, make sure
                         // we don't diverge from the current head. This only applies
@@ -389,17 +423,19 @@ pub fn run(
         match result {
             // Let Git tooling know that this ref has been pushed.
             Ok(resource) => {
-                println!("ok {}", cmd.dst());
+                output.push(format!("ok {}", cmd.dst()));
                 ok.insert(spec, resource);
             }
             // Let Git tooling know that there was an error pushing the ref.
-            Err(e) => println!("error {} {e}", cmd.dst()),
+            Err(e) => output.push(format!("error {} {e}", cmd.dst())),
         }
     }
 
     // Sign refs and sync if at least one ref pushed successfully.
     if !ok.is_empty() {
         let _ = stored.sign_refs(&signer)?;
+
+        stored.set_canonical_symbolic_refs(LOG_MESSAGE)?;
 
         for (refname, object) in &set_canonical_refs {
             let oid = object.id();
@@ -413,26 +449,11 @@ pub fn run(
                 )
             };
 
-            // N.b. special case for handling the canonical ref, since it
-            // creates a symlink to HEAD
-            if *refname == canonical_ref
-                && stored
-                    .set_head()
-                    .map(|head| head.is_updated())
-                    .unwrap_or(false)
-            {
-                print_update();
-                continue;
-            }
-
             match stored.backend.refname_to_id(refname.as_str()) {
                 Ok(new) if oid != new => {
-                    stored.backend.reference(
-                        refname.as_str(),
-                        oid.into(),
-                        true,
-                        "set-canonical-reference from git-push (radicle)",
-                    )?;
+                    stored
+                        .backend
+                        .reference(refname.as_str(), oid.into(), true, LOG_MESSAGE)?;
                     print_update();
                 }
                 Err(e) if e.code() == git::raw::ErrorCode::NotFound => {
@@ -453,10 +474,10 @@ pub fn run(
                 // Connect to local node and announce refs to the network.
                 // If our node is not running, we simply skip this step, as the
                 // refs will be announced eventually, when the node restarts.
-                let node = radicle::Node::new(profile.socket());
                 if node.is_running() {
                     // Nb. allow this to fail. The push to local storage was still successful.
-                    sync(stored, ok.into_values().flatten(), opts, node, profile).ok();
+                    node.sync(stored, ok.into_values().flatten().collect(), opts, profile)
+                        .ok();
                 } else if hints {
                     hint("offline push, your node is not running");
                     hint("to sync with the network, run `rad node start`");
@@ -467,10 +488,7 @@ pub fn run(
         }
     }
 
-    // Done.
-    println!();
-
-    Ok(())
+    Ok(output)
 }
 
 fn patch_base(
@@ -500,23 +518,41 @@ fn patch_base(
 ///
 /// We choose to push a temporary reference to storage, which gets deleted on
 /// [`Drop::drop`].
-struct TempPatchRef<'a> {
+struct TempPatchRef<'a, G> {
     stored: &'a storage::git::Repository,
     reference: git::fmt::Namespaced<'a>,
+    git: &'a G,
 }
 
-impl<'a> TempPatchRef<'a> {
-    fn new(stored: &'a storage::git::Repository, head: &git::Oid, nid: &NodeId) -> Self {
+impl<'a, G: GitService> TempPatchRef<'a, G> {
+    fn new(
+        stored: &'a storage::git::Repository,
+        head: &git::Oid,
+        nid: &NodeId,
+        git: &'a G,
+    ) -> Self {
         let reference = git::refs::storage::staging::patch(nid, *head);
-        Self { stored, reference }
+        Self {
+            stored,
+            reference,
+            git,
+        }
     }
 
     fn push(&self, src: &git::Oid, verbosity: Verbosity) -> Result<(), Error> {
-        push_ref(src, &self.reference, false, self.stored.raw(), verbosity)
+        push_ref(
+            src,
+            &self.reference,
+            false,
+            self.stored.raw(),
+            verbosity,
+            &[],
+            self.git,
+        )
     }
 }
 
-impl<'a> Drop for TempPatchRef<'a> {
+impl<'a, G> Drop for TempPatchRef<'a, G> {
     fn drop(&mut self) {
         if let Err(err) = self
             .stored
@@ -534,54 +570,44 @@ impl<'a> Drop for TempPatchRef<'a> {
 }
 
 /// Open a new patch.
-fn patch_open<G>(
+fn patch_open(
     head: &git::Oid,
     upstream: &Option<git::fmt::RefString>,
     nid: &NodeId,
     working: &git::raw::Repository,
     stored: &storage::git::Repository,
     mut patches: patch::Cache<
-        patch::Patches<'_, storage::git::Repository>,
+        '_,
+        storage::git::Repository,
+        WriteAs<'_, impl crypto::Signer>,
         cob::cache::StoreWriter,
     >,
-    signer: &Device<G>,
     profile: &Profile,
     opts: Options,
-) -> Result<Option<ExplorerResource>, Error>
-where
-    G: crypto::signature::Signer<crypto::Signature>,
-{
-    let temp = TempPatchRef::new(stored, head, nid);
+    git: &impl GitService,
+) -> Result<Option<ExplorerResource>, Error> {
+    let temp = TempPatchRef::new(stored, head, nid, git);
     temp.push(head, opts.verbosity)?;
     let base = patch_base(head, &opts, stored)?;
 
     if base == *head {
+        warn(format!(
+            "attempted to create a patch using the commit {head}, but this commit is already included in the base branch"
+        ));
         return Err(Error::EmptyPatch);
     }
 
-    let (title, description) =
-        term::patch::get_create_message(opts.message, &stored.backend, &base.into(), &head.into())?;
+    let (title, description) = cli::terminal::patch::get_create_message(
+        opts.message,
+        &stored.backend,
+        &base.into(),
+        &head.into(),
+    )?;
 
     let patch = if opts.draft {
-        patches.draft(
-            title,
-            &description,
-            patch::MergeTarget::default(),
-            base,
-            *head,
-            &[],
-            signer,
-        )
+        patches.draft(title, &description, opts.target.clone(), base, *head, &[])
     } else {
-        patches.create(
-            title,
-            &description,
-            patch::MergeTarget::default(),
-            base,
-            *head,
-            &[],
-            signer,
-        )
+        patches.create(title, &description, opts.target.clone(), base, *head, &[])
     }?;
 
     let action = if patch.is_draft() {
@@ -610,7 +636,7 @@ where
     )?;
 
     if let Some(upstream) = upstream {
-        if let Some(local_branch) = opts.branch.to_branch_name(&patch) {
+        if let Some(local_branch) = opts.branch.into_branch_name(&patch) {
             fn strip_refs_heads(qualified: git::fmt::Qualified) -> git::fmt::RefString {
                 let (_refs, _heads, x, xs) = qualified.non_empty_components();
                 std::iter::once(x).chain(xs).collect()
@@ -645,20 +671,18 @@ where
                 "to update, run `git push {upstream} {local_branch}`"
             ));
         }
-        // Setup current branch so that pushing updates the patch.
+        // Set up current branch so that pushing updates the patch.
         else if let Some(branch) =
             rad::setup_patch_upstream(&patch, *head, working, upstream, false)?
+            && let Some(name) = branch.name()?
+            && profile.hints()
         {
-            if let Some(name) = branch.name()? {
-                if profile.hints() {
-                    // Remove the remote portion of the name, i.e.
-                    // rad/patches/deadbeef -> patches/deadbeef
-                    let name = name.split_once('/').unwrap_or_default().1;
-                    hint(format!(
-                        "to update, run `git push` or `git push {upstream} -f HEAD:{name}`"
-                    ));
-                }
-            }
+            // Remove the remote portion of the name, i.e.
+            // rad/patches/deadbeef -> patches/deadbeef
+            let name = name.split_once('/').unwrap_or_default().1;
+            hint(format!(
+                "to update, run `git push` or `git push {upstream} --force-with-lease HEAD:{name}`"
+            ));
         }
     }
 
@@ -667,7 +691,7 @@ where
 
 /// Update an existing patch.
 #[allow(clippy::too_many_arguments)]
-fn patch_update<G>(
+fn patch_update<Signer>(
     head: &git::Oid,
     dst: &git::fmt::Qualified,
     force: bool,
@@ -676,20 +700,24 @@ fn patch_update<G>(
     working: &git::raw::Repository,
     stored: &storage::git::Repository,
     mut patches: patch::Cache<
-        patch::Patches<'_, storage::git::Repository>,
+        '_,
+        storage::git::Repository,
+        WriteAs<'_, Signer>,
         cob::cache::StoreWriter,
     >,
-    signer: &Device<G>,
+    signer: &Signer,
     opts: Options,
+    expected_refs: &[String],
+    git: &impl GitService,
 ) -> Result<Option<ExplorerResource>, Error>
 where
-    G: crypto::signature::Signer<crypto::Signature>,
+    Signer: crypto::Signer,
 {
     let Ok(Some(patch)) = patches.get(&patch_id) else {
         return Err(Error::NotFound(patch_id));
     };
 
-    let temp = TempPatchRef::new(stored, head, nid);
+    let temp = TempPatchRef::new(stored, head, nid, git);
     temp.push(head, opts.verbosity)?;
 
     let base = patch_base(head, &opts, stored)?;
@@ -705,14 +733,26 @@ where
     let (latest_id, latest) = patch.latest();
     let latest = latest.clone();
 
-    let message =
-        term::patch::get_update_message(opts.message, &stored.backend, &latest, &head.into())?;
+    let message = cli::terminal::patch::get_update_message(
+        opts.message,
+        &stored.backend,
+        &latest,
+        &head.into(),
+    )?;
 
     let dst = dst.with_namespace(nid.into());
-    push_ref(head, &dst, force, stored.raw(), opts.verbosity)?;
+    push_ref(
+        head,
+        &dst,
+        force,
+        stored.raw(),
+        opts.verbosity,
+        expected_refs,
+        git,
+    )?;
 
     let mut patch_mut = patch::PatchMut::new(patch_id, patch, &mut patches);
-    let revision = patch_mut.update(message, base, *head, signer)?;
+    let revision = patch_mut.update(message, base, *head)?;
     let Some(revision) = patch_mut.revision(&revision).cloned() else {
         return Err(Error::RevisionNotFound(revision));
     };
@@ -720,7 +760,7 @@ where
     eprintln!(
         "{} Patch {} updated to revision {}",
         term::PREFIX_SUCCESS,
-        term::format::tertiary(term::format::cob(&patch_id)),
+        term::format::tertiary(cli::terminal::format::cob(&patch_id)),
         term::format::dim(revision.id())
     );
 
@@ -735,9 +775,9 @@ where
     } else {
         eprintln!(
             "To compare against your previous revision {}, run:\n\n   {}\n",
-            term::format::tertiary(term::format::cob(&cob::ObjectId::from(git::Oid::from(
-                latest_id
-            )))),
+            term::format::tertiary(cli::terminal::format::cob(&cob::ObjectId::from(
+                git::Oid::from(latest_id)
+            ))),
             patch::RangeDiff::new(&latest, &revision).to_command()
         );
     }
@@ -745,7 +785,7 @@ where
     Ok(Some(ExplorerResource::Patch { id: patch_id }))
 }
 
-fn push<G>(
+fn push<Signer>(
     src: &git::Oid,
     dst: &git::fmt::Qualified,
     force: bool,
@@ -753,54 +793,80 @@ fn push<G>(
     working: &git::raw::Repository,
     stored: &storage::git::Repository,
     mut patches: patch::Cache<
-        patch::Patches<'_, storage::git::Repository>,
+        '_,
+        storage::git::Repository,
+        WriteAs<'_, Signer>,
         cob::cache::StoreWriter,
     >,
-    signer: &Device<G>,
+    signer: &Signer,
     verbosity: Verbosity,
+    expected_refs: &[String],
+    git: &impl GitService,
 ) -> Result<Option<ExplorerResource>, Error>
 where
-    G: crypto::signature::Signer<crypto::Signature>,
+    Signer: crypto::Signer,
 {
     let head = *src;
-    let dst = dst.with_namespace(nid.into());
-    // It's ok for the destination reference to be unknown, eg. when pushing a new branch.
-    let old = stored.backend.find_reference(dst.as_str()).ok();
+    let namespaced_dst = dst.with_namespace(nid.into());
 
-    push_ref(src, &dst, force, stored.raw(), verbosity)?;
+    let old = {
+        // In some rare cases, pushing to the default branch is a new action for a delegate.
+        // If this is the case, use the canonical head before the push to determine the old side.
+        //
+        // Note that this is only important for reverting and merging, but must happen before the push.
+        let old = stored
+            .backend
+            .find_reference(namespaced_dst.as_str())
+            .ok()
+            .map(|old| old.peel_to_commit().map(|c| c.id().into()))
+            .transpose()?
+            .or_else(|| stored.canonical_head().map(|(_, oid)| oid).ok());
+
+        push_ref(
+            src,
+            &namespaced_dst,
+            force,
+            stored.raw(),
+            verbosity,
+            expected_refs,
+            git,
+        )?;
+
+        old
+    };
 
     if let Some(old) = old {
-        let proj = stored.project()?;
-        let master = &*git::fmt::Qualified::from(git::fmt::lit::refs_heads(proj.default_branch()));
+        let identity = stored.identity()?;
+        let crefs = identity.doc().canonical_refs()?;
+        let rules = crefs.rules();
+        let me = Did::from(nid);
 
-        // If we're pushing to the project's default branch, we want to see if any patches got
+        // If we're pushing to a valid canonical branch, we want to see if any patches got
         // merged or reverted, and if so, update the patch COB.
-        if &*dst.strip_namespace() == master {
-            let old = old.peel_to_commit()?.id();
-            // Only delegates affect the merge state of the COB.
-            if stored.delegates()?.contains(&nid.into()) {
-                patch_revert_all(old.into(), head, &stored.backend, &mut patches, signer)?;
-                patch_merge_all(old.into(), head, working, &mut patches, signer)?;
-            }
+        if let Some((_, rule)) = rules.matches(dst).next()
+            && rule.allowed().contains(&me)
+        {
+            patch_revert_all(old, head, dst, &stored.backend, &mut patches, &identity)?;
+            patch_merge_all(old, head, dst, working, &mut patches, signer, &identity)?;
         }
     }
     Ok(Some(ExplorerResource::Tree { oid: head }))
 }
 
 /// Revert all patches that are no longer included in the base branch.
-fn patch_revert_all<G>(
+fn patch_revert_all(
     old: git::Oid,
     new: git::Oid,
+    pushed_dst: &git::fmt::Qualified,
     stored: &git::raw::Repository,
     patches: &mut patch::Cache<
-        patch::Patches<'_, storage::git::Repository>,
+        '_,
+        storage::git::Repository,
+        WriteAs<'_, impl crypto::Signer>,
         cob::cache::StoreWriter,
     >,
-    _signer: &Device<G>,
-) -> Result<(), Error>
-where
-    G: crypto::signature::Signer<crypto::Signature>,
-{
+    identity: &radicle::identity::Identity,
+) -> Result<(), Error> {
     // Find all commits reachable from the old OID but not from the new OID.
     let mut revwalk = stored.revwalk()?;
     revwalk.push(old.into())?;
@@ -814,11 +880,15 @@ where
         return Ok(());
     }
 
+    let identity_doc = identity.doc();
+
     // Get the list of merged patches.
     let merged = patches
         .merged()?
         // Skip patches that failed to load.
         .filter_map(|patch| patch.ok())
+        // Only consider patches that target the destination branch
+        .filter(|(id, patch)| merge_targets_match(pushed_dst, identity_doc, id, patch))
         .collect::<Vec<_>>();
 
     for (id, patch) in merged {
@@ -837,7 +907,7 @@ where
                             "{} Patch {} reverted at revision {}",
                             term::PREFIX_WARNING,
                             term::format::tertiary(&id),
-                            term::format::dim(term::format::oid(*revision_id)),
+                            term::format::dim(cli::terminal::format::oid(*revision_id)),
                         );
                     }
                     Err(e) => {
@@ -852,19 +922,37 @@ where
     Ok(())
 }
 
+fn merge_targets_match(
+    pushed_target: &git::fmt::Qualified,
+    doc: &identity::Doc,
+    id: &patch::PatchId,
+    patch: &patch::Patch,
+) -> bool {
+    patch
+        .is_targeted_by(doc, pushed_target)
+        .unwrap_or_else(|e| {
+            log::warn!("Failed to resolve merge target for patch {}: {}", id, e);
+            false
+        })
+}
+
 /// Merge all patches that have been included in the base branch.
-fn patch_merge_all<G>(
+fn patch_merge_all<Signer>(
     old: git::Oid,
     new: git::Oid,
+    pushed_dst: &git::fmt::Qualified,
     working: &git::raw::Repository,
     patches: &mut patch::Cache<
-        patch::Patches<'_, storage::git::Repository>,
+        '_,
+        storage::git::Repository,
+        WriteAs<'_, Signer>,
         cob::cache::StoreWriter,
     >,
-    signer: &Device<G>,
+    signer: &Signer,
+    identity: &radicle::identity::Identity,
 ) -> Result<(), Error>
 where
-    G: crypto::signature::Signer<crypto::Signature>,
+    Signer: crypto::Signer,
 {
     let mut revwalk = working.revwalk()?;
     revwalk.push_range(&format!("{old}..{new}"))?;
@@ -877,12 +965,17 @@ where
         return Ok(());
     }
 
+    let identity_doc = identity.doc();
+
     let open = patches
         .opened()?
         .chain(patches.drafted()?)
         // Skip patches that failed to load.
         .filter_map(|patch| patch.ok())
+        // Only consider patches that target the destination branch
+        .filter(|(id, patch)| merge_targets_match(pushed_dst, identity_doc, id, patch))
         .collect::<Vec<_>>();
+
     for (id, patch) in open {
         // Later revisions are more likely to be merged, so we build the list backwards.
         let revisions = patch
@@ -906,19 +999,25 @@ where
     Ok(())
 }
 
-fn patch_merge<C, G>(
-    mut patch: patch::PatchMut<storage::git::Repository, C>,
+fn patch_merge<Signer>(
+    mut patch: patch::PatchMut<
+        '_,
+        '_,
+        '_,
+        storage::git::Repository,
+        Signer,
+        impl cob::cache::Update<patch::Patch>,
+    >,
     revision: patch::RevisionId,
     commit: git::Oid,
     working: &git::raw::Repository,
-    signer: &Device<G>,
+    signer: &Signer,
 ) -> Result<(), Error>
 where
-    C: cob::cache::Update<patch::Patch>,
-    G: crypto::signature::Signer<crypto::Signature>,
+    Signer: crypto::Signer,
 {
     let (latest, _) = patch.latest();
-    let merged = patch.merge(revision, commit, signer)?;
+    let merged = patch.merge(revision, commit)?;
 
     if revision == latest {
         eprintln!(
@@ -931,7 +1030,7 @@ where
             "{} Patch {} merged at revision {}",
             term::PREFIX_SUCCESS,
             term::format::tertiary(merged.patch),
-            term::format::dim(term::format::oid(revision)),
+            term::format::dim(cli::terminal::format::oid(revision)),
         );
     }
 
@@ -950,6 +1049,8 @@ fn push_ref(
     force: bool,
     stored: &git::raw::Repository,
     verbosity: Verbosity,
+    expected_refs: &[String],
+    git: &impl GitService,
 ) -> Result<(), Error> {
     let path = dunce::canonicalize(stored.path())?.display().to_string();
     // Nb. The *force* indicator (`+`) is processed by Git tooling before we even reach this code.
@@ -963,10 +1064,17 @@ fn push_ref(
 
     args.extend([path.to_string(), refspec.to_string()]);
 
+    for expected in expected_refs {
+        args.push(format!(
+            "--force-with-lease=refs/namespaces/{}/{expected}",
+            dst.namespace()
+        ));
+    }
+
     // Rely on the environment variable `GIT_DIR`.
     let working = None;
 
-    let output = radicle::git::run(working, args)?;
+    let output = git.send_pack(working, &args)?;
 
     if !output.status.success() {
         return Err(Error::SendPackFailed {
@@ -974,62 +1082,6 @@ fn push_ref(
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
             status: output.status,
         });
-    }
-
-    Ok(())
-}
-
-/// Sync with the network.
-fn sync(
-    repo: &storage::git::Repository,
-    updated: impl Iterator<Item = ExplorerResource>,
-    opts: Options,
-    mut node: radicle::Node,
-    profile: &Profile,
-) -> Result<(), cli::node::SyncError> {
-    let progress = if io::stderr().is_terminal() {
-        term::PaintTarget::Stderr
-    } else {
-        term::PaintTarget::Hidden
-    };
-    let result = cli::node::announce(
-        repo,
-        cli::node::SyncSettings::default().with_profile(profile),
-        cli::node::SyncReporting {
-            progress,
-            completion: term::PaintTarget::Stderr,
-            debug: opts.sync_debug,
-        },
-        &mut node,
-        profile,
-    )?;
-
-    let mut urls = Vec::new();
-
-    if let Some(result) = result {
-        for seed in profile.config.preferred_seeds.iter() {
-            if result.is_synced(&seed.id) {
-                for resource in updated {
-                    let url = profile
-                        .config
-                        .public_explorer
-                        .url(seed.addr.host.clone(), repo.id)
-                        .resource(resource);
-
-                    urls.push(url);
-                }
-                break;
-            }
-        }
-    }
-
-    // Print URLs to the updated resources.
-    if !urls.is_empty() {
-        eprintln!();
-        for url in urls {
-            eprintln!("  {}", term::format::dim(url));
-        }
-        eprintln!();
     }
 
     Ok(())

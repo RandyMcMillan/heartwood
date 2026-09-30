@@ -1,5 +1,5 @@
 = radicle-node(1)
-The Radicle Team <team@radicle.xyz>
+The Radicle Team <team@radicle.dev>
 :doctype: manpage
 :revnumber: 1.0.0
 :revdate: 2024-04-22
@@ -17,7 +17,7 @@ radicle-node - Radicle node
 == Description
 
 A Radicle node synchronizes its Git repositories with other nodes.
-This manual page is a placeholder to point you at the *--help**
+This manual page is a placeholder to point you at the *--help*
 option.
 
 == SEE ALSO ==

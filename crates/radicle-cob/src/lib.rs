@@ -1,6 +1,6 @@
 // Copyright © 2021 The Radicle Link Contributors
 
-#![warn(clippy::unwrap_used)]
+#![deny(clippy::unwrap_used)]
 //! # Collaborative Objects
 //!
 //! Collaborative objects are graphs of CRDTs.
@@ -59,10 +59,10 @@ extern crate qcheck;
 #[macro_use(quickcheck)]
 extern crate qcheck_macros;
 
-extern crate git_ref_format_core as fmt;
 extern crate radicle_crypto as crypto;
 extern crate radicle_dag as dag;
 extern crate radicle_git_metadata as metadata;
+extern crate radicle_git_ref_format as fmt;
 extern crate radicle_oid as oid;
 
 mod backend;
@@ -77,22 +77,21 @@ mod change_graph;
 mod trailers;
 
 pub mod change;
-pub use change::store::{Contents, Embed, EntryId, Manifest, Version};
 pub use change::Entry;
+pub use change::store::{Contents, Embed, EntryId, Manifest, Version};
 
 pub mod history;
 pub use history::History;
 
 pub mod signatures;
-use signatures::ExtendedSignature;
 
 pub mod type_name;
 pub use type_name::TypeName;
 
 pub mod object;
 pub use object::{
-    create, get, info, list, remove, update, CollaborativeObject, Create, Evaluate, ObjectId,
-    Update, Updated,
+    CollaborativeObject, Create, Evaluate, ObjectId, Update, Updated, create, get, info, list,
+    remove, update,
 };
 
 #[cfg(test)]
@@ -116,6 +115,11 @@ mod tests;
 pub trait Store
 where
     Self: object::Storage
-        + change::Storage<ObjectId = oid::Oid, Parent = oid::Oid, Signatures = ExtendedSignature>,
+        + change::Storage<
+            ObjectId = oid::Oid,
+            Parent = oid::Oid,
+            PublicKey = crypto::PublicKey,
+            Signature = crypto::Signature,
+        >,
 {
 }

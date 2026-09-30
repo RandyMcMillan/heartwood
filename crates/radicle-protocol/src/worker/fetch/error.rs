@@ -2,7 +2,7 @@ use std::io;
 
 use thiserror::Error;
 
-use radicle::{cob, git::raw, identity, storage};
+use radicle::{cob, identity, storage};
 use radicle_fetch as fetch;
 
 #[derive(Debug, Error)]
@@ -10,7 +10,7 @@ pub enum Fetch {
     #[error(transparent)]
     Run(#[from] fetch::Error),
     #[error(transparent)]
-    Git(#[from] raw::Error),
+    Git(#[from] radicle::git::raw::Error),
     #[error(transparent)]
     Storage(#[from] storage::Error),
     #[error(transparent)]
@@ -18,14 +18,22 @@ pub enum Fetch {
     #[error(transparent)]
     Repository(#[from] radicle::storage::RepositoryError),
     #[error(transparent)]
-    RefsDb(#[from] radicle::node::refs::Error),
-    #[error("validation of the storage repository failed: the delegates {delegates:?} failed to validate to meet a threshold of {threshold}")]
+    RefsDb(Box<radicle::node::refs::Error>),
+    #[error(
+        "validation of the storage repository failed: the delegates {delegates:?} failed to validate to meet a threshold of {threshold}"
+    )]
     Validation {
         threshold: usize,
         delegates: Vec<String>,
     },
     #[error(transparent)]
     Cache(#[from] Cache),
+}
+
+impl From<radicle::node::refs::Error> for Fetch {
+    fn from(err: radicle::node::refs::Error) -> Self {
+        Self::RefsDb(Box::new(err))
+    }
 }
 
 #[derive(Debug, Error)]

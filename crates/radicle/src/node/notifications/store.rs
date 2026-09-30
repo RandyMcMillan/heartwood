@@ -1,4 +1,3 @@
-#![allow(clippy::type_complexity)]
 use std::marker::PhantomData;
 use std::num::TryFromIntError;
 use std::path::Path;
@@ -10,9 +9,9 @@ use sqlite as sql;
 use thiserror::Error;
 
 use crate::git;
-use crate::git::fmt::RefString;
 use crate::git::Oid;
 use crate::git::RefError;
+use crate::git::fmt::RefString;
 use crate::prelude::RepoId;
 use crate::sql::transaction;
 use crate::storage::RefUpdate;
@@ -294,7 +293,7 @@ impl<T> Store<T> {
         &self,
         repo: &RepoId,
         order_by: &str,
-    ) -> Result<impl Iterator<Item = Result<Notification, Error>> + '_, Error> {
+    ) -> Result<impl Iterator<Item = Result<Notification, Error>> + '_ + use<'_, T>, Error> {
         let mut stmt = self.db.prepare(format!(
             "SELECT rowid, repo, ref, old, new, status, timestamp
              FROM `repository-notifications`
@@ -381,7 +380,7 @@ mod parse {
                     })
                 })
             })
-            .unwrap_or(Ok(git::raw::Oid::zero().into()))?;
+            .unwrap_or(Ok(git::Oid::ZERO_SHA1))?;
         let new = row
             .try_read::<Option<&str>, _>("new")?
             .map(|oid| {
@@ -392,7 +391,7 @@ mod parse {
                     })
                 })
             })
-            .unwrap_or(Ok(git::raw::Oid::zero().into()))?;
+            .unwrap_or(Ok(git::Oid::ZERO_SHA1))?;
         let update = RefUpdate::from(RefString::try_from(refstr)?, old, new);
         let (namespace, qualified) = git::parse_ref(refstr)?;
         let timestamp = row.try_read::<i64, _>("timestamp")?;
@@ -422,9 +421,9 @@ mod test {
     use super::*;
 
     #[test]
-    fn test_clear() {
+    fn clear() {
         let mut db = Store::open(":memory:").unwrap();
-        let repo = arbitrary::gen::<RepoId>(1);
+        let repo = arbitrary::r#gen::<RepoId>(1);
         let old = arbitrary::oid();
         let time = LocalTime::from_millis(32188142);
         let master = arbitrary::oid();
@@ -445,10 +444,10 @@ mod test {
     }
 
     #[test]
-    fn test_counts_by_repo() {
+    fn counts_by_repo() {
         let mut db = Store::open(":memory:").unwrap();
-        let repo1 = arbitrary::gen::<RepoId>(1);
-        let repo2 = arbitrary::gen::<RepoId>(1);
+        let repo1 = arbitrary::r#gen::<RepoId>(1);
+        let repo2 = arbitrary::r#gen::<RepoId>(1);
         let oid = arbitrary::oid();
         let time = LocalTime::from_millis(32188142);
 
@@ -479,8 +478,8 @@ mod test {
     }
 
     #[test]
-    fn test_branch_notifications() {
-        let repo = arbitrary::gen::<RepoId>(1);
+    fn branch_notifications() {
+        let repo = arbitrary::r#gen::<RepoId>(1);
         let old = arbitrary::oid();
         let master = arbitrary::oid();
         let other = arbitrary::oid();
@@ -557,8 +556,8 @@ mod test {
     }
 
     #[test]
-    fn test_notification_status() {
-        let repo = arbitrary::gen::<RepoId>(1);
+    fn notification_status() {
+        let repo = arbitrary::r#gen::<RepoId>(1);
         let oid = arbitrary::oid();
         let time = LocalTime::from_millis(32188142);
         let mut db = Store::open(":memory:").unwrap();
@@ -578,9 +577,10 @@ mod test {
         assert!(db.insert(&repo, &update1, time).unwrap());
         assert!(db.insert(&repo, &update2, time).unwrap());
         assert!(db.insert(&repo, &update3, time).unwrap());
-        assert!(db
-            .set_status(NotificationStatus::ReadAt(time), &[1, 2, 3])
-            .unwrap());
+        assert!(
+            db.set_status(NotificationStatus::ReadAt(time), &[1, 2, 3])
+                .unwrap()
+        );
 
         let mut notifs = db.by_repo(&repo, "timestamp").unwrap();
 
@@ -599,8 +599,8 @@ mod test {
     }
 
     #[test]
-    fn test_duplicate_notifications() {
-        let repo = arbitrary::gen::<RepoId>(1);
+    fn duplicate_notifications() {
+        let repo = arbitrary::r#gen::<RepoId>(1);
         let old = arbitrary::oid();
         let master1 = arbitrary::oid();
         let master2 = arbitrary::oid();
@@ -619,9 +619,10 @@ mod test {
             new: master2,
         };
         assert!(db.insert(&repo, &update1, time1).unwrap());
-        assert!(db
-            .set_status(NotificationStatus::ReadAt(time1), &[1])
-            .unwrap());
+        assert!(
+            db.set_status(NotificationStatus::ReadAt(time1), &[1])
+                .unwrap()
+        );
         assert!(db.insert(&repo, &update2, time2).unwrap());
 
         let mut notifs = db.by_repo(&repo, "timestamp").unwrap();
@@ -646,8 +647,8 @@ mod test {
     }
 
     #[test]
-    fn test_cob_notifications() {
-        let repo = arbitrary::gen::<RepoId>(1);
+    fn cob_notifications() {
+        let repo = arbitrary::r#gen::<RepoId>(1);
         let old = arbitrary::oid();
         let new = arbitrary::oid();
         let timestamp = LocalTime::from_millis(32189874);

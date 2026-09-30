@@ -5,10 +5,10 @@
 // Re-exports created by manually scanning the `heartwood` workspace on 2025-10-04.
 
 // Re-exports that are only used within this crate.
-pub(crate) use git2::{
-    message_trailers_strs, AutotagOption, Blob, Config, FetchOptions, FetchPrune, Object, Revwalk,
-    Sort,
-};
+pub(crate) use git2::{AutotagOption, Blob, FetchOptions, FetchPrune, Object, Revwalk, Sort};
+
+#[cfg(unix)]
+pub(crate) use git2::Config;
 
 // Re-exports that are only used within this crate for testing.
 #[cfg(any(test, feature = "test"))]
@@ -26,14 +26,17 @@ pub use git2::{
     AnnotatedCommit, Diff, DiffFindOptions, DiffOptions, DiffStats, MergeAnalysis, MergeOptions,
 };
 
-// Re-exports for `radicle-cli`.
 pub mod build {
+    // Re-exports for `radicle-cli`.
     pub use git2::build::CheckoutBuilder;
+
+    #[cfg(test)]
+    pub(crate) use git2::build::TreeUpdateBuilder;
 }
 
 pub(crate) mod transport {
     pub use git2::transport::{
-        register, Service, SmartSubtransport, SmartSubtransportStream, Transport,
+        Service, SmartSubtransport, SmartSubtransportStream, Transport, register,
     };
 }
 

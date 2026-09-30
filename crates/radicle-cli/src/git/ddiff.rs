@@ -41,7 +41,7 @@
 //! +snuffing
 //! omitting
 //! ```
-//! The `DDiff` will show the what changes are being made, overlayed on to the original diff and
+//! The `DDiff` will show the what changes are being made, overlaid on to the original diff and
 //! the diff's original file as context.
 //!
 //! ```text
@@ -305,7 +305,7 @@ impl unified_diff::Decode for DiffModification {
             (v1, v2) => {
                 return Err(unified_diff::Error::syntax(format!(
                     "indicator character expected, but got '{v1}{v2}'"
-                )))
+                )));
             }
         };
 
@@ -382,6 +382,7 @@ impl DDiff {
     }
 
     /// Returns owned files in the diff.
+    #[must_use]
     pub fn into_files(self) -> Vec<FileDDiff> {
         self.files
     }
@@ -409,12 +410,15 @@ mod tests {
             "/tests/data/ddiff_hunk.diff"
         )))
         .unwrap();
-        assert_eq!(
+        // Lines are expected to match but line ending might differ depending
+        // on the platform.
+        assert!(
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/data/ddiff_hunk.diff"
-            )),
-            ddiff.to_unified_string().unwrap()
+            ))
+            .lines()
+            .eq(ddiff.to_unified_string().unwrap().lines())
         );
     }
 }

@@ -1,11 +1,13 @@
 use std::ffi::OsString;
-use std::io::{self, Write};
-use std::{io::ErrorKind, iter, process};
+use std::fmt::Display;
+use std::io;
+use std::io::Write;
+use std::{io::ErrorKind, process};
 
 use anyhow::anyhow;
-use clap::builder::styling::AnsiColor;
 use clap::builder::Styles;
-use clap::{Parser, Subcommand};
+use clap::builder::styling::AnsiColor;
+use clap::{CommandFactory as _, Parser, Subcommand};
 
 use radicle::version::Version;
 use radicle_cli::commands::*;
@@ -18,7 +20,16 @@ pub const RADICLE_VERSION: &str = env!("RADICLE_VERSION");
 pub const RADICLE_VERSION_LONG: &str =
     concat!(env!("RADICLE_VERSION"), " (", env!("GIT_HEAD"), ")");
 pub const DESCRIPTION: &str = "Radicle command line interface";
-pub const LONG_DESCRIPTION: &str = "Radicle is a sovereign code forge built on Git.";
+pub const LONG_DESCRIPTION: &str = "
+Radicle is a sovereign code forge built on Git.
+
+See `rad <COMMAND> --help` to learn about a specific command.
+
+Do you have feedback?
+ - Chat <\x1b]8;;https://radicle.zulipchat.com\x1b\\radicle.zulipchat.com\x1b]8;;\x1b\\>
+ - Mail <\x1b]8;;mailto:feedback@radicle.dev\x1b\\feedback@radicle.dev\x1b]8;;\x1b\\>
+   (Messages are automatically posted to the public #feedback channel on Zulip.)\
+";
 pub const TIMESTAMP: &str = env!("SOURCE_DATE_EPOCH");
 pub const VERSION: Version = Version {
     name: NAME,
@@ -36,15 +47,17 @@ const STYLES: Styles = Styles::styled()
 #[command(name = NAME)]
 #[command(version = RADICLE_VERSION)]
 #[command(long_version = RADICLE_VERSION_LONG)]
+#[command(about = DESCRIPTION)]
+#[command(long_about = LONG_DESCRIPTION)]
 #[command(propagate_version = true)]
 #[command(styles = STYLES)]
 struct CliArgs {
     #[command(subcommand)]
-    pub command: Option<Commands>,
+    pub command: Command,
 }
 
 #[derive(Subcommand, Debug)]
-enum Commands {
+enum Command {
     Auth(auth::Args),
     Block(block::Args),
     Checkout(checkout::Args),
@@ -54,24 +67,18 @@ enum Commands {
     Cob(cob::Args),
     Config(config::Args),
     Debug(debug::Args),
-
-    /// This command is deprecated and delegates to `git diff`.
-    /// Even before it was deprecated, it was not printed by
-    /// `rad -h`, so it is also hidden.
-    ///
-    /// Since it is hidden, it makes no sense to add `about`
-    /// for the command listing, and since it is external,
-    /// `--help` will delegate to `git diff --help` it makes
-    /// no sense to add `long_about` for `rad diff --help`.
-    #[command(external_subcommand, hide = true)]
-    Diff(Vec<OsString>),
-
     Follow(follow::Args),
+    #[command(hide = true)] // `rad fork` command is deprecated
     Fork(fork::Args),
     Id(id::Args),
+    Inbox(inbox::Args),
     Init(init::Args),
+    #[command(alias = ".")]
+    Inspect(inspect::Args),
     Issue(issue::Args),
     Ls(ls::Args),
+    Node(node::Args),
+    Patch(patch::Args),
     Path(path::Args),
     Publish(publish::Args),
     Remote(remote::Args),
@@ -79,17 +86,28 @@ enum Commands {
     #[command(name = "self")]
     RadSelf(rad_self::Args),
     Stats(stats::Args),
+    Sync(sync::Args),
     Unblock(unblock::Args),
     Unfollow(unfollow::Args),
     Unseed(unseed::Args),
     Watch(watch::Args),
-}
 
-#[derive(Debug)]
-enum Command {
-    Other(Vec<OsString>),
-    Help,
-    Version { json: bool },
+    /// Print the version information of the CLI
+    Version {
+        /// Print the version information in JSON format
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Print static completion information for a given shell
+    #[command(hide = true)]
+    Completion {
+        /// The type of shell to output a static completion script for.
+        shell: clap_complete::Shell,
+    },
+
+    #[command(external_subcommand)]
+    External(Vec<OsString>),
 }
 
 fn main() {
@@ -98,284 +116,250 @@ fn main() {
         env!("CARGO_PKG_VERSION")
     )
     .homepage(env!("CARGO_PKG_HOMEPAGE"))
-    .support("Open a support request at https://radicle.zulipchat.com/ or file an issue via Radicle itself, or e-mail to team@radicle.xyz"));
+    .support("Open a support request at https://radicle.zulipchat.com/ or file an issue via Radicle itself, or e-mail to team@radicle.dev"));
 
-    if let Some(lvl) = radicle::logger::env_level() {
-        let logger = Box::new(radicle::logger::Logger::new(lvl));
+    // Install a panic hook that intercepts panics caused by broken pipes and exits
+    // cleanly. This is a backstop for any uses of `println!` (in our code or
+    // dependencies like `clap`) that were not converted to `term::print`.
+    //
+    // `println!` panics with "failed printing to stdout: Broken pipe" when
+    // failing to write to a closed standard output. We chain our hook in front
+    // of `human_panic`'s hook so that panics not caused by broken pipes are
+    // still handled by `human_panic`.
+    //
+    // See also <https://github.com/rust-lang/rust/issues/62569>.
+    #[cfg(unix)]
+    {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            handle_broken_pipe(info);
+            default_hook(info);
+        }));
+    }
+
+    if let Some(lvl) = radicle_log::env_level() {
+        let logger = Box::new(radicle_log::Logger::new());
         log::set_boxed_logger(logger).expect("no other logger should have been set already");
         log::set_max_level(lvl.to_level_filter());
     }
     if let Err(e) = radicle::io::set_file_limit(4096) {
         log::warn!(target: "cli", "Unable to set open file limit: {e}");
     }
-    match parse_args().map_err(Some).and_then(run) {
-        Ok(_) => process::exit(0),
+    let CliArgs { command } = CliArgs::parse();
+    run(command, term::DefaultContext)
+}
+
+fn write_version(as_json: bool) -> anyhow::Result<()> {
+    let mut stdout = io::stdout();
+    if as_json {
+        VERSION.write_json(&mut stdout)?;
+        writeln!(&mut stdout)?;
+        Ok(())
+    } else {
+        VERSION.write(&mut stdout)?;
+        Ok(())
+    }
+}
+
+fn run(command: Command, ctx: impl term::Context) -> ! {
+    match run_command(command, ctx) {
+        Ok(()) => process::exit(0),
         Err(err) => {
-            if let Some(err) = err {
-                term::error(format!("rad: {err}"));
+            // If the error is a broken pipe, exit cleanly. This happens when
+            // output is piped to a command that exits before reading all our
+            // output, e.g. `rad config | head`.
+            //
+            // Rust ignores `SIGPIPE` by default (since 1.62), so broken pipes
+            // and instead returns `io::ErrorKind::BrokenPipe` errors on writes.
+            // We want to catch these and exit cleanly.
+            //
+            // See <https://github.com/rust-lang/rust/issues/62569>.
+            #[cfg(unix)]
+            if is_broken_pipe(&err) {
+                process::exit(0);
             }
+            term::fail(&err);
             process::exit(1);
         }
     }
 }
 
-fn parse_args() -> anyhow::Result<Command> {
-    use lexopt::prelude::*;
-
-    let mut parser = lexopt::Parser::from_env();
-    let mut command = None;
-    let mut json = false;
-
-    while let Some(arg) = parser.next()? {
-        match arg {
-            Long("json") => {
-                json = true;
-            }
-            Long("help") | Short('h') => {
-                command = Some(Command::Help);
-            }
-            Long("version") => {
-                command = Some(Command::Version { json: false });
-            }
-            Value(val) if command.is_none() => {
-                if val == *"." {
-                    command = Some(Command::Other(vec![OsString::from("inspect")]));
-                } else if val == "version" {
-                    command = Some(Command::Version { json: false });
-                } else {
-                    let args = iter::once(val)
-                        .chain(iter::from_fn(|| parser.value().ok()))
-                        .collect();
-
-                    command = Some(Command::Other(args))
-                }
-            }
-            _ => anyhow::bail!(arg.unexpected()),
-        }
-    }
-    if let Some(Command::Version { json: j }) = &mut command {
-        *j = json;
-    }
-    Ok(command.unwrap_or_else(|| Command::Other(vec![])))
-}
-
-fn print_help() -> anyhow::Result<()> {
-    VERSION.write(&mut io::stdout())?;
-    println!("{DESCRIPTION}");
-    println!();
-
-    help::run(Default::default(), term::DefaultContext)
-}
-
-fn run(command: Command) -> Result<(), Option<anyhow::Error>> {
-    match command {
-        Command::Version { json } => {
-            let mut stdout = io::stdout();
-            if json {
-                VERSION
-                    .write_json(&mut stdout)
-                    .map_err(|e| Some(e.into()))?;
-                writeln!(&mut stdout).ok();
-            } else {
-                VERSION.write(&mut stdout).map_err(|e| Some(e.into()))?;
-            }
-        }
-        Command::Help => {
-            print_help()?;
-        }
-        Command::Other(args) => {
-            let exe = args.first();
-
-            if let Some(Some(exe)) = exe.map(|s| s.to_str()) {
-                run_other(exe, &args[1..])?;
-            } else {
-                print_help()?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Runs a `rad` command. `exe` expects the commands' name, e.g. `issue`,
-/// `args` expects all other arguments.
+/// Handle an error of kind [`ErrorKind::BrokenPipe`] during a panic, and
+/// exit the process with exit code 0.
 ///
-/// For commands that are already migrated to `clap`, we need to parse the
-/// arguments again. This needs to be done for each migrated command
-/// individually, otherwise `clap` would fail to parse on an non-migrated and
-/// therefore unknown command.
-pub(crate) fn run_other(exe: &str, args: &[OsString]) -> Result<(), Option<anyhow::Error>> {
-    match exe {
-        "auth" => {
-            if let Some(Commands::Auth(args)) = CliArgs::parse().command {
-                term::run_command_fn(auth::run, args);
-            }
-        }
-        "block" => {
-            if let Some(Commands::Block(args)) = CliArgs::parse().command {
-                term::run_command_fn(block::run, args);
-            }
-        }
-        "checkout" => {
-            if let Some(Commands::Checkout(args)) = CliArgs::parse().command {
-                term::run_command_fn(checkout::run, args);
-            }
-        }
-        "clone" => {
-            if let Some(Commands::Clone(args)) = CliArgs::parse().command {
-                term::run_command_fn(clone::run, args);
-            }
-        }
-        "cob" => {
-            if let Some(Commands::Cob(args)) = CliArgs::parse().command {
-                term::run_command_fn(cob::run, args);
-            }
-        }
-        "config" => {
-            if let Some(Commands::Config(args)) = CliArgs::parse().command {
-                term::run_command_fn(config::run, args);
-            }
-        }
-        "diff" => {
-            if let Some(Commands::Diff(mut args)) = CliArgs::parse().command {
-                debug_assert_eq!(args[0], "diff");
-                args.remove(0);
-                return diff::run(args).map_err(Some);
-            }
-        }
-        "debug" => {
-            if let Some(Commands::Debug(args)) = CliArgs::parse().command {
-                term::run_command_fn(debug::run, args);
-            }
-        }
-        "follow" => {
-            if let Some(Commands::Follow(args)) = CliArgs::parse().command {
-                term::run_command_fn(follow::run, args);
-            }
-        }
-        "fork" => {
-            if let Some(Commands::Fork(args)) = CliArgs::parse().command {
-                term::run_command_fn(fork::run, args);
-            }
-        }
-        "help" => {
-            term::run_command_args::<help::Options, _>(help::HELP, help::run, args.to_vec());
-        }
-        "id" => {
-            if let Some(Commands::Id(args)) = CliArgs::parse().command {
-                term::run_command_fn(id::run, args);
-            }
-        }
-        "inbox" => {
-            term::run_command_args::<inbox::Options, _>(inbox::HELP, inbox::run, args.to_vec())
-        }
-        "init" => {
-            if let Some(Commands::Init(args)) = CliArgs::parse().command {
-                term::run_command_fn(init::run, args);
-            }
-        }
-        "inspect" => {
-            term::run_command_args::<inspect::Options, _>(
-                inspect::HELP,
-                inspect::run,
-                args.to_vec(),
-            );
-        }
-        "issue" => {
-            if let Some(Commands::Issue(args)) = CliArgs::parse().command {
-                term::run_command_fn(issue::run, args);
-            }
-        }
-        "ls" => {
-            if let Some(Commands::Ls(args)) = CliArgs::parse().command {
-                term::run_command_fn(ls::run, args);
-            }
-        }
-        "node" => {
-            term::run_command_args::<node::Options, _>(node::HELP, node::run, args.to_vec());
-        }
-        "patch" => {
-            term::run_command_args::<patch::Options, _>(patch::HELP, patch::run, args.to_vec());
-        }
-        "path" => {
-            if let Some(Commands::Path(args)) = CliArgs::parse().command {
-                term::run_command_fn(path::run, args);
-            }
-        }
-        "publish" => {
-            if let Some(Commands::Publish(args)) = CliArgs::parse().command {
-                term::run_command_fn(publish::run, args);
-            }
-        }
-        "clean" => {
-            if let Some(Commands::Clean(args)) = CliArgs::parse().command {
-                term::run_command_fn(clean::run, args);
-            }
-        }
-        "self" => {
-            if let Some(Commands::RadSelf(args)) = CliArgs::parse().command {
-                term::run_command_fn(rad_self::run, args)
-            }
-        }
-        "sync" => {
-            term::run_command_args::<sync::Options, _>(sync::HELP, sync::run, args.to_vec());
-        }
-        "seed" => {
-            if let Some(Commands::Seed(args)) = CliArgs::parse().command {
-                term::run_command_fn(seed::run, args);
-            }
-        }
-        "unblock" => {
-            if let Some(Commands::Unblock(args)) = CliArgs::parse().command {
-                term::run_command_fn(unblock::run, args);
-            }
-        }
-        "unfollow" => {
-            if let Some(Commands::Unfollow(args)) = CliArgs::parse().command {
-                term::run_command_fn(unfollow::run, args);
-            }
-        }
-        "unseed" => {
-            if let Some(Commands::Unseed(args)) = CliArgs::parse().command {
-                term::run_command_fn(unseed::run, args);
-            }
-        }
-        "remote" => {
-            if let Some(Commands::Remote(args)) = CliArgs::parse().command {
-                term::run_command_fn(remote::run, args);
-            }
-        }
-        "stats" => {
-            if let Some(Commands::Stats(args)) = CliArgs::parse().command {
-                term::run_command_fn(stats::run, args);
-            }
-        }
-        "watch" => {
-            if let Some(Commands::Watch(args)) = CliArgs::parse().command {
-                term::run_command_fn(watch::run, args);
-            }
-        }
-        other => {
-            let exe = format!("{NAME}-{exe}");
-            let status = process::Command::new(exe).args(args).status();
+/// # Debug
+///
+/// If compiled with `debug_assertions` enabled, then the panic is written to
+/// [`std::io::stderr`].
+#[cfg(unix)]
+fn handle_broken_pipe(info: &std::panic::PanicHookInfo<'_>) {
+    if !is_broken_pipe_panic(info) {
+        return;
+    }
 
-            match status {
-                Ok(status) => {
-                    if !status.success() {
-                        return Err(None);
-                    }
+    if cfg!(debug_assertions) {
+        let thread = std::thread::current();
+        let thread = thread.name().unwrap_or("<unnamed>");
+
+        let mut stderr = std::io::stderr().lock();
+
+        match info.location() {
+            Some(location) => {
+                let _ = writeln!(
+                    stderr,
+                    "broken pipe in thread '{thread}' at: {}:{}",
+                    location.file(),
+                    location.line(),
+                );
+            }
+            None => {
+                let _ = writeln!(stderr, "broken pipe in thread '{thread}'");
+            }
+        }
+
+        #[cfg(feature = "backtrace")]
+        let backtrace = format!("{:?}", backtrace::Backtrace::new());
+
+        #[cfg(not(feature = "backtrace"))]
+        let backtrace = "(no backtrace available)";
+
+        let _ = writeln!(stderr, "{backtrace}");
+    }
+    process::exit(0);
+}
+
+/// Check if any error in the [`anyhow::Error::chain`] of `err` is of kind
+/// [`ErrorKind::BrokenPipe`].
+#[cfg(unix)]
+fn is_broken_pipe(err: &anyhow::Error) -> bool {
+    err.chain()
+        .filter_map(|cause| cause.downcast_ref::<io::Error>())
+        .any(|io_err| io_err.kind() == ErrorKind::BrokenPipe)
+}
+
+/// Check whether a panic was caused by writing to a broken pipe.
+///
+/// The standard library panics with a [`String`] payload containing
+/// "Broken pipe" when [`println!`] or [`print!`] fail to write because standard
+/// output is closed. This is stable behaviour across all Unix platforms, since
+/// it is adopted from the description of `EPIPE` in [`errno.h` in POSIX.1-2024].
+///
+/// [`errno.h` in POSIX.1-2024]: https://pubs.opengroup.org/onlinepubs/9799919799.2024edition/basedefs/errno.h.html
+#[cfg(unix)]
+fn is_broken_pipe_panic(info: &std::panic::PanicHookInfo<'_>) -> bool {
+    info.payload()
+        .downcast_ref::<&'static str>()
+        .copied()
+        .or(info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+        .is_some_and(|message| message.contains("Broken pipe"))
+}
+
+fn run_command(command: Command, ctx: impl term::Context) -> Result<(), anyhow::Error> {
+    match command {
+        Command::Auth(args) => auth::run(args, ctx),
+        Command::Block(args) => block::run(args, ctx),
+        Command::Checkout(args) => checkout::run(args, ctx),
+        Command::Clean(args) => clean::run(args, ctx),
+        Command::Clone(args) => clone::run(args, ctx),
+        Command::Cob(args) => cob::run(args, ctx),
+        Command::Config(args) => config::run(args, ctx),
+        Command::Debug(args) => debug::run(args, ctx),
+        Command::Follow(args) => follow::run(args, ctx),
+        Command::Fork(args) => fork::run(args, ctx),
+        Command::Id(args) => id::run(args, ctx),
+        Command::Inbox(args) => inbox::run(args, ctx),
+        Command::Init(args) => init::run(args, ctx),
+        Command::Inspect(args) => inspect::run(args, ctx),
+        Command::Issue(args) => issue::run(args, ctx),
+        Command::Ls(args) => ls::run(args, ctx),
+        Command::Node(args) => node::run(args, ctx),
+        Command::Patch(args) => patch::run(args, ctx),
+        Command::Path(args) => path::run(args, ctx),
+        Command::Publish(args) => publish::run(args, ctx),
+        Command::Remote(args) => remote::run(args, ctx),
+        Command::Seed(args) => seed::run(args, ctx),
+        Command::RadSelf(args) => rad_self::run(args, ctx),
+        Command::Stats(args) => stats::run(args, ctx),
+        Command::Sync(args) => sync::run(args, ctx),
+        Command::Unblock(args) => unblock::run(args, ctx),
+        Command::Unfollow(args) => unfollow::run(args, ctx),
+        Command::Unseed(args) => unseed::run(args, ctx),
+        Command::Watch(args) => watch::run(args, ctx),
+        Command::Version { json } => write_version(json),
+        Command::Completion { shell } => {
+            print_completion(shell, &mut CliArgs::command());
+            Ok(())
+        }
+        Command::External(args) => ExternalCommand::new(args).run(),
+    }
+}
+
+fn print_completion<G: clap_complete::Generator>(generator: G, cmd: &mut clap::Command) {
+    clap_complete::generate(
+        generator,
+        cmd,
+        cmd.get_name().to_string(),
+        &mut io::stdout(),
+    );
+}
+
+struct ExternalCommand {
+    command: OsString,
+    args: Vec<OsString>,
+}
+
+impl ExternalCommand {
+    fn new(mut args: Vec<OsString>) -> Self {
+        let command = args.remove(0);
+        Self { command, args }
+    }
+
+    fn is_diff(&self) -> bool {
+        self.command == "diff"
+    }
+
+    fn exe(&self) -> OsString {
+        let mut exe = OsString::from(NAME);
+        exe.push("-");
+        exe.push(self.command.clone());
+        exe
+    }
+
+    fn display_exe(&self) -> impl Display + use<> {
+        match self.exe().into_string() {
+            Ok(exe) => exe,
+            Err(exe) => format!("{exe:?}"),
+        }
+    }
+
+    fn run(self) -> anyhow::Result<()> {
+        // This command is deprecated and delegates to `git diff`.
+        // Even before it was deprecated, it was not printed by
+        // `rad -h`.
+        //
+        // Since it is external, `--help` will delegate to `git diff --help`.
+        if self.is_diff() {
+            return diff::run(self.args);
+        }
+
+        let status = process::Command::new(self.exe()).args(&self.args).status();
+        match status {
+            Ok(status) => {
+                if !status.success() {
+                    return Err(anyhow!("`{}` exited with an error.", self.display_exe()));
                 }
-                Err(err) => {
-                    if let ErrorKind::NotFound = err.kind() {
-                        return Err(Some(anyhow!(
-                            "`{other}` is not a command. See `rad --help` for a list of commands.",
-                        )));
-                    } else {
-                        return Err(Some(err.into()));
-                    }
+                Ok(())
+            }
+            Err(err) => {
+                if let ErrorKind::NotFound = err.kind() {
+                    Err(anyhow!(
+                        "`{}` is not a known command. See `rad --help` for a list of commands.",
+                        self.display_exe(),
+                    ))
+                } else {
+                    Err(err.into())
                 }
             }
         }
     }
-    Ok(())
 }

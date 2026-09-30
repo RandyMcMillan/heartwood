@@ -1,26 +1,21 @@
 mod args;
 
-use radicle::node::{policy, Alias, AliasStore, Handle, NodeId};
-use radicle::{prelude::*, Node};
+use radicle::node::{Alias, AliasStore, Handle, NodeId, policy};
+use radicle::{Node, prelude::*};
 use radicle_term::{Element as _, Paint, Table};
 
 use crate::terminal as term;
 
 pub use args::Args;
 use args::Operation;
-pub(crate) use args::ABOUT;
 
 pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
     let profile = ctx.profile()?;
-    let mut node = radicle::Node::new(profile.socket());
+    let mut node = radicle::Node::new(profile.socket_from_env());
 
     match Operation::from(args) {
-        Operation::Follow {
-            nid,
-            alias,
-            verbose: _,
-        } => follow(nid, alias, &mut node, &profile)?,
-        Operation::List { alias, verbose: _ } => following(&profile, alias)?,
+        Operation::Follow { nid, alias, .. } => follow(nid, alias, &mut node, &profile)?,
+        Operation::List { alias, .. } => following(&profile, alias)?,
     }
 
     Ok(())

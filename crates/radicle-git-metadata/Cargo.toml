@@ -1,13 +1,15 @@
 [package]
 name = "radicle-git-metadata"
+version = "0.2.1"
 description = "Radicle structs that carry Git commit metadata"
-homepage.workspace = true
-repository.workspace = true
-version = "0.1.0"
+
+keywords = ["radicle", "git", "metadata"]
+
 edition.workspace = true
 license.workspace = true
-keywords = ["radicle", "git", "metadata"]
+repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-thiserror = { workspace = true }
+thiserror = { workspace = true, default-features = true }
+git2 = { workspace = true, optional = true }

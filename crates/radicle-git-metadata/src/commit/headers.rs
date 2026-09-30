@@ -7,7 +7,7 @@ const BEGIN_PGP: &str = "-----BEGIN PGP SIGNATURE-----\n";
 /// A collection of headers stored in [`super::CommitData`].
 ///
 /// Note: these do not include `tree`, `parent`, `author`, and `committer`.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Headers(pub(super) Vec<(String, String)>);
 
 /// A `gpgsig` signature stored in [`super::CommitData`].
@@ -69,6 +69,10 @@ impl Headers {
     /// Push a header to the end of the headers section.
     pub fn push(&mut self, name: &str, value: &str) {
         self.0.push((name.to_owned(), value.trim().to_owned()));
+    }
+
+    pub(crate) fn strip_signatures(&mut self) {
+        self.0.retain(|(key, _)| key != "gpgsig");
     }
 }
 

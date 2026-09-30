@@ -33,7 +33,7 @@ As of 2025-05 we can't use `jj` to do push with options directly, see:
  - <https://github.com/jj-vcs/jj/issues/4075>
  - <https://github.com/jj-vcs/jj/pull/2098>
 
-However, since we initialized Jujutusu to colocate with Git, we can just use
+However, since we initialized Jujutsu to colocate with Git, we can just use
 Git to push.
 
 ``` (stderr)
@@ -47,11 +47,11 @@ It will now be listed as one of the open patches.
 
 ```
 $ rad patch
-╭─────────────────────────────────────────────────────────────────────────────────────────╮
-│ ●  ID       Title                      Author         Reviews  Head     +   -   Updated │
-├─────────────────────────────────────────────────────────────────────────────────────────┤
-│ ●  1e31055  Define power requirements  alice   (you)  -        a6ea7b7  +0  -0  now     │
-╰─────────────────────────────────────────────────────────────────────────────────────────╯
+╭─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ ●  ID       Title                      Author         Reviews  Head     +   -   Updated  Labels │
+├─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ ●  1e31055  Define power requirements  alice   (you)  -        a6ea7b7  +0  -0  now             │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 Let's also create a bookmark for it.
@@ -62,21 +62,22 @@ $ jj bookmark create flux-capacitor-power
 
 ```
 $ rad patch show 1e31055 -p
-╭───────────────────────────────────────────────────╮
-│ Title    Define power requirements                │
-│ Patch    1e31055[..                             ] │
-│ Author   alice (you)                              │
-│ Head     a6ea7b7[..                             ] │
-│ Base     f2de534[..                             ] │
-│ Commits  ahead 1, behind 0                        │
-│ Status   open                                     │
-│                                                   │
-│ See details.                                      │
-├───────────────────────────────────────────────────┤
-│ a6ea7b7 Define power requirements                 │
-├───────────────────────────────────────────────────┤
-│ ● Revision 1e31055 @ a6ea7b7 by alice (you) now   │
-╰───────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────╮
+│ Title    Define power requirements                       │
+│ Patch    1e31055[..                             ]        │
+│ Author   alice (you)                                     │
+│ Head     a6ea7b7[..                             ]        │
+│ Base     f2de534[..                             ]        │
+│ Target   master                                          │
+│ Commits  ahead 1, behind 0                               │
+│ Status   open                                            │
+│                                                          │
+│ See details.                                             │
+├──────────────────────────────────────────────────────────┤
+│ a6ea7b7 Define power requirements                        │
+├──────────────────────────────────────────────────────────┤
+│ ● Revision 1e31055 @ [..   ]..a6ea7b7 by alice (you) now │
+╰──────────────────────────────────────────────────────────╯
 
 commit a6ea7b7[..]
 Author: Test User <test.user@example.com>

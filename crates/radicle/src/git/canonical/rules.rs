@@ -9,10 +9,11 @@
 //! the first matched rule, and this can be used to calculate the
 //! [`Canonical::quorum`].
 
-use core::fmt;
+#[cfg(test)]
+mod test;
+
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::sync::LazyLock;
 
 use nonempty::NonEmpty;
 use serde::{Deserialize, Serialize};
@@ -22,103 +23,48 @@ use thiserror::Error;
 use crate::git;
 use crate::git::canonical;
 use crate::git::canonical::Canonical;
-use crate::git::fmt::refspec::QualifiedPattern;
 use crate::git::fmt::Qualified;
-use crate::git::fmt::{refname, RefString};
-use crate::identity::{doc, Did};
+use crate::git::fmt::refspec::QualifiedPattern;
+use crate::identity::{Did, doc};
+
+use super::protect;
+use super::protect::Unprotected;
 
 const ASTERISK: char = '*';
 
-static REFS_RAD: LazyLock<RefString> = LazyLock::new(|| refname!("refs/rad"));
-
-/// Private trait to ensure that not any `Rule` can be deserialized.
-/// Implementations are provided for `Allowed` and `usize` so that `RawRule`s
-/// can be deserialized, while `ValidRule`s cannot – preventing deserialization
+/// Private trait to ensure that not any [`Rule`] can be deserialized.
+/// Implementations are provided for [`Allowed`] and [`usize`] so that [`RawRule`]s
+/// can be deserialized, while [`ValidRule`]s cannot – preventing deserialization
 /// bugs for that type.
 trait Sealed {}
 impl Sealed for Allowed {}
 impl Sealed for usize {}
 
-/// A `Pattern` is a `QualifiedPattern` reference, however, it disallows any
-/// references under the `refs/rad` hierarchy.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(into = "QualifiedPattern", try_from = "QualifiedPattern")]
-pub struct Pattern(QualifiedPattern<'static>);
+/// A pattern for a rule is an unprotected qualified reference pattern.
+/// Requiring [`Unprotected`] makes rules that would create protected references
+/// unrepresentable.
+pub(super) type Pattern = Unprotected<QualifiedPattern<'static>>;
 
-impl fmt::Display for Pattern {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.0.as_str())
-    }
-}
+pub type RawPattern = QualifiedPattern<'static>;
 
-impl From<Pattern> for QualifiedPattern<'static> {
-    fn from(Pattern(pattern): Pattern) -> Self {
-        pattern
-    }
-}
-
-impl<'a> TryFrom<QualifiedPattern<'a>> for Pattern {
-    type Error = PatternError;
-
-    fn try_from(pattern: QualifiedPattern<'a>) -> Result<Self, Self::Error> {
-        if pattern.starts_with(REFS_RAD.as_str()) {
-            Err(PatternError::ProtectedRef {
-                prefix: (*REFS_RAD).clone(),
-                pattern: pattern.to_owned(),
-            })
-        } else {
-            Ok(Self(pattern.to_owned()))
+/// Check if the `pattern` matches the `refname`.
+fn matches(pattern: &RawPattern, refname: &Qualified) -> bool {
+    // N.b. Git's refspecs do not quite match with glob-star semantics. A
+    // single `*` in a refspec is expected to match all references under
+    // that namespace, even if they are further down the hierarchy.
+    // Thus, the following rules are applied:
+    //
+    //   - a trailing `*` matches anything that starts with the prefix
+    //   - a `*` in between path components changes to `**`
+    match pattern.as_str().split_once(ASTERISK) {
+        None => pattern.as_str() == refname.as_str(),
+        Some((prefix, "")) => refname.as_str().starts_with(prefix),
+        Some((prefix, suffix)) => {
+            let mut spec = prefix.to_string();
+            spec.push_str("**");
+            spec.push_str(suffix);
+            fast_glob::glob_match(&spec, refname.as_str())
         }
-    }
-}
-
-impl<'a> TryFrom<Qualified<'a>> for Pattern {
-    type Error = PatternError;
-
-    fn try_from(name: Qualified<'a>) -> Result<Self, Self::Error> {
-        Self::try_from(QualifiedPattern::from(name))
-    }
-}
-
-impl Pattern {
-    /// Check if the `refname` matches the rule's `refspec`.
-    pub fn matches(&self, refname: &Qualified) -> bool {
-        // N.b. Git's refspecs do not quite match with glob-star semantics. A
-        // single `*` in a refspec is expected to match all references under
-        // that namespace, even if they are further down the hierarchy.
-        // Thus, the following rules are applied:
-        //
-        //   - a trailing `*` changes to `**/*`
-        //   - a `*` in between path components changes to `**`
-        let spec = match self.0.as_str().split_once(ASTERISK) {
-            None => self.0.to_string(),
-            // Expand `refs/tags/*` to `refs/tags/**/*`
-            Some((prefix, "")) => {
-                let mut spec = prefix.to_string();
-                spec.push_str("**/*");
-                spec
-            }
-            // Expand `refs/tags/*/v1.0` to `refs/tags/**/v1.0`
-            Some((prefix, suffix)) => {
-                let mut spec = prefix.to_string();
-                spec.push_str("**");
-                spec.push_str(suffix);
-                spec
-            }
-        };
-        fast_glob::glob_match(&spec, refname.as_str())
-    }
-}
-
-impl AsRef<QualifiedPattern<'static>> for Pattern {
-    fn as_ref(&self) -> &QualifiedPattern<'static> {
-        &self.0
-    }
-}
-
-impl PartialOrd for Pattern {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
     }
 }
 
@@ -155,7 +101,7 @@ impl PartialOrd for Pattern {
 ///     component i of `ψ`, denoted `ψ[i]`. This is the case if:
 ///      a. `φ[i]` does not contain an asterisk and `ψ[i]` contains an asterisk,
 ///         i.e. the symbol `*`, e.g. `a < * and abc < a*`.
-///         Note that this is important to capture specificity accross
+///         Note that this is important to capture specificity across
 ///         components, i.e. to conclude that `a/b/* < a/*/c`.
 ///      b. Both `φ[i]` and `ψ[i]` contain an asterisk.
 ///          A. The asterisk in `φ[i]` is further right than the asterisk in `φ[i]`,
@@ -241,8 +187,8 @@ impl Ord for Pattern {
         }
 
         let mut result = ComponentOrdering::default();
-        let mut lhs = self.0.components();
-        let mut rhs = other.0.components();
+        let mut lhs = self.as_ref().components();
+        let mut rhs = other.as_ref().components();
         loop {
             match (lhs.next(), rhs.next()) {
                 (None, Some(_)) => return Ordering::Greater, // (1.)
@@ -253,6 +199,12 @@ impl Ord for Pattern {
                 (None, None) => return result.into(),
             }
         }
+    }
+}
+
+impl PartialOrd for Pattern {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -294,7 +246,13 @@ impl RawRule {
     }
 }
 
-/// A set of `RawRule`s that can be serialized and deserialized.
+/// A set of [`RawRule`]s that can be serialized and deserialized.
+///
+/// Note that matching on the [`RawPattern`]s is deliberately not implemented,
+/// as the [`RawRule`]s are not validated and thus should not be used to
+/// calculate canonical references.
+/// If you want to match on a set of rules, obtain [`Rules`] via
+/// [`Rules::from_raw`], and use [`Rules::matches`] on the result.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawRules {
     /// The reference pattern that this rule applies to.
@@ -302,27 +260,27 @@ pub struct RawRules {
     /// Note that this can be a fully-qualified pattern, e.g. `refs/heads/qa`,
     /// as well as a wild-card pattern, e.g. `refs/tags/*`.
     #[serde(flatten)]
-    pub rules: BTreeMap<Pattern, RawRule>,
+    pub rules: BTreeMap<RawPattern, RawRule>,
 }
 
 impl RawRules {
-    /// Returns an iterator over the [`Pattern`] and [`RawRule`] in the set of
-    /// rules.
-    pub fn iter(&self) -> impl Iterator<Item = (&Pattern, &RawRule)> {
+    /// Returns an iterator over the [`RawPattern`] and [`RawRule`]
+    /// in the set of rules.
+    pub fn iter(&self) -> impl Iterator<Item = (&RawPattern, &RawRule)> {
         self.rules.iter()
     }
 
     /// Add a new [`RawRule`] to the set of rules.
     ///
     /// Returns the replaced rule, if it existed.
-    pub fn insert(&mut self, pattern: Pattern, rule: RawRule) -> Option<RawRule> {
+    pub fn insert(&mut self, pattern: RawPattern, rule: RawRule) -> Option<RawRule> {
         self.rules.insert(pattern, rule)
     }
 
     /// Remove the rule that matches the `pattern` parameter.
     ///
     /// Returns the rule if it existed.
-    pub fn remove(&mut self, pattern: &Pattern) -> Option<RawRule> {
+    pub fn remove(&mut self, pattern: &RawPattern) -> Option<RawRule> {
         self.rules.remove(pattern)
     }
 
@@ -331,43 +289,31 @@ impl RawRules {
         let refname = refname.as_str();
         self.rules
             .iter()
-            .any(|(pattern, _)| pattern.0.as_str() == refname)
-    }
-
-    /// Check if the `refname` matches any existing rules, including glob
-    /// matches.
-    pub fn matches<'a, 'b>(
-        &self,
-        refname: &Qualified<'b>,
-    ) -> impl Iterator<Item = (&Pattern, &RawRule)> + use<'a, '_, 'b> {
-        let refname = refname.clone();
-        self.rules
-            .iter()
-            .filter(move |(pattern, _)| pattern.matches(&refname))
+            .any(|(pattern, _)| pattern.as_str() == refname)
     }
 }
 
-impl Extend<(Pattern, RawRule)> for RawRules {
-    fn extend<T: IntoIterator<Item = (Pattern, RawRule)>>(&mut self, iter: T) {
+impl Extend<(RawPattern, RawRule)> for RawRules {
+    fn extend<T: IntoIterator<Item = (RawPattern, RawRule)>>(&mut self, iter: T) {
         self.rules.extend(iter)
     }
 }
 
-impl From<BTreeMap<Pattern, RawRule>> for RawRules {
-    fn from(rules: BTreeMap<Pattern, RawRule>) -> Self {
+impl From<BTreeMap<RawPattern, RawRule>> for RawRules {
+    fn from(rules: BTreeMap<RawPattern, RawRule>) -> Self {
         RawRules { rules }
     }
 }
 
-impl FromIterator<(Pattern, RawRule)> for RawRules {
-    fn from_iter<T: IntoIterator<Item = (Pattern, RawRule)>>(iter: T) -> Self {
+impl FromIterator<(RawPattern, RawRule)> for RawRules {
+    fn from_iter<T: IntoIterator<Item = (RawPattern, RawRule)>>(iter: T) -> Self {
         iter.into_iter().collect::<BTreeMap<_, _>>().into()
     }
 }
 
 impl IntoIterator for RawRules {
-    type Item = (Pattern, RawRule);
-    type IntoIter = std::collections::btree_map::IntoIter<Pattern, RawRule>;
+    type Item = (RawPattern, RawRule);
+    type IntoIter = std::collections::btree_map::IntoIter<RawPattern, RawRule>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.rules.into_iter()
@@ -382,40 +328,6 @@ impl IntoIterator for RawRules {
 /// `delegates`. In those cases the value needs to be looked up via the identity
 /// document and validated.
 pub type ValidRule = Rule<ResolvedDelegates, doc::Threshold>;
-
-impl ValidRule {
-    /// Initialize a `ValidRule` for the default branch, given by `name`. The
-    /// rule will contain the single `did` as the allowed DID, and use a
-    /// threshold of `1`.
-    ///
-    /// Note that the serialization of the rule will use the `delegates` token
-    /// for the rule. E.g.
-    /// ```json
-    /// {
-    ///   "pattern": "refs/heads/main",
-    ///   "allow": ["did:key:z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi"],
-    ///   "threshold": 1
-    /// }
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// If the `name` reference begins with `refs/rad`.
-    pub fn default_branch(
-        did: Did,
-        name: &git::fmt::RefStr,
-    ) -> Result<(Pattern, Self), PatternError> {
-        let pattern = Pattern::try_from(git::refs::branch(name).to_owned())?;
-        let rule = Self {
-            allow: ResolvedDelegates::Delegates(doc::Delegates::from(did)),
-            // N.B. this needs to be the minimum since we only have one
-            // delegate.
-            threshold: doc::Threshold::MIN,
-            extensions: json::Map::new(),
-        };
-        Ok((pattern, rule))
-    }
-}
 
 impl From<ValidRule> for RawRule {
     fn from(rule: ValidRule) -> Self {
@@ -468,6 +380,22 @@ impl From<Did> for Allowed {
     }
 }
 
+impl std::fmt::Display for Allowed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Allowed::Delegates => f.write_str("\"delegates\""),
+            Allowed::Set(dids) => {
+                let dids = dids
+                    .iter()
+                    .map(|did| did.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\", \"");
+                f.write_fmt(format_args!("[\"{dids}\"]"))
+            }
+        }
+    }
+}
+
 /// A marker `enum` that is used in a [`ValidRule`].
 ///
 /// It ensures that a rule that has been deserialized, resolving the `delegates`
@@ -503,43 +431,12 @@ impl std::ops::Deref for ResolvedDelegates {
     }
 }
 
-/// A reference that has been matched against a [`ValidRule`].
-///
-/// Can be constructed by using [`Rules::matches`].
-#[derive(Debug)]
-pub struct MatchedRule<'a> {
-    refname: Qualified<'a>,
-    rule: ValidRule,
-}
-
-impl MatchedRule<'_> {
-    /// Return the reference name that was used for checking if it was a match.
-    pub fn refname(&self) -> &Qualified<'_> {
-        &self.refname
-    }
-
-    /// Return the rule that was matched.
-    pub fn rule(&self) -> &ValidRule {
-        &self.rule
-    }
-
-    /// Return the allowed DIDs for the matched rule.
-    pub fn allowed(&self) -> &doc::Delegates {
-        self.rule().allowed()
-    }
-
-    /// Return the [`doc::Threshold`] for the matched rule.
-    pub fn threshold(&self) -> &doc::Threshold {
-        self.rule().threshold()
-    }
-}
-
 /// A set of valid [`Rule`]s, where the set of DIDs and threshold are fully
 /// resolved and valid. Since the rules are constructed via a `BTreeMap`, they
 /// cannot be duplicated.
 ///
 /// To construct the set of rules, use [`Rules::from_raw`], which validates a
-/// set of [`RawRule`]s, and their [`Pattern`] references, into a set of
+/// set of [`RawRule`]s, and their [`RawPattern`] references, into a set of
 /// [`ValidRule`]s.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Rules {
@@ -555,48 +452,18 @@ impl FromIterator<(Pattern, ValidRule)> for Rules {
     }
 }
 
-impl<'a> IntoIterator for &'a Rules {
-    type Item = (&'a Pattern, &'a ValidRule);
-    type IntoIter = std::collections::btree_map::Iter<'a, Pattern, ValidRule>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.rules.iter()
-    }
-}
-
-impl IntoIterator for Rules {
-    type Item = (Pattern, ValidRule);
-    type IntoIter = std::collections::btree_map::IntoIter<Pattern, ValidRule>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.rules.into_iter()
-    }
-}
-
-impl Extend<(Pattern, ValidRule)> for Rules {
-    fn extend<T: IntoIterator<Item = (Pattern, ValidRule)>>(&mut self, iter: T) {
-        self.rules.extend(iter)
-    }
-}
-
 impl From<Rules> for RawRules {
     fn from(Rules { rules }: Rules) -> Self {
         Self {
             rules: rules
                 .into_iter()
-                .map(|(pattern, rule)| (pattern, rule.into()))
+                .map(|(pattern, rule)| (pattern.into_inner(), rule.into()))
                 .collect(),
         }
     }
 }
 
 impl Rules {
-    /// Returns an iterator over the [`Pattern`] and [`ValidRule`] in the set of
-    /// rules.
-    pub fn iter(&self) -> impl Iterator<Item = (&Pattern, &ValidRule)> {
-        self.rules.iter()
-    }
-
     /// Returns `true` is the set of rules is empty.
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
@@ -604,7 +471,7 @@ impl Rules {
 
     /// Construct a set of `Rules` given a set of `RawRule`s.
     pub fn from_raw<R>(
-        rules: impl IntoIterator<Item = (Pattern, RawRule)>,
+        rules: impl IntoIterator<Item = (RawPattern, RawRule)>,
         resolve: &mut R,
     ) -> Result<Self, ValidationError>
     where
@@ -612,7 +479,10 @@ impl Rules {
     {
         let valid = rules
             .into_iter()
-            .map(|(pattern, rule)| rule.validate(resolve).map(|rule| (pattern, rule)))
+            .map(|(pattern, rule)| {
+                let pattern = Unprotected::new(pattern)?;
+                rule.validate(resolve).map(|rule| (pattern, rule))
+            })
             .collect::<Result<_, _>>()?;
         Ok(Self { rules: valid })
     }
@@ -621,11 +491,12 @@ impl Rules {
     pub fn matches<'a>(
         &self,
         refname: &Qualified<'a>,
-    ) -> impl Iterator<Item = (&Pattern, &ValidRule)> + use<'a, '_> {
+    ) -> impl Iterator<Item = (&RawPattern, &ValidRule)> + use<'a, '_> {
         let refname_cloned = refname.clone();
         self.rules
             .iter()
-            .filter(move |(pattern, _)| pattern.matches(&refname_cloned))
+            .filter(move |(pattern, _)| matches(pattern.as_ref(), &refname_cloned))
+            .map(|(pattern, rule)| (pattern.as_ref(), rule))
     }
 
     /// Match given refname, take the most specific rule, and prepare evaluation
@@ -650,7 +521,7 @@ impl Rules {
 }
 
 /// A `Rule` defines how a reference or set of references can be made canonical,
-/// i.e. have a top-level `refs/*` entry – see [`Pattern`].
+/// i.e. have a top-level `refs/*` entry – see [`RawPattern`].
 ///
 /// The [`Rule::allowed`] type is generic to allow for [`Allowed`] to be used
 /// for serialization and deserialization, however, the use of
@@ -714,522 +585,17 @@ impl<D, T> Rule<D, T> {
 }
 
 #[derive(Debug, Error)]
-pub enum PatternError {
-    #[error("cannot create rule for '{pattern}' since references under '{prefix}' are protected")]
-    ProtectedRef {
-        prefix: RefString,
-        pattern: QualifiedPattern<'static>,
-    },
-}
-
-#[derive(Debug, Error)]
 pub enum ValidationError {
     #[error(transparent)]
     Threshold(#[from] doc::ThresholdError),
     #[error(transparent)]
     Delegates(#[from] doc::DelegatesError),
-    #[error("cannot create rule for reserved `rad` references '{pattern}'")]
-    RadRef { pattern: QualifiedPattern<'static> },
+    #[error(transparent)]
+    Protected(#[from] protect::Error),
 }
 
 #[derive(Debug, Error)]
 pub enum CanonicalError {
     #[error(transparent)]
     Git(#[from] crate::git::raw::Error),
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use nonempty::nonempty;
-
-    use crate::crypto::{test::signer::MockSigner, Signer};
-    use crate::git;
-    use crate::git::fmt::qualified_pattern;
-    use crate::git::fmt::RefString;
-    use crate::identity::doc::Doc;
-    use crate::identity::Visibility;
-    use crate::node::device::Device;
-    use crate::rad;
-    use crate::storage::refs::{IDENTITY_BRANCH, IDENTITY_ROOT, SIGREFS_BRANCH};
-    use crate::storage::{git::transport, ReadStorage};
-    use crate::test::{arbitrary, fixtures};
-    use crate::Storage;
-
-    use super::*;
-
-    fn roundtrip(rule: &Rule<Allowed, usize>) {
-        let json = serde_json::to_string(rule).unwrap();
-        assert_eq!(
-            *rule,
-            serde_json::from_str(&json).unwrap(),
-            "failed to roundtrip: {json}"
-        )
-    }
-
-    fn did(s: &str) -> Did {
-        s.parse().unwrap()
-    }
-
-    fn pattern(qp: QualifiedPattern<'static>) -> Pattern {
-        Pattern::try_from(qp).unwrap()
-    }
-
-    fn resolve_from_doc(doc: &Doc) -> doc::Delegates {
-        doc.delegates().clone()
-    }
-
-    fn tag(name: RefString, head: git::raw::Oid, repo: &git::raw::Repository) -> git::Oid {
-        let commit = fixtures::commit(name.as_str(), &[head], repo);
-        let target = repo.find_object(commit.into(), None).unwrap();
-        let tagger = repo.signature().unwrap();
-        repo.tag(name.as_str(), &target, &tagger, name.as_str(), false)
-            .unwrap()
-            .into()
-    }
-
-    #[test]
-    fn test_roundtrip() {
-        let rule1 = Rule::new(Allowed::Delegates, 1);
-        let rule2 = Rule::new(Allowed::Delegates, 1);
-        let rule3 = Rule::new(Allowed::Delegates, 1);
-        let mut rule4 = Rule::new(
-            Allowed::Set(nonempty![
-                did("did:key:z6MkpQTLwr8QyADGmBGAMsGttvWzP4PojUMs4hREZW5T5E3K"),
-                did("did:key:z6MknG1nYDftMYUQ7eTBSGgqB2PL1xK5Pif33J3sRym3e8ye"),
-            ]),
-            2,
-        );
-        rule4.add_extensions(
-            serde_json::json!({
-                "foo": "bar",
-                "quux": 5,
-            })
-            .as_object()
-            .cloned()
-            .unwrap(),
-        );
-        roundtrip(&rule1);
-        roundtrip(&rule2);
-        roundtrip(&rule3);
-        roundtrip(&rule4);
-    }
-
-    #[test]
-    fn test_deserialization() {
-        let examples = r#"
-{
-  "refs/heads/main": {
-    "threshold": 2,
-    "allow": [
-      "did:key:z6MkpQTLwr8QyADGmBGAMsGttvWzP4PojUMs4hREZW5T5E3K",
-      "did:key:z6MknG1nYDftMYUQ7eTBSGgqB2PL1xK5Pif33J3sRym3e8ye"
-    ]
-  },
-  "refs/tags/releases/*": {
-    "threshold": 2,
-    "allow": [
-      "did:key:z6MknLWe8A7UJxvTfY36JcB8XrP1KTLb5HFTX38hEmdY3b56",
-      "did:key:z6Mkq2E5Se5H9gk1DsL1EMwR2t4CqSg3GFkNN2UeG4FNqXoP",
-      "did:key:z6MkqRmXW5fbP9hJ1Y8j2N4CgVdJ2XJ6TsyXYf3FQ2NJgXax"
-    ]
-  },
-  "refs/heads/development": {
-    "threshold": 1,
-    "allow": [
-      "did:key:z6MkhH7ENYE62JAjTiRZPU71MGZ6xCwnbyHHWfrBu3fr6PVG"
-    ]
-  },
-  "refs/heads/release/*": {
-    "threshold": 1,
-    "allow": "delegates"
-  }
-}
- "#;
-        let expected = [
-            (
-                pattern(qualified_pattern!("refs/heads/main")),
-                Rule::new(
-                    Allowed::Set(nonempty![
-                        did("did:key:z6MkpQTLwr8QyADGmBGAMsGttvWzP4PojUMs4hREZW5T5E3K"),
-                        did("did:key:z6MknG1nYDftMYUQ7eTBSGgqB2PL1xK5Pif33J3sRym3e8ye"),
-                    ]),
-                    2,
-                ),
-            ),
-            (
-                pattern(qualified_pattern!("refs/tags/releases/*")),
-                Rule::new(
-                    Allowed::Set(nonempty![
-                        did("did:key:z6MknLWe8A7UJxvTfY36JcB8XrP1KTLb5HFTX38hEmdY3b56"),
-                        did("did:key:z6Mkq2E5Se5H9gk1DsL1EMwR2t4CqSg3GFkNN2UeG4FNqXoP"),
-                        did("did:key:z6MkqRmXW5fbP9hJ1Y8j2N4CgVdJ2XJ6TsyXYf3FQ2NJgXax")
-                    ]),
-                    2,
-                ),
-            ),
-            (
-                pattern(qualified_pattern!("refs/heads/development")),
-                Rule::new(
-                    Allowed::Set(nonempty![did(
-                        "did:key:z6MkhH7ENYE62JAjTiRZPU71MGZ6xCwnbyHHWfrBu3fr6PVG"
-                    )]),
-                    1,
-                ),
-            ),
-            (
-                pattern(qualified_pattern!("refs/heads/release/*")),
-                Rule::new(Allowed::Delegates, 1),
-            ),
-        ]
-        .into_iter()
-        .collect::<RawRules>();
-        let rules = serde_json::from_str::<BTreeMap<Pattern, RawRule>>(examples)
-            .unwrap()
-            .into();
-        assert_eq!(expected, rules)
-    }
-
-    #[test]
-    fn test_order() {
-        assert!(
-            pattern(qualified_pattern!("refs/heads/a/b/c/d/*"))
-                < pattern(qualified_pattern!("refs/heads/*/x")),
-            "example 1"
-        );
-        assert!(
-            pattern(qualified_pattern!("refs/heads/a"))
-                < pattern(qualified_pattern!("refs/heads/*")),
-            "example 2.a"
-        );
-        assert!(
-            pattern(qualified_pattern!("refs/heads/abc"))
-                < pattern(qualified_pattern!("refs/heads/a*")),
-            "example 2.a"
-        );
-        assert!(
-            pattern(qualified_pattern!("refs/heads/a/b/*"))
-                < pattern(qualified_pattern!("refs/heads/a/*/c")),
-            "example 2.a"
-        );
-        assert!(
-            pattern(qualified_pattern!("refs/heads/aa*"))
-                < pattern(qualified_pattern!("refs/heads/a*")),
-            "example 2.b.A"
-        );
-        assert!(
-            pattern(qualified_pattern!("refs/heads/a*b"))
-                < pattern(qualified_pattern!("refs/heads/a*")),
-            "example 2.b.B"
-        );
-
-        let pattern01 = pattern(qualified_pattern!("refs/tags/*"));
-        let pattern02 = pattern(qualified_pattern!("refs/tags/v1"));
-        let pattern04 = pattern(qualified_pattern!("refs/tags/v1.0.0"));
-        let pattern05 = pattern(qualified_pattern!("refs/tags/release/v1.0.0"));
-        let pattern03 = pattern(qualified_pattern!("refs/heads/main"));
-        let pattern06 = pattern(qualified_pattern!("refs/tags/*/v1.0.0"));
-
-        let pattern07 = pattern(qualified_pattern!("refs/tags/x*"));
-        let pattern08 = pattern(qualified_pattern!("refs/tags/xx*"));
-
-        let pattern09 = pattern(qualified_pattern!("refs/foos/*"));
-
-        let pattern10 = pattern(qualified_pattern!("refs/heads/a"));
-        let pattern11 = pattern(qualified_pattern!("refs/heads/b"));
-
-        let pattern12 = pattern(qualified_pattern!("refs/heads/a/*"));
-        let pattern13 = pattern(qualified_pattern!("refs/heads/b/*"));
-
-        let pattern14 = pattern(qualified_pattern!("refs/heads/a/*/ab"));
-        let pattern15 = pattern(qualified_pattern!("refs/heads/a/*/a"));
-
-        let pattern16 = pattern(qualified_pattern!("refs/heads/a/*/b"));
-        let pattern17 = pattern(qualified_pattern!("refs/heads/a/*/a"));
-
-        // Test priority for path specificity
-        assert!(
-            pattern06 < pattern02,
-            "match for 06 is always more specific since it has more components"
-        );
-        assert!(pattern02 < pattern01, "match for 02 is also match for 01");
-        assert!(pattern08 < pattern07, "match for 08 is also match for 07");
-        // Test equality
-        assert!(pattern02 == pattern02);
-        // Test lexicographical fallback when paths are equally specific
-        assert!(pattern02 < pattern04);
-        assert!(pattern03 < pattern01);
-        assert!(pattern09 < pattern01);
-        assert!(pattern10 < pattern11);
-        assert!(pattern12 < pattern13);
-        assert!(pattern15 < pattern14);
-        assert!(
-            pattern17 < pattern16,
-            "matches have same length, but lexicographically, 'a' < 'b'"
-        );
-
-        // Test example from docs
-        let pattern18 = pattern(qualified_pattern!("refs/tags/release/candidates/*"));
-        let pattern19 = pattern(qualified_pattern!("refs/tags/release/*"));
-        let pattern20 = pattern(qualified_pattern!("refs/tags/*"));
-
-        assert!(pattern18 < pattern19);
-        assert!(pattern19 < pattern20);
-
-        let pattern21 = pattern(qualified_pattern!("refs/heads/dev"));
-
-        assert!(pattern21 < pattern03);
-
-        let mut patterns = [
-            pattern01.clone(),
-            pattern02.clone(),
-            pattern03.clone(),
-            pattern04.clone(),
-            pattern05.clone(),
-            pattern06.clone(),
-        ];
-        patterns.sort();
-
-        assert_eq!(
-            patterns,
-            [pattern05, pattern06, pattern03, pattern02, pattern04, pattern01]
-        );
-    }
-
-    #[test]
-    fn test_deserialize_extensions() {
-        let example = r#"
-{
-  "threshold": 2,
-  "allow": [
-    "did:key:z6MkpQTLwr8QyADGmBGAMsGttvWzP4PojUMs4hREZW5T5E3K",
-    "did:key:z6MknG1nYDftMYUQ7eTBSGgqB2PL1xK5Pif33J3sRym3e8ye"
-  ],
-  "foo": "bar",
-  "quux": 5
-}
-"#;
-        let rule = serde_json::from_str::<Rule<Allowed, usize>>(example).unwrap();
-        assert!(!rule.extensions().is_empty());
-        let extensions = rule.extensions();
-        assert_eq!(
-            extensions.get("foo"),
-            Some(serde_json::Value::String("bar".to_string())).as_ref()
-        );
-        assert_eq!(
-            extensions.get("quux"),
-            Some(serde_json::Value::Number(5.into())).as_ref()
-        );
-    }
-
-    #[test]
-    fn test_rule_validate_success() {
-        let doc = arbitrary::gen::<Doc>(1);
-        let delegates = Allowed::Set(doc.delegates().as_ref().clone());
-        let threshold = doc.majority();
-
-        let rule = Rule::new(delegates, threshold);
-        let result = rule.validate(&mut || resolve_from_doc(&doc));
-        assert!(result.is_ok(), "failed to validate doc: {result:?}");
-
-        let rule = Rule::new(Allowed::Delegates, 1);
-        let result = rule.validate(&mut || resolve_from_doc(&doc));
-        assert!(result.is_ok(), "failed to validate doc: {result:?}");
-    }
-
-    #[test]
-    fn test_rule_validate_failures() {
-        let doc = arbitrary::gen::<Doc>(1);
-        let pattern = pattern(qualified_pattern!("refs/heads/main"));
-
-        assert!(matches!(
-            Rule::new(Allowed::Delegates, 256).validate(&mut || resolve_from_doc(&doc)),
-            Err(ValidationError::Threshold(_))
-        ));
-
-        let threshold = doc.delegates().len().saturating_add(1);
-        assert!(matches!(
-            Rule::new(Allowed::Delegates, threshold).validate(&mut || resolve_from_doc(&doc)),
-            Err(ValidationError::Threshold(_))
-        ));
-
-        let delegates = NonEmpty::from_vec(arbitrary::vec::<Did>(256)).unwrap();
-        assert!(matches!(
-            Rule::new(delegates.into(), 1).validate(&mut || resolve_from_doc(&doc)),
-            Err(ValidationError::Delegates(_))
-        ));
-
-        let delegates = nonempty![
-            did("did:key:z6MknLWe8A7UJxvTfY36JcB8XrP1KTLb5HFTX38hEmdY3b56"),
-            did("did:key:z6MknLWe8A7UJxvTfY36JcB8XrP1KTLb5HFTX38hEmdY3b56")
-        ];
-        let expected = Rule {
-            allow: ResolvedDelegates::Set(
-                doc::Delegates::new(nonempty![did(
-                    "did:key:z6MknLWe8A7UJxvTfY36JcB8XrP1KTLb5HFTX38hEmdY3b56"
-                )])
-                .unwrap(),
-            ),
-            threshold: doc::Threshold::MIN,
-            extensions: json::Map::new(),
-        };
-        assert_eq!(
-            Rule::new(delegates.into(), 1)
-                .validate(&mut || resolve_from_doc(&doc))
-                .unwrap(),
-            expected,
-        );
-
-        // Duplicate rules are overwritten
-        let rules = vec![
-            (pattern.clone(), Rule::new(Allowed::Delegates, 1)),
-            (
-                pattern.clone(),
-                Rule::new(doc.delegates().as_ref().clone().into(), 1),
-            ),
-        ];
-        let expected = [(
-            pattern,
-            Rule::new(
-                ResolvedDelegates::Set(doc.delegates().clone()),
-                doc::Threshold::MIN,
-            ),
-        )]
-        .into_iter()
-        .collect::<Rules>();
-        assert_eq!(
-            Rules::from_raw(rules, &mut || resolve_from_doc(&doc)).unwrap(),
-            expected
-        );
-    }
-
-    #[test]
-    fn test_canonical() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(tempdir.path().join("storage"), fixtures::user()).unwrap();
-
-        transport::local::register(storage.clone());
-
-        let delegate = Device::mock_from_seed([0xff; 32]);
-        let contributor = MockSigner::from_seed([0xfe; 32]);
-        let (repo, head) = fixtures::repository(tempdir.path().join("working"));
-        let (rid, doc, _) = rad::init(
-            &repo,
-            "heartwood".try_into().unwrap(),
-            "Radicle Heartwood Protocol & Stack",
-            git::fmt::refname!("master"),
-            Visibility::default(),
-            &delegate,
-            &storage,
-        )
-        .unwrap();
-
-        let mut doc = doc.edit();
-        // Ensure there is a second delegate for testing overlapping rules
-        doc.delegate(contributor.public_key().into());
-
-        // Create tags and keep track of their OIDs
-        //
-        // follows the `refs/tags/release/candidates/*` rule
-        let failing_tag = git::fmt::refname!("release/candidates/v1.0");
-        let tags = [
-            // follows the `refs/tags/*` rule
-            git::fmt::refname!("v1.0"),
-            // follows the `refs/tags/release/*` rule
-            git::fmt::refname!("release/v1.0"),
-            failing_tag.clone(),
-            // follows the `refs/tags/*` rule
-            git::fmt::refname!("qa/v1.0"),
-        ]
-        .into_iter()
-        .map(|name| {
-            (
-                git::fmt::lit::refs_tags(name.clone()).into(),
-                tag(name, head, &repo),
-            )
-        })
-        .collect::<BTreeMap<Qualified, _>>();
-
-        git::push(
-            &repo,
-            &rad::REMOTE_NAME,
-            [
-                (
-                    &git::fmt::qualified!("refs/tags/v1.0"),
-                    &git::fmt::qualified!("refs/tags/v1.0"),
-                ),
-                (
-                    &git::fmt::qualified!("refs/tags/release/v1.0"),
-                    &git::fmt::qualified!("refs/tags/release/v1.0"),
-                ),
-                (
-                    &git::fmt::qualified!("refs/tags/release/candidates/v1.0"),
-                    &git::fmt::qualified!("refs/tags/release/candidates/v1.0"),
-                ),
-                (
-                    &git::fmt::qualified!("refs/tags/qa/v1.0"),
-                    &git::fmt::qualified!("refs/tags/qa/v1.0"),
-                ),
-            ],
-        )
-        .unwrap();
-
-        let rules = Rules::from_raw(
-            [
-                (
-                    pattern(qualified_pattern!("refs/tags/*")),
-                    Rule::new(Allowed::Delegates, 1),
-                ),
-                (
-                    pattern(qualified_pattern!("refs/tags/release/*")),
-                    Rule::new(Allowed::Delegates, 1),
-                ),
-                // Ensure that none of the other rules apply by ensuring we need
-                // both delegates to get the quorum of the
-                // `refs/tags/release/candidates/v1.0` reference
-                (
-                    pattern(qualified_pattern!("refs/tags/release/candidates/*")),
-                    Rule::new(Allowed::Delegates, 2),
-                ),
-            ],
-            &mut || resolve_from_doc(&doc.clone().verified().unwrap()),
-        )
-        .unwrap();
-
-        // All tags should succeed at getting their canonical commit other than the
-        // candidates tag.
-        let stored = storage.repository(rid).unwrap();
-        let failing = git::fmt::Qualified::from(git::fmt::lit::refs_tags(failing_tag));
-        for (refname, oid) in tags.into_iter() {
-            let canonical = rules
-                .canonical(refname.clone(), &stored)
-                .unwrap_or_else(|| {
-                    panic!("there should be a matching rule for {refname}, rules: {rules:#?}")
-                });
-            if refname == failing {
-                assert!(canonical.find_objects().unwrap().quorum().is_err());
-            } else {
-                assert_eq!(
-                    canonical
-                        .find_objects()
-                        .unwrap()
-                        .quorum()
-                        .unwrap_or_else(|e| panic!("quorum error for {refname}: {e}")),
-                    canonical::Quorum {
-                        refname,
-                        object: canonical::Object::Tag { id: oid },
-                    }
-                )
-            }
-        }
-    }
-
-    #[test]
-    fn test_special_branches() {
-        assert!(Pattern::try_from((*IDENTITY_BRANCH).clone()).is_err());
-        assert!(Pattern::try_from((*SIGREFS_BRANCH).clone()).is_err());
-        assert!(Pattern::try_from((*IDENTITY_ROOT).clone()).is_err());
-    }
 }

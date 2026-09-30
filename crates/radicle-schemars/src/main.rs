@@ -83,11 +83,8 @@ fn print_schema() -> io::Result<()> {
             #[schemars(untagged)]
             #[allow(dead_code)]
             enum CommandResult {
-                Nid(
-                    #[schemars(with = "radicle::schemars_ext::crypto::PublicKey")]
-                    radicle::node::NodeId,
-                ),
-                Config(radicle::node::Config),
+                Nid(radicle::node::NodeId),
+                Config(Box<radicle::node::Config>),
                 ListenAddrs(ListenAddrs),
                 ConnectResult(radicle::node::ConnectResult),
                 Success(radicle::node::Success),

@@ -2,13 +2,18 @@ use std::{mem, net};
 
 use bytes::Buf;
 use bytes::BufMut;
-use cyphernet::addr::{tor, HostName, NetAddr};
+#[cfg(feature = "i2p")]
+use cypheraddr::i2p;
+#[cfg(feature = "tor")]
+use cypheraddr::tor;
+use cypheraddr::{HostName, NetAddr};
 use radicle::crypto::Signature;
 use radicle::git::Oid;
 use radicle::identity::RepoId;
 use radicle::node::Address;
 use radicle::node::NodeId;
 use radicle::node::Timestamp;
+use radicle::node::address::AddressType;
 
 use crate::bounded::BoundedVec;
 use crate::service::filter::Filter;
@@ -69,48 +74,6 @@ impl Message {
             Self::Pong { .. } => MessageType::Pong,
         }
         .into()
-    }
-}
-
-/// Address type.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AddressType {
-    Ipv4 = 1,
-    Ipv6 = 2,
-    Dns = 3,
-    Onion = 4,
-}
-
-impl From<AddressType> for u8 {
-    fn from(other: AddressType) -> Self {
-        other as u8
-    }
-}
-
-impl From<&Address> for AddressType {
-    fn from(a: &Address) -> Self {
-        match a.host {
-            HostName::Ip(net::IpAddr::V4(_)) => AddressType::Ipv4,
-            HostName::Ip(net::IpAddr::V6(_)) => AddressType::Ipv6,
-            HostName::Dns(_) => AddressType::Dns,
-            HostName::Tor(_) => AddressType::Onion,
-            _ => todo!(), // FIXME(cloudhead): Maxim will remove `non-exhaustive`
-        }
-    }
-}
-
-impl TryFrom<u8> for AddressType {
-    type Error = u8;
-
-    fn try_from(other: u8) -> Result<Self, Self::Error> {
-        match other {
-            1 => Ok(AddressType::Ipv4),
-            2 => Ok(AddressType::Ipv6),
-            3 => Ok(AddressType::Dns),
-            4 => Ok(AddressType::Onion),
-            _ => Err(other),
-        }
     }
 }
 
@@ -356,8 +319,14 @@ impl wire::Encode for Address {
                 u8::from(AddressType::Dns).encode(buf);
                 dns.encode(buf);
             }
+            #[cfg(feature = "tor")]
             HostName::Tor(addr) => {
                 u8::from(AddressType::Onion).encode(buf);
+                addr.encode(buf);
+            }
+            #[cfg(feature = "i2p")]
+            HostName::I2p(ref addr) => {
+                u8::from(AddressType::I2p).encode(buf);
                 addr.encode(buf);
             }
             _ => {
@@ -393,10 +362,23 @@ impl wire::Decode for Address {
 
                 HostName::Dns(dns)
             }
+            #[cfg(feature = "tor")]
             Ok(AddressType::Onion) => {
                 let onion: tor::OnionAddrV3 = wire::Decode::decode(buf)?;
 
                 HostName::Tor(onion)
+            }
+            #[cfg(feature = "i2p")]
+            Ok(AddressType::I2p) => {
+                let i2p: i2p::I2pAddr = wire::Decode::decode(buf)?;
+
+                HostName::I2p(i2p)
+            }
+            Ok(unknown) => {
+                return Err(wire::Invalid::AddressType {
+                    actual: unknown.into(),
+                }
+                .into());
             }
             Err(other) => return Err(wire::Invalid::AddressType { actual: other }.into()),
         };
@@ -426,14 +408,13 @@ impl wire::Decode for ZeroBytes {
 #[cfg(test)]
 mod tests {
     use qcheck_macros::quickcheck;
-    use radicle::node::device::Device;
     use radicle::node::UserAgent;
     use radicle::storage::refs::RefsAt;
     use radicle::test::arbitrary;
 
     use crate::deserializer::Deserializer;
     use crate::prop_roundtrip;
-    use crate::wire::{roundtrip, Encode as _};
+    use crate::wire::{Encode as _, roundtrip};
 
     use super::*;
 
@@ -441,13 +422,13 @@ mod tests {
     prop_roundtrip!(Message);
 
     #[test]
-    fn test_refs_ann_max_size() {
-        let signer = Device::mock();
-        let refs: [RefsAt; REF_REMOTE_LIMIT] = arbitrary::gen(1);
+    fn refs_ann_max_size() {
+        let signer = radicle::crypto::SigningKey::mock(235);
+        let refs: [RefsAt; REF_REMOTE_LIMIT] = arbitrary::r#gen(1);
         let ann = AnnouncementMessage::Refs(RefsAnnouncement {
-            rid: arbitrary::gen(1),
+            rid: arbitrary::r#gen(1),
             refs: BoundedVec::collect_from(&mut refs.into_iter()),
-            timestamp: arbitrary::gen(1),
+            timestamp: arbitrary::r#gen(1),
         });
         let ann = ann.signed(&signer);
         let msg = Message::Announcement(ann);
@@ -457,12 +438,12 @@ mod tests {
     }
 
     #[test]
-    fn test_inv_ann_max_size() {
-        let signer = Device::mock();
-        let inv: [RepoId; INVENTORY_LIMIT] = arbitrary::gen(1);
+    fn inv_ann_max_size() {
+        let signer = radicle::crypto::SigningKey::mock(147);
+        let inv: [RepoId; INVENTORY_LIMIT] = arbitrary::r#gen(1);
         let ann = AnnouncementMessage::Inventory(InventoryAnnouncement {
             inventory: BoundedVec::collect_from(&mut inv.into_iter()),
-            timestamp: arbitrary::gen(1),
+            timestamp: arbitrary::r#gen(1),
         });
         let ann = ann.signed(&signer);
         let msg = Message::Announcement(ann);
@@ -472,16 +453,16 @@ mod tests {
     }
 
     #[test]
-    fn test_node_ann_max_size() {
-        let signer = Device::mock();
-        let addrs: [Address; ADDRESS_LIMIT] = arbitrary::gen(1);
+    fn node_ann_max_size() {
+        let signer = radicle::crypto::SigningKey::mock(247);
+        let addrs: [Address; ADDRESS_LIMIT] = arbitrary::r#gen(1);
         let alias = ['@'; radicle::node::MAX_ALIAS_LENGTH];
         let ann = AnnouncementMessage::Node(NodeAnnouncement {
             version: 1,
             features: Default::default(),
             alias: radicle::node::Alias::new(String::from_iter(alias)),
             addresses: BoundedVec::collect_from(&mut addrs.into_iter()),
-            timestamp: arbitrary::gen(1),
+            timestamp: arbitrary::r#gen(1),
             nonce: u64::MAX,
             agent: UserAgent::default(),
         });
@@ -493,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pingpong_encode_max_size() {
+    fn pingpong_encode_max_size() {
         Message::Ping(Ping {
             ponglen: 0,
             zeroes: ZeroBytes::new(Ping::MAX_PING_ZEROES),
@@ -508,7 +489,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "advance out of bounds")]
-    fn test_ping_encode_size_overflow() {
+    fn ping_encode_size_overflow() {
         Message::Ping(Ping {
             ponglen: 0,
             zeroes: ZeroBytes::new(Ping::MAX_PING_ZEROES + 1),
@@ -518,7 +499,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "advance out of bounds")]
-    fn test_pong_encode_size_overflow() {
+    fn pong_encode_size_overflow() {
         Message::Pong {
             zeroes: ZeroBytes::new(Ping::MAX_PONG_ZEROES + 1),
         }
@@ -539,7 +520,7 @@ mod tests {
         }
 
         qcheck::QuickCheck::new()
-            .gen(qcheck::Gen::new(16))
+            .r#gen(qcheck::Gen::new(16))
             .quickcheck(property as fn(items: Vec<Message>));
     }
 

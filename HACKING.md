@@ -24,11 +24,20 @@ The repository is structured in *crates*, as follows:
 * `radicle-crdt`: Conflict-free replicated datatypes (CRDTs) used for things like discussions and patches.
 * `radicle-crypto`: A wrapper around Ed25519 cryptographic signing primitives.
 * `radicle-dag`: A simple directed acyclic graph implementation used by `radicle-cob`.
-* `radicle-node`: The radicle peer-to-peer daemon that enables users to connect to the network and share code.
+* `radicle-node`: The Radicle peer-to-peer daemon that enables users to connect to the network and share code.
 * `radicle-remote-helper`: A Git remote helper for `rad://` remotes.
-* `radicle-ssh`: OpenSSH functionality, including a library used to interface with `ssh-agent`.
 * `radicle-term`: A generic terminal library used by the Radicle CLI.
 * `radicle-tools`: Tools used to aid in the development of Radicle.
+
+## Task runner
+
+We use [`just >= v1.49.0`](https://just.systems/) to manage project tasks such as linting, formatting, and installing git hooks. To see a list of all available commands, run:
+
+    $ just
+
+If you are not using Nix, it is highly recommended to install the git hooks to automatically run checks before committing and pushing:
+
+    $ just install-hooks
 
 ## Running in debug mode
 
@@ -45,7 +54,7 @@ specify different listen addresses for the peer-to-peer protocol using `--listen
 To view all options, run `cargo run -p radicle-node -- --help`.
 
 You may want to set the appropriate environment variables before running these commands
-to prevent them from interfering with an existing installation of radicle. See the
+to prevent them from interfering with an existing installation of Radicle. See the
 following section on environment variables.
 
 ## Running in isolation
@@ -66,14 +75,14 @@ very large repositories.
 
 ## Environment variables
 
-When developing radicle, some environment variables may be used to make the
+When developing Radicle, some environment variables may be used to make the
 development environment more friendly.
 
 **`RAD_HOME`**
 
-Set this to a path on your file system where you'd like radicle to store keys
+Set this to a path on your file system where you'd like Radicle to store keys
 and repositories. Typically you'll want to set this to a temporary folder, eg.
-`/tmp/radicle`, that can be safely deleted. If set, all radicle data will be
+`/tmp/radicle`, that can be safely deleted. If set, all Radicle data will be
 stored within this folder.
 
 **`RAD_KEYGEN_SEED`**
@@ -127,7 +136,7 @@ possible to write an end-to-end test. These tests can be found in
 
 Radicle stores git repositories inside `$RAD_HOME/storage`, which defaults to
 `~/.radicle/storage` on UNIX-based operating systems. You can use standard git
-tooling to inspect references and other git objects inside storage. Each radicle
+tooling to inspect references and other git objects inside storage. Each Radicle
 repository is stored under its own folder under storage as a bare Git repository.
 
 Once inside a repository folder, the following commands may come in handy.
@@ -164,7 +173,7 @@ remote refs in storage.
 
 ### Connecting to your local node
 
-The radicle node listens on a UNIX domain socket located at
+The Radicle node listens on a UNIX domain socket located at
 `$RAD_HOME/node/control.sock`. Make sure this file is accessible and has the
 required permissions for your user to read and write to it.
 
@@ -174,5 +183,12 @@ Radicle uses Ed25519 keys that are located in `$RAD_HOME/keys`. These keys are
 encoded in the standard OpenSSH format. It's therefore possible to use standard
 OpenSSH tools to interact with them, eg. `ssh-add`.
 
-Your radicle secret key is protected with a passphrase (See: `$RAD_PASSPHRASE`).
+Your Radicle secret key is protected with a passphrase (See: `$RAD_PASSPHRASE`).
 
+## Using `direnv`
+
+The team maintains an `.envrc.sample` file (see [direnv](https://direnv.net/)), that contributors may choose to copy or symlink to their local `.envrc` file.
+This provides some basic tooling and setup that is common to the team.
+For example, if `nix` is installed, the `flake.nix` and `rust-toolchain.toml` files are automatically watched for updates.
+
+_NOTE: It is suggested you do not use `source_env .envrc.sample` in your `.envrc` as [`direnv`'s security checks](https://direnv.net/man/direnv-stdlib.1.html#codesourceenv-ltfileordirpathgtcode) are not triggered when changes are made to `.envrc.sample`._

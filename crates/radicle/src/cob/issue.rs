@@ -11,12 +11,12 @@ use thiserror::Error;
 use crate::cob;
 use crate::cob::common::{Author, Authorization, Label, Reaction, Timestamp, Uri};
 use crate::cob::store::Transaction;
+use crate::cob::store::access::WriteAs;
 use crate::cob::store::{Cob, CobAction};
 use crate::cob::thread::{Comment, CommentId, Thread};
-use crate::cob::{op, store, ActorId, Embed, EntryId, ObjectId, TypeName};
-use crate::cob::{thread, TitleError};
+use crate::cob::{ActorId, Embed, EntryId, ObjectId, TypeName, op, store};
+use crate::cob::{TitleError, thread};
 use crate::identity::doc::DocError;
-use crate::node::device::Device;
 use crate::node::NodeId;
 use crate::prelude::{Did, Doc, ReadRepository, RepoId};
 use crate::storage;
@@ -373,9 +373,9 @@ impl Issue {
             Action::Comment { .. } => Authorization::Allow,
             // All roles can edit or redact their own comments.
             Action::CommentEdit { id, .. } | Action::CommentRedact { id, .. } => {
-                if let Some(comment) = self.thread.comments.get(id) {
+                if let Some(comment) = self.thread.get_comment(id) {
                     if let Some(comment) = comment {
-                        Authorization::from(*actor == comment.author())
+                        Authorization::from(actor == comment.author())
                     } else {
                         Authorization::Unknown
                     }
@@ -472,8 +472,10 @@ impl Issue {
     }
 }
 
-impl<'a, 'g, R, C> From<IssueMut<'a, 'g, R, C>> for (IssueId, Issue) {
-    fn from(value: IssueMut<'a, 'g, R, C>) -> Self {
+impl<'a, 'b, 'g, Repo, Signer: crypto::Signer, Cache>
+    From<IssueMut<'a, 'b, 'g, Repo, Signer, Cache>> for (IssueId, Issue)
+{
+    fn from(value: IssueMut<'a, 'b, 'g, Repo, Signer, Cache>) -> Self {
         (value.id, value.issue)
     }
 }
@@ -579,14 +581,16 @@ impl<R: ReadRepository> store::Transaction<Issue, R> {
     }
 }
 
-pub struct IssueMut<'a, 'g, R, C> {
+pub struct IssueMut<'a, 'b, 'g, Repo, Signer: crypto::Signer, Cache> {
     id: ObjectId,
     issue: Issue,
-    store: &'g mut Issues<'a, R>,
-    cache: &'g mut C,
+    store: &'g mut Issues<'a, Repo, WriteAs<'b, Signer>>,
+    cache: &'g mut Cache,
 }
 
-impl<R, C> std::fmt::Debug for IssueMut<'_, '_, R, C> {
+impl<Repo, Signer: crypto::Signer, Cache> std::fmt::Debug
+    for IssueMut<'_, '_, '_, Repo, Signer, Cache>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.debug_struct("IssueMut")
             .field("id", &self.id)
@@ -595,10 +599,10 @@ impl<R, C> std::fmt::Debug for IssueMut<'_, '_, R, C> {
     }
 }
 
-impl<R, C> IssueMut<'_, '_, R, C>
+impl<Repo, Signer: crypto::Signer, Cache> IssueMut<'_, '_, '_, Repo, Signer, Cache>
 where
-    R: WriteRepository + cob::Store<Namespace = NodeId>,
-    C: cob::cache::Update<Issue>,
+    Repo: WriteRepository + cob::Store<Namespace = NodeId>,
+    Cache: cob::cache::Update<Issue>,
 {
     /// Reload the issue data from storage.
     pub fn reload(&mut self) -> Result<(), store::Error> {
@@ -606,7 +610,6 @@ where
             .store
             .get(&self.id)?
             .ok_or_else(|| store::Error::NotFound(TYPENAME.clone(), self.id))?;
-
         Ok(())
     }
 
@@ -616,132 +619,85 @@ where
     }
 
     /// Assign one or more actors to an issue.
-    pub fn assign<G>(
-        &mut self,
-        assignees: impl IntoIterator<Item = Did>,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("Assign", signer, |tx| tx.assign(assignees))
+    pub fn assign(&mut self, assignees: impl IntoIterator<Item = Did>) -> Result<EntryId, Error> {
+        self.transaction("Assign", |tx| tx.assign(assignees))
     }
 
     /// Set the issue title.
-    pub fn edit<G>(&mut self, title: cob::Title, signer: &Device<G>) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("Edit", signer, |tx| tx.edit(title))
+    pub fn edit(&mut self, title: cob::Title) -> Result<EntryId, Error> {
+        self.transaction("Edit", |tx| tx.edit(title))
     }
 
     /// Set the issue description.
-    pub fn edit_description<G>(
+    pub fn edit_description(
         &mut self,
         description: impl ToString,
         embeds: impl IntoIterator<Item = Embed<Uri>>,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        let (id, _) = self.root();
+    ) -> Result<EntryId, Error> {
+        let (id, _) = self.issue.root();
         let id = *id;
-        self.transaction("Edit description", signer, |tx| {
+        self.transaction("Edit description", |tx| {
             tx.edit_comment(id, description, embeds.into_iter().collect())
         })
     }
 
     /// Lifecycle an issue.
-    pub fn lifecycle<G>(&mut self, state: State, signer: &Device<G>) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("Lifecycle", signer, |tx| tx.lifecycle(state))
+    pub fn lifecycle(&mut self, state: State) -> Result<EntryId, Error> {
+        self.transaction("Lifecycle", |tx| tx.lifecycle(state))
     }
 
     /// Comment on an issue.
-    pub fn comment<G, S>(
+    pub fn comment(
         &mut self,
-        body: S,
+        body: impl ToString,
         reply_to: CommentId,
         embeds: impl IntoIterator<Item = Embed<Uri>>,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-        S: ToString,
-    {
-        self.transaction("Comment", signer, |tx| {
+    ) -> Result<EntryId, Error> {
+        self.transaction("Comment", |tx| {
             tx.comment(body, reply_to, embeds.into_iter().collect())
         })
     }
 
     /// Edit a comment.
-    pub fn edit_comment<G, S>(
+    pub fn edit_comment(
         &mut self,
         id: CommentId,
-        body: S,
+        body: impl ToString,
         embeds: impl IntoIterator<Item = Embed<Uri>>,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-        S: ToString,
-    {
-        self.transaction("Edit comment", signer, |tx| {
+    ) -> Result<EntryId, Error> {
+        self.transaction("Edit comment", |tx| {
             tx.edit_comment(id, body, embeds.into_iter().collect())
         })
     }
 
     /// Redact a comment.
-    pub fn redact_comment<G>(&mut self, id: CommentId, signer: &Device<G>) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("Redact comment", signer, |tx| tx.redact_comment(id))
+    pub fn redact_comment(&mut self, id: CommentId) -> Result<EntryId, Error> {
+        self.transaction("Redact comment", |tx| tx.redact_comment(id))
     }
 
     /// Label an issue.
-    pub fn label<G>(
-        &mut self,
-        labels: impl IntoIterator<Item = Label>,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("Label", signer, |tx| tx.label(labels))
+    pub fn label(&mut self, labels: impl IntoIterator<Item = Label>) -> Result<EntryId, Error> {
+        self.transaction("Label", |tx| tx.label(labels))
     }
 
     /// React to an issue comment.
-    pub fn react<G>(
+    pub fn react(
         &mut self,
         to: CommentId,
         reaction: Reaction,
         active: bool,
-        signer: &Device<G>,
-    ) -> Result<EntryId, Error>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
-        self.transaction("React", signer, |tx| tx.react(to, reaction, active))
+    ) -> Result<EntryId, Error> {
+        self.transaction("React", |tx| tx.react(to, reaction, active))
     }
 
-    pub fn transaction<G, F>(
-        &mut self,
-        message: &str,
-        signer: &Device<G>,
-        operations: F,
-    ) -> Result<EntryId, Error>
+    pub fn transaction<F>(&mut self, message: &str, operations: F) -> Result<EntryId, Error>
     where
-        G: crypto::signature::Signer<crypto::Signature>,
-        F: FnOnce(&mut Transaction<Issue, R>) -> Result<(), store::Error>,
+        F: FnOnce(&mut Transaction<Issue, Repo>) -> Result<(), store::Error>,
     {
         let mut tx = Transaction::default();
         operations(&mut tx)?;
 
-        let (issue, commit) = tx.commit(message, self.id, &mut self.store.raw, signer)?;
+        let (issue, commit) = tx.commit(message, self.id, &mut self.store.raw)?;
         self.cache
             .update(&self.store.as_ref().id(), &self.id, &issue)
             .map_err(|e| Error::CacheUpdate {
@@ -754,7 +710,7 @@ where
     }
 }
 
-impl<R, C> Deref for IssueMut<'_, '_, R, C> {
+impl<Repo, Signer: crypto::Signer, Cache> Deref for IssueMut<'_, '_, '_, Repo, Signer, Cache> {
     type Target = Issue;
 
     fn deref(&self) -> &Self::Target {
@@ -762,24 +718,24 @@ impl<R, C> Deref for IssueMut<'_, '_, R, C> {
     }
 }
 
-pub struct Issues<'a, R> {
-    raw: store::Store<'a, Issue, R>,
+pub struct Issues<'a, Repo, Access> {
+    raw: store::Store<'a, Issue, Repo, Access>,
 }
 
-impl<'a, R> Deref for Issues<'a, R> {
-    type Target = store::Store<'a, Issue, R>;
+impl<'a, Repo, Access> Deref for Issues<'a, Repo, Access> {
+    type Target = store::Store<'a, Issue, Repo, Access>;
 
     fn deref(&self) -> &Self::Target {
         &self.raw
     }
 }
 
-impl<R> HasRepoId for Issues<'_, R>
+impl<Repo, Access> HasRepoId for Issues<'_, Repo, Access>
 where
-    R: ReadRepository,
+    Repo: HasRepoId,
 {
     fn rid(&self) -> RepoId {
-        self.raw.as_ref().id()
+        self.raw.rid()
     }
 }
 
@@ -798,39 +754,58 @@ impl IssueCounts {
     }
 }
 
-impl<'a, R> Issues<'a, R>
+impl<'a, Repo, Access> Issues<'a, Repo, Access>
 where
-    R: ReadRepository + cob::Store<Namespace = NodeId>,
+    Repo: ReadRepository + cob::Store<Namespace = NodeId>,
+    Access: store::access::Access,
 {
     /// Open an issues store.
-    pub fn open(repository: &'a R) -> Result<Self, RepositoryError> {
+    pub fn open(repository: &'a Repo, access: Access) -> Result<Self, RepositoryError> {
         let identity = repository.identity_head()?;
-        let raw = store::Store::open(repository)?.identity(identity);
+        let raw = store::Store::open(repository, access)?.identity(identity);
 
         Ok(Self { raw })
     }
 }
 
-impl<'a, R> Issues<'a, R>
+impl<'a, 'b, Repo, Signer> Issues<'a, Repo, WriteAs<'b, Signer>>
 where
-    R: WriteRepository + cob::Store<Namespace = NodeId>,
+    Repo: WriteRepository + cob::Store<Namespace = NodeId>,
+    Signer: crypto::Signer,
 {
+    /// Get an issue mutably.
+    pub fn get_mut<'g, Cache>(
+        &'g mut self,
+        id: &ObjectId,
+        cache: &'g mut Cache,
+    ) -> Result<IssueMut<'a, 'b, 'g, Repo, Signer, Cache>, Error> {
+        let issue = self
+            .raw
+            .get(id)?
+            .ok_or_else(move || store::Error::NotFound(TYPENAME.clone(), *id))?;
+
+        Ok(IssueMut {
+            id: *id,
+            issue,
+            store: self,
+            cache,
+        })
+    }
+
     /// Create a new issue.
-    pub fn create<'g, G, C>(
+    pub fn create<'g, Cache>(
         &'g mut self,
         title: cob::Title,
         description: impl ToString,
         labels: &[Label],
         assignees: &[Did],
         embeds: impl IntoIterator<Item = Embed<Uri>>,
-        cache: &'g mut C,
-        signer: &Device<G>,
-    ) -> Result<IssueMut<'a, 'g, R, C>, Error>
+        cache: &'g mut Cache,
+    ) -> Result<IssueMut<'a, 'b, 'g, Repo, Signer, Cache>, Error>
     where
-        G: crypto::signature::Signer<crypto::Signature>,
-        C: cob::cache::Update<Issue>,
+        Cache: cob::cache::Update<Issue>,
     {
-        let (id, issue) = Transaction::initial("Create issue", &mut self.raw, signer, |tx, _| {
+        let (id, issue) = Transaction::initial("Create issue", &mut self.raw, |tx, _| {
             tx.thread(description, embeds)?;
             tx.edit(title)?;
 
@@ -855,41 +830,22 @@ where
     }
 
     /// Remove an issue.
-    pub fn remove<C, G>(&self, id: &ObjectId, signer: &Device<G>) -> Result<(), store::Error>
+    pub fn remove<C, G>(&mut self, id: &ObjectId) -> Result<(), store::Error>
     where
         C: cob::cache::Remove<Issue>,
-        G: crypto::signature::Signer<crypto::Signature>,
     {
-        self.raw.remove(id, signer)
+        self.raw.remove(id)
     }
 }
 
-impl<'a, R> Issues<'a, R>
+impl<'a, Repo, Access> Issues<'a, Repo, Access>
 where
-    R: ReadRepository + cob::Store,
+    Repo: ReadRepository + cob::Store<Namespace = NodeId>,
+    Access: store::access::Access,
 {
     /// Get an issue.
     pub fn get(&self, id: &ObjectId) -> Result<Option<Issue>, store::Error> {
         self.raw.get(id)
-    }
-
-    /// Get an issue mutably.
-    pub fn get_mut<'g, C>(
-        &'g mut self,
-        id: &ObjectId,
-        cache: &'g mut C,
-    ) -> Result<IssueMut<'a, 'g, R, C>, store::Error> {
-        let issue = self
-            .raw
-            .get(id)?
-            .ok_or_else(move || store::Error::NotFound(TYPENAME.clone(), *id))?;
-
-        Ok(IssueMut {
-            id: *id,
-            issue,
-            store: self,
-            cache,
-        })
     }
 
     /// Issues count by state.
@@ -940,7 +896,7 @@ pub enum Action {
         /// Should be the root [`CommentId`] if it's a top-level comment.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply_to: Option<CommentId>,
-        /// Embeded content.
+        /// Embedded content.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         embeds: Vec<Embed<Uri>>,
     },
@@ -981,26 +937,27 @@ mod test {
     use pretty_assertions::assert_eq;
 
     use super::*;
-    use crate::cob::{store::CobWithType, ActorId, Reaction};
+    use crate::cob::{ActorId, Reaction, store::CobWithType};
+    use crate::crypto::{Signer as _, SigningKey};
     use crate::git::Oid;
     use crate::issue::cache::Issues as _;
     use crate::test::arbitrary;
     use crate::{assert_matches, test};
 
     #[test]
-    fn test_concurrency() {
+    fn concurrency() {
         let t = test::setup::Network::default();
-        let mut issues_alice = Cache::no_cache(&*t.alice.repo).unwrap();
-        let mut bob_issues = Cache::no_cache(&*t.bob.repo).unwrap();
-        let mut eve_issues = Cache::no_cache(&*t.eve.repo).unwrap();
-        let mut issue_alice = issues_alice
+
+        let mut alice_issues = Cache::no_cache(&*t.alice.repo, &t.alice.signer).unwrap();
+        let mut bob_issues = Cache::no_cache(&*t.bob.repo, &t.bob.signer).unwrap();
+        let mut eve_issues = Cache::no_cache(&*t.eve.repo, &t.eve.signer).unwrap();
+        let mut issue_alice = alice_issues
             .create(
                 cob::Title::new("Alice Issue").unwrap(),
                 "Alice's comment",
                 &[],
                 &[],
                 [],
-                &t.alice.signer,
             )
             .unwrap();
         let id = *issue_alice.id();
@@ -1011,12 +968,8 @@ mod test {
         let mut issue_eve = eve_issues.get_mut(&id).unwrap();
         let mut issue_bob = bob_issues.get_mut(&id).unwrap();
 
-        issue_bob
-            .comment("Bob's reply", *id, vec![], &t.bob.signer)
-            .unwrap();
-        issue_alice
-            .comment("Alice's reply", *id, vec![], &t.alice.signer)
-            .unwrap();
+        issue_bob.comment("Bob's reply", *id, vec![]).unwrap();
+        issue_alice.comment("Alice's reply", *id, vec![]).unwrap();
 
         assert_eq!(issue_bob.comments().count(), 2);
         assert_eq!(issue_alice.comments().count(), 2);
@@ -1042,9 +995,7 @@ mod test {
 
         t.eve.repo.fetch(&t.alice);
 
-        let eve_reply = issue_eve
-            .comment("Eve's reply", *id, vec![], &t.eve.signer)
-            .unwrap();
+        let eve_reply = issue_eve.comment("Eve's reply", *id, vec![]).unwrap();
 
         t.bob.repo.fetch(&t.eve);
         t.alice.repo.fetch(&t.eve);
@@ -1065,7 +1016,7 @@ mod test {
     }
 
     #[test]
-    fn test_ordering() {
+    fn ordering() {
         assert!(CloseReason::Solved > CloseReason::Other);
         assert!(
             State::Open
@@ -1076,12 +1027,12 @@ mod test {
     }
 
     #[test]
-    fn test_issue_create_and_assign() {
+    fn issue_create_and_assign() {
         let test::setup::NodeWithRepo { node, repo, .. } = test::setup::NodeWithRepo::default();
-        let mut issues = Cache::no_cache(&*repo).unwrap();
+        let mut issues = Cache::no_cache(&*repo, &node.signer).unwrap();
 
-        let assignee = Did::from(arbitrary::gen::<ActorId>(1));
-        let assignee_two = Did::from(arbitrary::gen::<ActorId>(1));
+        let assignee = Did::from(arbitrary::r#gen::<ActorId>(1));
+        let assignee_two = Did::from(arbitrary::r#gen::<ActorId>(1));
         let issue = issues
             .create(
                 cob::Title::new("My first issue").unwrap(),
@@ -1089,7 +1040,6 @@ mod test {
                 &[],
                 &[assignee],
                 [],
-                &node.signer,
             )
             .unwrap();
 
@@ -1101,9 +1051,7 @@ mod test {
         assert!(assignees.contains(&assignee));
 
         let mut issue = issues.get_mut(&id).unwrap();
-        issue
-            .assign([assignee, assignee_two], &node.signer)
-            .unwrap();
+        issue.assign([assignee, assignee_two]).unwrap();
 
         let id = issue.id;
         let issue = issues.get(&id).unwrap().unwrap();
@@ -1115,12 +1063,12 @@ mod test {
     }
 
     #[test]
-    fn test_issue_create_and_reassign() {
+    fn issue_create_and_reassign() {
         let test::setup::NodeWithRepo { node, repo, .. } = test::setup::NodeWithRepo::default();
-        let mut issues = Cache::no_cache(&*repo).unwrap();
+        let mut issues = Cache::no_cache(&*repo, &node.signer).unwrap();
 
-        let assignee = Did::from(arbitrary::gen::<ActorId>(1));
-        let assignee_two = Did::from(arbitrary::gen::<ActorId>(1));
+        let assignee = Did::from(arbitrary::r#gen::<ActorId>(1));
+        let assignee_two = Did::from(arbitrary::r#gen::<ActorId>(1));
         let mut issue = issues
             .create(
                 cob::Title::new("My first issue").unwrap(),
@@ -1128,12 +1076,11 @@ mod test {
                 &[],
                 &[assignee, assignee_two],
                 [],
-                &node.signer,
             )
             .unwrap();
 
-        issue.assign([assignee_two], &node.signer).unwrap();
-        issue.assign([assignee_two], &node.signer).unwrap();
+        issue.assign([assignee_two]).unwrap();
+        issue.assign([assignee_two]).unwrap();
         issue.reload().unwrap();
 
         let assignees: Vec<_> = issue.assignees().cloned().collect::<Vec<_>>();
@@ -1141,16 +1088,16 @@ mod test {
         assert_eq!(1, assignees.len());
         assert!(assignees.contains(&assignee_two));
 
-        issue.assign([], &node.signer).unwrap();
+        issue.assign([]).unwrap();
         issue.reload().unwrap();
 
         assert_eq!(0, issue.assignees().count());
     }
 
     #[test]
-    fn test_issue_create_and_get() {
+    fn issue_create_and_get() {
         let test::setup::NodeWithRepo { node, repo, .. } = test::setup::NodeWithRepo::default();
-        let mut issues = Cache::no_cache(&*repo).unwrap();
+        let mut issues = Cache::no_cache(&*repo, &node.signer).unwrap();
         let created = issues
             .create(
                 cob::Title::new("My first issue").unwrap(),
@@ -1158,7 +1105,6 @@ mod test {
                 &[],
                 &[],
                 [],
-                &node.signer,
             )
             .unwrap();
 
@@ -1174,9 +1120,9 @@ mod test {
     }
 
     #[test]
-    fn test_issue_create_and_change_state() {
+    fn issue_create_and_change_state() {
         let test::setup::NodeWithRepo { node, repo, .. } = test::setup::NodeWithRepo::default();
-        let mut issues = Cache::no_cache(&*repo).unwrap();
+        let mut issues = Cache::no_cache(&*repo, &node.signer).unwrap();
         let mut issue = issues
             .create(
                 cob::Title::new("My first issue").unwrap(),
@@ -1184,17 +1130,13 @@ mod test {
                 &[],
                 &[],
                 [],
-                &node.signer,
             )
             .unwrap();
 
         issue
-            .lifecycle(
-                State::Closed {
-                    reason: CloseReason::Other,
-                },
-                &node.signer,
-            )
+            .lifecycle(State::Closed {
+                reason: CloseReason::Other,
+            })
             .unwrap();
 
         let id = issue.id;
@@ -1207,19 +1149,19 @@ mod test {
             }
         );
 
-        issue.lifecycle(State::Open, &node.signer).unwrap();
+        issue.lifecycle(State::Open).unwrap();
         let issue = issues.get(&id).unwrap().unwrap();
 
         assert_eq!(*issue.state(), State::Open);
     }
 
     #[test]
-    fn test_issue_create_and_unassign() {
+    fn issue_create_and_unassign() {
         let test::setup::NodeWithRepo { node, repo, .. } = test::setup::NodeWithRepo::default();
-        let mut issues = Cache::no_cache(&*repo).unwrap();
+        let mut issues = Cache::no_cache(&*repo, &node.signer).unwrap();
 
-        let assignee = Did::from(arbitrary::gen::<ActorId>(1));
-        let assignee_two = Did::from(arbitrary::gen::<ActorId>(1));
+        let [assignee, assignee_two] = arbitrary::array_distinct::<2, _>();
+
         let mut issue = issues
             .create(
                 cob::Title::new("My first issue").unwrap(),
@@ -1227,12 +1169,11 @@ mod test {
                 &[],
                 &[assignee, assignee_two],
                 [],
-                &node.signer,
             )
             .unwrap();
         assert_eq!(2, issue.assignees().count());
 
-        issue.assign([assignee_two], &node.signer).unwrap();
+        issue.assign([assignee_two]).unwrap();
         issue.reload().unwrap();
 
         let assignees: Vec<_> = issue.assignees().cloned().collect::<Vec<_>>();
@@ -1242,9 +1183,9 @@ mod test {
     }
 
     #[test]
-    fn test_issue_edit() {
+    fn issue_edit() {
         let test::setup::NodeWithRepo { node, repo, .. } = test::setup::NodeWithRepo::default();
-        let mut issues = Cache::no_cache(&*repo).unwrap();
+        let mut issues = Cache::no_cache(&*repo, &node.signer).unwrap();
 
         let mut issue = issues
             .create(
@@ -1253,13 +1194,10 @@ mod test {
                 &[],
                 &[],
                 [],
-                &node.signer,
             )
             .unwrap();
 
-        issue
-            .edit(cob::Title::new("Sorry typo").unwrap(), &node.signer)
-            .unwrap();
+        issue.edit(cob::Title::new("Sorry typo").unwrap()).unwrap();
 
         let id = issue.id;
         let issue = issues.get(&id).unwrap().unwrap();
@@ -1269,9 +1207,9 @@ mod test {
     }
 
     #[test]
-    fn test_issue_edit_description() {
+    fn issue_edit_description() {
         let test::setup::NodeWithRepo { node, repo, .. } = test::setup::NodeWithRepo::default();
-        let mut issues = Cache::no_cache(&*repo).unwrap();
+        let mut issues = Cache::no_cache(&*repo, &node.signer).unwrap();
         let mut issue = issues
             .create(
                 cob::Title::new("My first issue").unwrap(),
@@ -1279,12 +1217,11 @@ mod test {
                 &[],
                 &[],
                 [],
-                &node.signer,
             )
             .unwrap();
 
         issue
-            .edit_description("Bob Loblaw law blog", vec![], &node.signer)
+            .edit_description("Bob Loblaw law blog", vec![])
             .unwrap();
 
         let id = issue.id;
@@ -1295,9 +1232,9 @@ mod test {
     }
 
     #[test]
-    fn test_issue_react() {
+    fn issue_react() {
         let test::setup::NodeWithRepo { node, repo, .. } = test::setup::NodeWithRepo::default();
-        let mut issues = Cache::no_cache(&*repo).unwrap();
+        let mut issues = Cache::no_cache(&*repo, &node.signer).unwrap();
         let mut issue = issues
             .create(
                 cob::Title::new("My first issue").unwrap(),
@@ -1305,29 +1242,28 @@ mod test {
                 &[],
                 &[],
                 [],
-                &node.signer,
             )
             .unwrap();
 
         let (comment, _) = issue.root();
         let comment = *comment;
         let reaction = Reaction::new('🥳').unwrap();
-        issue.react(comment, reaction, true, &node.signer).unwrap();
+        issue.react(comment, reaction, true).unwrap();
 
         let id = issue.id;
         let issue = issues.get(&id).unwrap().unwrap();
         let reactions = issue.comment(&comment).unwrap().reactions();
         let authors = reactions.get(&reaction).unwrap();
 
-        assert_eq!(authors.first().unwrap(), &node.signer.public_key());
+        assert_eq!(*authors.first().unwrap(), node.signer.public_key());
 
         // TODO: Test multiple reactions from same author and different authors
     }
 
     #[test]
-    fn test_issue_reply() {
+    fn issue_reply() {
         let test::setup::NodeWithRepo { node, repo, .. } = test::setup::NodeWithRepo::default();
-        let mut issues = Cache::no_cache(&*repo).unwrap();
+        let mut issues = Cache::no_cache(&*repo, &node.signer).unwrap();
         let mut issue = issues
             .create(
                 cob::Title::new("My first issue").unwrap(),
@@ -1335,40 +1271,31 @@ mod test {
                 &[],
                 &[],
                 [],
-                &node.signer,
             )
             .unwrap();
         let (root, _) = issue.root();
         let root = *root;
 
-        let c1 = issue
-            .comment("Hi hi hi.", root, vec![], &node.signer)
-            .unwrap();
-        let c2 = issue
-            .comment("Ha ha ha.", root, vec![], &node.signer)
-            .unwrap();
+        let c1 = issue.comment("Hi hi hi.", root, vec![]).unwrap();
+        let c2 = issue.comment("Ha ha ha.", root, vec![]).unwrap();
 
         let id = issue.id;
         let mut issue = issues.get_mut(&id).unwrap();
-        let (_, reply1) = &issue.replies_to(&root).nth(0).unwrap();
+        let (_, reply1) = &issue.replies_to(&root).next().unwrap();
         let (_, reply2) = &issue.replies_to(&root).nth(1).unwrap();
 
         assert_eq!(reply1.body(), "Hi hi hi.");
         assert_eq!(reply2.body(), "Ha ha ha.");
 
-        issue.comment("Re: Hi.", c1, vec![], &node.signer).unwrap();
-        issue.comment("Re: Ha.", c2, vec![], &node.signer).unwrap();
-        issue
-            .comment("Re: Ha. Ha.", c2, vec![], &node.signer)
-            .unwrap();
-        issue
-            .comment("Re: Ha. Ha. Ha.", c2, vec![], &node.signer)
-            .unwrap();
+        issue.comment("Re: Hi.", c1, vec![]).unwrap();
+        issue.comment("Re: Ha.", c2, vec![]).unwrap();
+        issue.comment("Re: Ha. Ha.", c2, vec![]).unwrap();
+        issue.comment("Re: Ha. Ha. Ha.", c2, vec![]).unwrap();
 
         let issue = issues.get(&id).unwrap().unwrap();
 
-        assert_eq!(issue.replies_to(&c1).nth(0).unwrap().1.body(), "Re: Hi.");
-        assert_eq!(issue.replies_to(&c2).nth(0).unwrap().1.body(), "Re: Ha.");
+        assert_eq!(issue.replies_to(&c1).next().unwrap().1.body(), "Re: Hi.");
+        assert_eq!(issue.replies_to(&c2).next().unwrap().1.body(), "Re: Ha.");
         assert_eq!(
             issue.replies_to(&c2).nth(1).unwrap().1.body(),
             "Re: Ha. Ha."
@@ -1380,9 +1307,9 @@ mod test {
     }
 
     #[test]
-    fn test_issue_label() {
+    fn issue_label() {
         let test::setup::NodeWithRepo { node, repo, .. } = test::setup::NodeWithRepo::default();
-        let mut issues = Cache::no_cache(&*repo).unwrap();
+        let mut issues = Cache::no_cache(&*repo, &node.signer).unwrap();
         let bug_label = Label::new("bug").unwrap();
         let ux_label = Label::new("ux").unwrap();
         let wontfix_label = Label::new("wontfix").unwrap();
@@ -1393,18 +1320,12 @@ mod test {
                 std::slice::from_ref(&ux_label),
                 &[],
                 [],
-                &node.signer,
             )
             .unwrap();
 
+        issue.label([ux_label.clone(), bug_label.clone()]).unwrap();
         issue
-            .label([ux_label.clone(), bug_label.clone()], &node.signer)
-            .unwrap();
-        issue
-            .label(
-                [ux_label.clone(), bug_label.clone(), wontfix_label.clone()],
-                &node.signer,
-            )
+            .label([ux_label.clone(), bug_label.clone(), wontfix_label.clone()])
             .unwrap();
 
         let id = issue.id;
@@ -1417,10 +1338,10 @@ mod test {
     }
 
     #[test]
-    fn test_issue_comment() {
+    fn issue_comment() {
         let test::setup::NodeWithRepo { node, repo, .. } = test::setup::NodeWithRepo::default();
-        let author = *node.signer.public_key();
-        let mut issues = Cache::no_cache(&*repo).unwrap();
+        let author = node.signer.public_key();
+        let mut issues = Cache::no_cache(&*repo, &node.signer).unwrap();
         let mut issue = issues
             .create(
                 cob::Title::new("My first issue").unwrap(),
@@ -1428,7 +1349,6 @@ mod test {
                 &[],
                 &[],
                 [],
-                &node.signer,
             )
             .unwrap();
 
@@ -1436,16 +1356,12 @@ mod test {
         let (c0, _) = issue.root();
         let c0 = *c0;
 
-        issue
-            .comment("Ho ho ho.", c0, vec![], &node.signer)
-            .unwrap();
-        issue
-            .comment("Ha ha ha.", c0, vec![], &node.signer)
-            .unwrap();
+        issue.comment("Ho ho ho.", c0, vec![]).unwrap();
+        issue.comment("Ha ha ha.", c0, vec![]).unwrap();
 
         let id = issue.id;
         let issue = issues.get(&id).unwrap().unwrap();
-        let (_, c0) = &issue.comments().nth(0).unwrap();
+        let (_, c0) = &issue.comments().next().unwrap();
         let (_, c1) = &issue.comments().nth(1).unwrap();
         let (_, c2) = &issue.comments().nth(2).unwrap();
 
@@ -1458,9 +1374,9 @@ mod test {
     }
 
     #[test]
-    fn test_issue_comment_redact() {
+    fn issue_comment_redact() {
         let test::setup::NodeWithRepo { node, repo, .. } = test::setup::NodeWithRepo::default();
-        let mut issues = Cache::no_cache(&*repo).unwrap();
+        let mut issues = Cache::no_cache(&*repo, &node.signer).unwrap();
         let mut issue = issues
             .create(
                 cob::Title::new("My first issue").unwrap(),
@@ -1468,7 +1384,6 @@ mod test {
                 &[],
                 &[],
                 [],
-                &node.signer,
             )
             .unwrap();
 
@@ -1476,21 +1391,19 @@ mod test {
         let (c0, _) = issue.root();
         let c0 = *c0;
 
-        let comment = issue
-            .comment("Ho ho ho.", c0, vec![], &node.signer)
-            .unwrap();
+        let comment = issue.comment("Ho ho ho.", c0, vec![]).unwrap();
         issue.reload().unwrap();
         assert_eq!(issue.comments().count(), 2);
 
-        issue.redact_comment(comment, &node.signer).unwrap();
+        issue.redact_comment(comment).unwrap();
         assert_eq!(issue.comments().count(), 1);
 
         // Can't redact root comment.
-        issue.redact_comment(*issue.id, &node.signer).unwrap_err();
+        issue.redact_comment(*issue.id).unwrap_err();
     }
 
     #[test]
-    fn test_issue_state_serde() {
+    fn issue_state_serde() {
         assert_eq!(
             serde_json::to_value(State::Open).unwrap(),
             serde_json::json!({ "status": "open" })
@@ -1506,38 +1419,17 @@ mod test {
     }
 
     #[test]
-    fn test_issue_all() {
+    fn issue_all() {
         let test::setup::NodeWithRepo { node, repo, .. } = test::setup::NodeWithRepo::default();
-        let mut issues = Cache::no_cache(&*repo).unwrap();
+        let mut issues = Cache::no_cache(&*repo, &node.signer).unwrap();
         issues
-            .create(
-                cob::Title::new("First").unwrap(),
-                "Blah",
-                &[],
-                &[],
-                [],
-                &node.signer,
-            )
+            .create(cob::Title::new("First").unwrap(), "Blah", &[], &[], [])
             .unwrap();
         issues
-            .create(
-                cob::Title::new("Second").unwrap(),
-                "Blah",
-                &[],
-                &[],
-                [],
-                &node.signer,
-            )
+            .create(cob::Title::new("Second").unwrap(), "Blah", &[], &[], [])
             .unwrap();
         issues
-            .create(
-                cob::Title::new("Third").unwrap(),
-                "Blah",
-                &[],
-                &[],
-                [],
-                &node.signer,
-            )
+            .create(cob::Title::new("Third").unwrap(), "Blah", &[], &[], [])
             .unwrap();
 
         let issues = issues
@@ -1555,9 +1447,9 @@ mod test {
     }
 
     #[test]
-    fn test_issue_multilines() {
+    fn issue_multilines() {
         let test::setup::NodeWithRepo { node, repo, .. } = test::setup::NodeWithRepo::default();
-        let mut issues = Cache::no_cache(&*repo).unwrap();
+        let mut issues = Cache::no_cache(&*repo, &node.signer).unwrap();
         let created = issues
             .create(
                 cob::Title::new("My first issue").unwrap(),
@@ -1565,7 +1457,6 @@ mod test {
                 &[],
                 &[],
                 [],
-                &node.signer,
             )
             .unwrap();
 
@@ -1581,9 +1472,9 @@ mod test {
     }
 
     #[test]
-    fn test_embeds() {
+    fn embeds() {
         let test::setup::NodeWithRepo { node, repo, .. } = test::setup::NodeWithRepo::default();
-        let mut issues = Cache::no_cache(&*repo).unwrap();
+        let mut issues = Cache::no_cache(&*repo, &node.signer).unwrap();
 
         let content1 = repo.backend.blob(b"<html>Hello World!</html>").unwrap();
         let content2 = repo.backend.blob(b"<html>Hello Radicle!</html>").unwrap();
@@ -1608,17 +1499,11 @@ mod test {
                 &[],
                 &[],
                 [embed1.clone(), embed2.clone()],
-                &node.signer,
             )
             .unwrap();
 
         issue
-            .comment(
-                "Here's a binary file",
-                *issue.id,
-                [embed3.clone()],
-                &node.signer,
-            )
+            .comment("Here's a binary file", *issue.id, [embed3.clone()])
             .unwrap();
 
         issue.reload().unwrap();
@@ -1640,9 +1525,9 @@ mod test {
     }
 
     #[test]
-    fn test_embeds_edit() {
+    fn embeds_edit() {
         let test::setup::NodeWithRepo { node, repo, .. } = test::setup::NodeWithRepo::default();
-        let mut issues = Cache::no_cache(&*repo).unwrap();
+        let mut issues = Cache::no_cache(&*repo, &node.signer).unwrap();
 
         let content1 = repo.backend.blob(b"<html>Hello World!</html>").unwrap();
         let content1_edited = repo.backend.blob(b"<html>Hello Radicle!</html>").unwrap();
@@ -1667,13 +1552,12 @@ mod test {
                 &[],
                 &[],
                 [embed1, embed2],
-                &node.signer,
             )
             .unwrap();
 
         issue.reload().unwrap();
         issue
-            .edit_description("My first issue", [embed1_edited.clone()], &node.signer)
+            .edit_description("My first issue", [embed1_edited.clone()])
             .unwrap();
         issue.reload().unwrap();
 
@@ -1689,9 +1573,9 @@ mod test {
     }
 
     #[test]
-    fn test_invalid_actions() {
+    fn invalid_actions() {
         let test::setup::NodeWithRepo { node, repo, .. } = test::setup::NodeWithRepo::default();
-        let mut issues = Cache::no_cache(&*repo).unwrap();
+        let mut issues = Cache::no_cache(&*repo, &node.signer).unwrap();
         let mut issue = issues
             .create(
                 cob::Title::new("My first issue").unwrap(),
@@ -1699,14 +1583,11 @@ mod test {
                 &[],
                 &[],
                 [],
-                &node.signer,
             )
             .unwrap();
         let missing = arbitrary::oid();
 
-        issue
-            .comment("Invalid", missing, [], &node.signer)
-            .unwrap_err();
+        issue.comment("Invalid", missing, []).unwrap_err();
         assert_eq!(issue.comments().count(), 1);
         issue.reload().unwrap();
         assert_eq!(issue.comments().count(), 1);
@@ -1723,9 +1604,9 @@ mod test {
     }
 
     #[test]
-    fn test_invalid_tx() {
+    fn invalid_tx() {
         let test::setup::NodeWithRepo { node, repo, .. } = test::setup::NodeWithRepo::default();
-        let mut issues = Cache::no_cache(&*repo).unwrap();
+        let mut issues = Cache::no_cache(&*repo, &node.signer).unwrap();
         let mut issue = issues
             .create(
                 cob::Title::new("My first issue").unwrap(),
@@ -1733,7 +1614,6 @@ mod test {
                 &[],
                 &[],
                 [],
-                &node.signer,
             )
             .unwrap();
         let missing = arbitrary::oid();
@@ -1742,7 +1622,7 @@ mod test {
         // Even creating it via a transaction will trigger an error.
         let mut tx = Transaction::<Issue, _>::default();
         tx.comment("Invalid comment", missing, vec![]).unwrap();
-        tx.commit("Add comment", issue.id, &mut issue.store.raw, &node.signer)
+        tx.commit("Add comment", issue.id, &mut issue.store.raw)
             .unwrap_err();
 
         issue.reload().unwrap();
@@ -1750,9 +1630,9 @@ mod test {
     }
 
     #[test]
-    fn test_invalid_tx_reference() {
+    fn invalid_tx_reference() {
         let test::setup::NodeWithRepo { node, repo, .. } = test::setup::NodeWithRepo::default();
-        let mut issues = Cache::no_cache(&*repo).unwrap();
+        let mut issues = Cache::no_cache(&*repo, &node.signer).unwrap();
         let issue = issues
             .create(
                 cob::Title::new("My first issue").unwrap(),
@@ -1760,7 +1640,6 @@ mod test {
                 &[],
                 &[],
                 [],
-                &node.signer,
             )
             .unwrap();
 
@@ -1773,17 +1652,17 @@ mod test {
     }
 
     #[test]
-    fn test_invalid_cob() {
+    fn invalid_cob() {
         use cob::change::Storage as _;
         use cob::object::Storage as _;
         use nonempty::NonEmpty;
 
         let test::setup::NodeWithRepo { node, repo, .. } = test::setup::NodeWithRepo::default();
-        let eve = Device::mock();
+        let eve = SigningKey::mock(126);
         let identity = repo.identity().unwrap().head();
         let missing = arbitrary::oid();
         let type_name = Issue::type_name().clone();
-        let mut issues = Cache::no_cache(&*repo).unwrap();
+        let mut issues = Cache::no_cache(&*repo, &node.signer).unwrap();
         let mut issue = issues
             .create(
                 cob::Title::new("My first issue").unwrap(),
@@ -1791,7 +1670,6 @@ mod test {
                 &[],
                 &[],
                 [],
-                &node.signer,
             )
             .unwrap();
 
@@ -1848,9 +1726,7 @@ mod test {
 
         // Additionally, when adding a *valid* comment, it does not build upon the bad operation.
         issue.reload().unwrap();
-        issue
-            .comment("Valid comment", *issue.id, vec![], &node.signer)
-            .unwrap();
+        issue.comment("Valid comment", *issue.id, vec![]).unwrap();
         issue.reload().unwrap();
         assert_eq!(issue.comments().count(), 2);
         assert_eq!(issue.thread.timeline().count(), 2);
@@ -1864,10 +1740,13 @@ mod test {
         assert_eq!(cob.history.len(), 3);
         assert_eq!(cob.object.len(), 3);
 
-        // If Eve now writes a valid comment via the `Issue` type, it will overwrite her invalid
+        let mut eve_issues = Cache::no_cache(&*repo, &eve).unwrap();
+        let mut eve_issue = eve_issues.get_mut(issue.id()).unwrap();
+
+        // If Eve now writes a valid comment via the `IssueMut` type, it will overwrite her invalid
         // one, since it won't be loaded as a tip.
-        issue
-            .comment("Eve's comment", *issue.id, vec![], &eve)
+        eve_issue
+            .comment("Eve's comment", *issue.id, vec![])
             .unwrap();
 
         let cob = cob::get::<NonEmpty<cob::Entry>, _>(&*repo, &type_name, issue.id())
@@ -1876,7 +1755,7 @@ mod test {
 
         // There are three nodes still, but they are all valid comments.
         // The invalid comment of Eve was replaced with a valid one.
-        assert_eq!(issue.comments().count(), 3);
+        assert_eq!(eve_issue.comments().count(), 3);
         assert_eq!(cob.history.len(), 3);
         assert_eq!(cob.object.len(), 3);
     }

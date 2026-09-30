@@ -1,10 +1,9 @@
 use std::str::FromStr;
 
+use radicle::Profile;
 use radicle::git;
 use radicle::git::fmt::RefString;
 use radicle::prelude::*;
-use radicle::Profile;
-use radicle_crypto::PublicKey;
 
 use crate::commands::checkout;
 use crate::commands::follow;
@@ -23,7 +22,7 @@ pub fn run(
     sync: bool,
 ) -> anyhow::Result<()> {
     if sync {
-        let mut node = radicle::Node::new(profile.socket());
+        let mut node = radicle::Node::new(profile.socket_from_env());
 
         if !profile.policies()?.is_following(nid)? {
             let alias = name.as_ref().and_then(|n| Alias::from_str(n.as_str()).ok());

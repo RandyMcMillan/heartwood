@@ -4,7 +4,7 @@ use std::ops::{Deref, Range};
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use base64::prelude::{Engine, BASE64_STANDARD};
+use base64::prelude::{BASE64_STANDARD, Engine};
 use localtime::LocalTime;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -13,9 +13,28 @@ use crate::git::Oid;
 use crate::prelude::{Did, PublicKey};
 
 /// Timestamp used for COB operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Timestamp(LocalTime);
+
+impl Serialize for Timestamp {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_u64(self.0.as_millis())
+    }
+}
+
+impl<'de> Deserialize<'de> for Timestamp {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        u128::deserialize(deserializer)
+            .map(LocalTime::from_millis)
+            .map(Self)
+    }
+}
 
 impl Timestamp {
     pub fn from_secs(secs: u64) -> Self {
@@ -58,8 +77,7 @@ pub enum TitleError {
 ///   - Must not be empty
 ///   - Must not contain `\n` or `\r` characters
 ///   - Will be trimmed of any preceding or following whitespace
-#[derive(Display, Deserialize, Serialize, PartialEq, Eq, Clone, Debug)]
-#[display(inner)]
+#[derive(Deserialize, Serialize, PartialEq, Eq, Clone, Debug)]
 pub struct Title(String);
 
 impl Title {
@@ -101,6 +119,12 @@ impl TryFrom<String> for Title {
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         Self::new(&value)
+    }
+}
+
+impl std::fmt::Display for Title {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
     }
 }
 
@@ -435,11 +459,7 @@ pub enum Authorization {
 
 impl From<bool> for Authorization {
     fn from(value: bool) -> Self {
-        if value {
-            Self::Allow
-        } else {
-            Self::Deny
-        }
+        if value { Self::Allow } else { Self::Deny }
     }
 }
 
@@ -505,7 +525,7 @@ mod test {
     use super::*;
 
     #[test]
-    fn test_title() {
+    fn title() {
         assert_eq!(Title::new(""), Err(TitleError::EmptyTitle));
         assert_eq!(Title::new(" "), Err(TitleError::EmptyTitle));
         assert_eq!(Title::new("\t"), Err(TitleError::EmptyTitle));
@@ -515,7 +535,7 @@ mod test {
     }
 
     #[test]
-    fn test_color() {
+    fn color() {
         let c = Color::from_str("#ffccaa").unwrap();
         assert_eq!(c.to_string(), "#ffccaa".to_owned());
         assert_eq!(serde_json::to_string(&c).unwrap(), "\"#ffccaa\"".to_owned());
@@ -535,7 +555,7 @@ mod test {
     }
 
     #[test]
-    fn test_emojis() {
+    fn emojis() {
         let emojis = emojis::Group::SmileysAndEmotion
             .emojis()
             .chain(emojis::Group::PeopleAndBody.emojis())

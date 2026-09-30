@@ -1,17 +1,21 @@
 use std::path::PathBuf;
-use std::time;
 
 use clap::Parser;
 
-use crate::node::SyncSettings;
-use radicle::identity::doc::RepoId;
 use radicle::identity::IdError;
+use radicle::identity::doc::RepoId;
 use radicle::node::policy::Scope;
 use radicle::prelude::*;
+use radicle::storage::refs;
 
+use crate::common_args::{
+    ABOUT_FETCH_SIGNED_REFERENCES_FEATURE_LEVEL_MINIMUM, SignedReferencesFeatureLevel,
+    SignedReferencesFeatureLevelParser,
+};
+use crate::node::SyncSettings;
 use crate::terminal;
 
-pub(crate) const ABOUT: &str = "Clone a Radicle repository";
+const ABOUT: &str = "Clone a Radicle repository";
 
 const LONG_ABOUT: &str = r#"
 The `clone` command will use your local node's routing table to find seeds from
@@ -31,16 +35,28 @@ pub(super) struct SyncArgs {
     #[arg(short, long = "seed", value_name = "NID", action = clap::ArgAction::Append)]
     seeds: Vec<NodeId>,
 
-    /// Timeout for fetching repository in seconds
-    #[arg(long, default_value_t = 9, value_name = "SECS")]
-    timeout: usize,
+    /// Timeout for fetching repository
+    ///
+    /// Valid arguments are for example "10s", "5min" or "2h 37min"
+    #[arg(long, value_parser = humantime::parse_duration, default_value = "9s")]
+    timeout: std::time::Duration,
+
+    #[arg(
+        long,
+        value_parser = SignedReferencesFeatureLevelParser,
+        help = ABOUT_FETCH_SIGNED_REFERENCES_FEATURE_LEVEL_MINIMUM
+    )]
+    signed_refs_feature_level: Option<SignedReferencesFeatureLevel>,
 }
 
 impl From<SyncArgs> for SyncSettings {
     fn from(args: SyncArgs) -> Self {
         SyncSettings {
-            timeout: time::Duration::from_secs(args.timeout as u64),
+            timeout: args.timeout,
             seeds: args.seeds.into_iter().collect(),
+            signed_references_minimum_feature_level: args
+                .signed_refs_feature_level
+                .map(refs::FeatureLevel::from),
             ..SyncSettings::default()
         }
     }
@@ -62,10 +78,9 @@ pub struct Args {
     /// Follow scope
     #[arg(
         long,
-        default_value_t = Scope::All,
         value_parser = terminal::args::ScopeParser
     )]
-    pub(super) scope: Scope,
+    pub(super) scope: Option<Scope>,
 
     #[clap(flatten)]
     pub(super) sync: SyncArgs,
