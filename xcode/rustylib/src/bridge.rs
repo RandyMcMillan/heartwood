@@ -828,6 +828,47 @@ pub fn repository_patches(rid: &str, limit: u32) -> Result<Vec<HeartwoodPatch>, 
     Ok(items)
 }
 
+pub fn create_patch(
+    rid: &str,
+    title: &str,
+    description: &str,
+    base: &str,
+    tip: &str,
+    target_branch: Option<&str>,
+) -> Result<String, HeartwoodError> {
+    let profile = load_profile()?;
+    let signer = profile
+        .signer()
+        .map_err(|err| HeartwoodError::Signer(err.to_string()))?;
+    let rid = RepoId::from_str(rid)
+        .map_err(|err| HeartwoodError::InvalidRepoId(err.to_string()))?;
+    let repo = profile
+        .storage
+        .repository_mut(rid)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let title = radicle::cob::Title::new(title)
+        .map_err(|err| HeartwoodError::InvalidTitle(err.to_string()))?;
+    let base = radicle::git::Oid::from_str(base)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let tip = radicle::git::Oid::from_str(tip)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let target = match target_branch {
+        Some(branch) => {
+            let branch = radicle::cob::patch::TargetBranch::from_str(branch)
+                .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+            radicle::cob::patch::MergeTarget::Branch(branch)
+        }
+        None => radicle::cob::patch::MergeTarget::Delegates,
+    };
+    let mut patches = profile
+        .patches_mut(&repo, &signer)
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    let patch = patches
+        .create(title, description, target, base, tip, &[])
+        .map_err(|err| HeartwoodError::Storage(err.to_string()))?;
+    Ok(patch.id().to_string())
+}
+
 pub fn create_issue(rid: &str, title: &str, description: &str) -> Result<String, HeartwoodError> {
     let profile = load_profile()?;
     let signer = profile

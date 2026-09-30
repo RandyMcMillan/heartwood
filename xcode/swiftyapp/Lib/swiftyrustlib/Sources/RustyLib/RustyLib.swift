@@ -2522,6 +2522,18 @@ public func heartwoodCreateIssue(rid: String, title: String, description: String
     )
 })
 }
+public func heartwoodCreatePatch(rid: String, title: String, description: String, base: String, tip: String, targetBranch: String?)throws  -> String {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
+    uniffi_rustylib_fn_func_heartwood_create_patch(
+        FfiConverterString.lower(rid),
+        FfiConverterString.lower(title),
+        FfiConverterString.lower(description),
+        FfiConverterString.lower(base),
+        FfiConverterString.lower(tip),
+        FfiConverterOptionString.lower(targetBranch),$0
+    )
+})
+}
 public func heartwoodFollowPolicies()throws  -> [HeartwoodFollowPolicy] {
     return try  FfiConverterSequenceTypeHeartwoodFollowPolicy.lift(try rustCallWithError(FfiConverterTypeHeartwoodError.lift) {
     uniffi_rustylib_fn_func_heartwood_follow_policies($0
@@ -2879,6 +2891,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_create_issue() != 13932) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_rustylib_checksum_func_heartwood_create_patch() != 49911) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_rustylib_checksum_func_heartwood_follow_policies() != 40008) {

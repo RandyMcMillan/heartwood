@@ -264,6 +264,18 @@ pub fn heartwood_create_issue(
 }
 
 #[uniffi::export]
+pub fn heartwood_create_patch(
+    rid: String,
+    title: String,
+    description: String,
+    base: String,
+    tip: String,
+    target_branch: Option<String>,
+) -> Result<String, bridge::HeartwoodError> {
+    bridge::create_patch(&rid, &title, &description, &base, &tip, target_branch.as_deref())
+}
+
+#[uniffi::export]
 pub fn heartwood_ssh_key_status() -> Result<bridge::HeartwoodSshKeyStatus, bridge::HeartwoodError> {
     bridge::ssh_key_status()
 }
@@ -869,6 +881,25 @@ mod tests {
                 || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
                 || matches!(result, Err(bridge::HeartwoodError::InvalidAddress(_))),
             "invalid params should be accepted (noop) or fail with profile/address error"
+        );
+    }
+
+    #[test]
+    fn test_create_patch_invalid_rid() {
+        let result = heartwood_create_patch(
+            "not-a-rid".to_string(),
+            "title".to_string(),
+            "description".to_string(),
+            "0000000000000000000000000000000000000000".to_string(),
+            "0000000000000000000000000000000000000001".to_string(),
+            None,
+        );
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(bridge::HeartwoodError::Profile(_)))
+                || matches!(result, Err(bridge::HeartwoodError::InvalidRepoId(_)))
+                || matches!(result, Err(bridge::HeartwoodError::Signer(_))),
+            "invalid rid should be accepted (noop) or fail with profile/repo/signer error"
         );
     }
 }
