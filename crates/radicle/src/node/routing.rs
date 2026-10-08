@@ -21,7 +21,7 @@ pub enum InsertResult {
     SeedAdded,
 }
 
-/// An error occuring in peer-to-peer networking code.
+/// An error occurring in peer-to-peer networking code.
 #[derive(Error, Debug)]
 pub enum Error {
     /// An Internal error.
@@ -221,22 +221,33 @@ impl Store for Database {
         limit: Option<usize>,
         ignore: &NodeId,
     ) -> Result<usize, Error> {
-        let limit: i64 = limit
-            .unwrap_or(i64::MAX as usize)
-            .try_into()
-            .map_err(|_| Error::UnitOverflow)?;
+        let mut pruned = 0;
 
-        let mut stmt = self.db.prepare(
-            "DELETE FROM routing
-             WHERE node <> ?1 AND rowid IN
-             (SELECT rowid FROM routing WHERE timestamp < ?2 ORDER BY timestamp LIMIT ?3)",
-        )?;
+        if let Some(limit) = limit {
+            let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+            let mut stmt = self.db.prepare(
+                "DELETE FROM routing
+                 WHERE node <> ?1 AND rowid IN
+                 (SELECT rowid FROM routing
+                  WHERE node <> ?1
+                  ORDER BY timestamp ASC
+                  LIMIT ?2)",
+            )?;
+            stmt.bind((1, ignore))?;
+            stmt.bind((2, limit))?;
+            stmt.next()?;
+            pruned += self.db.change_count();
+        }
+
+        let mut stmt = self
+            .db
+            .prepare("DELETE FROM routing WHERE node <> ?1 AND timestamp < ?2")?;
         stmt.bind((1, ignore))?;
         stmt.bind((2, &oldest))?;
-        stmt.bind((3, limit))?;
         stmt.next()?;
+        pruned += self.db.change_count();
 
-        Ok(self.db.change_count())
+        Ok(pruned)
     }
 
     fn count(&self, id: &RepoId) -> Result<usize, Error> {
@@ -267,7 +278,7 @@ mod test {
     use crate::test::arbitrary;
 
     fn database(path: &str) -> Database {
-        let db = Database::open(path).unwrap();
+        let db = Database::open(path, crate::node::db::config::Config::default()).unwrap();
 
         // We don't want to test foreign key constraints here.
         db.db.execute("PRAGMA foreign_keys = OFF").unwrap();
@@ -275,7 +286,7 @@ mod test {
     }
 
     #[test]
-    fn test_insert_and_get() {
+    fn insert_and_get() {
         let ids = arbitrary::set::<RepoId>(5..10);
         let nodes = arbitrary::set::<NodeId>(5..10);
         let mut db = database(":memory:");
@@ -298,7 +309,7 @@ mod test {
     }
 
     #[test]
-    fn test_insert_and_get_resources() {
+    fn insert_and_get_resources() {
         let ids = arbitrary::set::<RepoId>(5..10);
         let nodes = arbitrary::set::<NodeId>(5..10);
         let mut db = database(":memory:");
@@ -316,17 +327,18 @@ mod test {
     }
 
     #[test]
-    fn test_entries() {
+    fn entries() {
         let ids = arbitrary::set::<RepoId>(6..9);
         let nodes = arbitrary::set::<NodeId>(6..9);
         let mut db = database(":memory:");
 
         for node in &nodes {
-            assert!(db
-                .add_inventory(&ids, *node, Timestamp::EPOCH)
-                .unwrap()
-                .iter()
-                .all(|(_, r)| *r == InsertResult::SeedAdded));
+            assert!(
+                db.add_inventory(&ids, *node, Timestamp::EPOCH)
+                    .unwrap()
+                    .iter()
+                    .all(|(_, r)| *r == InsertResult::SeedAdded)
+            );
         }
 
         let results = db.entries().unwrap().collect::<Vec<_>>();
@@ -339,7 +351,7 @@ mod test {
     }
 
     #[test]
-    fn test_insert_and_remove() {
+    fn insert_and_remove() {
         let ids = arbitrary::set::<RepoId>(5..10);
         let nodes = arbitrary::set::<NodeId>(5..10);
         let mut db = database(":memory:");
@@ -358,9 +370,9 @@ mod test {
     }
 
     #[test]
-    fn test_insert_duplicate() {
-        let id = arbitrary::gen::<RepoId>(1);
-        let node = arbitrary::gen::<NodeId>(1);
+    fn insert_duplicate() {
+        let id = arbitrary::r#gen::<RepoId>(1);
+        let node = arbitrary::r#gen::<NodeId>(1);
         let mut db = database(":memory:");
 
         assert_eq!(
@@ -378,9 +390,9 @@ mod test {
     }
 
     #[test]
-    fn test_insert_existing_updated_time() {
-        let id = arbitrary::gen::<RepoId>(1);
-        let node = arbitrary::gen::<NodeId>(1);
+    fn insert_existing_updated_time() {
+        let id = arbitrary::r#gen::<RepoId>(1);
+        let node = arbitrary::r#gen::<NodeId>(1);
         let mut db = database(":memory:");
 
         assert_eq!(
@@ -399,10 +411,10 @@ mod test {
     }
 
     #[test]
-    fn test_update_existing_multi() {
-        let id1 = arbitrary::gen::<RepoId>(1);
-        let id2 = arbitrary::gen::<RepoId>(1);
-        let node = arbitrary::gen::<NodeId>(1);
+    fn update_existing_multi() {
+        let id1 = arbitrary::r#gen::<RepoId>(1);
+        let id2 = arbitrary::r#gen::<RepoId>(1);
+        let node = arbitrary::r#gen::<NodeId>(1);
         let mut db = database(":memory:");
 
         assert_eq!(
@@ -428,9 +440,9 @@ mod test {
     }
 
     #[test]
-    fn test_remove_redundant() {
-        let id = arbitrary::gen::<RepoId>(1);
-        let node = arbitrary::gen::<NodeId>(1);
+    fn remove_redundant() {
+        let id = arbitrary::r#gen::<RepoId>(1);
+        let node = arbitrary::r#gen::<NodeId>(1);
         let mut db = database(":memory:");
 
         assert_eq!(
@@ -442,11 +454,11 @@ mod test {
     }
 
     #[test]
-    fn test_remove_many() {
-        let id1 = arbitrary::gen::<RepoId>(1);
-        let id2 = arbitrary::gen::<RepoId>(1);
-        let id3 = arbitrary::gen::<RepoId>(1);
-        let node = arbitrary::gen::<NodeId>(1);
+    fn remove_many() {
+        let id1 = arbitrary::r#gen::<RepoId>(1);
+        let id2 = arbitrary::r#gen::<RepoId>(1);
+        let id3 = arbitrary::r#gen::<RepoId>(1);
+        let node = arbitrary::r#gen::<NodeId>(1);
         let mut db = database(":memory:");
 
         db.add_inventory([&id1, &id2, &id3], node, Timestamp::EPOCH)
@@ -458,10 +470,10 @@ mod test {
     }
 
     #[test]
-    fn test_len() {
+    fn len() {
         let mut db = database(":memory:");
         let ids = arbitrary::vec::<RepoId>(10);
-        let node = arbitrary::gen(1);
+        let node = arbitrary::r#gen(1);
 
         db.add_inventory(&ids, node, LocalTime::now().into())
             .unwrap();
@@ -470,11 +482,11 @@ mod test {
     }
 
     #[test]
-    fn test_prune() {
+    fn prune() {
         let mut rng = fastrand::Rng::new();
         let now = LocalTime::now();
         let ids = arbitrary::vec::<RepoId>(10);
-        let nodes = arbitrary::vec::<NodeId>(10);
+        let nodes = arbitrary::array_distinct::<10, NodeId>();
         let mut db = database(":memory:");
 
         for node in &nodes {
@@ -492,7 +504,7 @@ mod test {
                 .unwrap();
         }
 
-        let pruned = db.prune(now.into(), None, &arbitrary::gen(1)).unwrap();
+        let pruned = db.prune(now.into(), None, &arbitrary::r#gen(1)).unwrap();
         assert_eq!(pruned, ids.len() * nodes.len());
 
         for id in &ids {
@@ -504,8 +516,8 @@ mod test {
     }
 
     #[test]
-    fn test_count() {
-        let id = arbitrary::gen::<RepoId>(1);
+    fn count() {
+        let id = arbitrary::r#gen::<RepoId>(1);
         let nodes = arbitrary::set::<NodeId>(5..10);
         let mut db = database(":memory:");
 

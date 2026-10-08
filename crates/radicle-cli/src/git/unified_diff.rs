@@ -33,11 +33,12 @@ impl Error {
         Self::Syntax(msg.to_string())
     }
 
+    #[must_use]
     pub fn is_eof(&self) -> bool {
         match self {
             Self::UnexpectedEof => true,
             Self::Io(e) => e.kind() == io::ErrorKind::UnexpectedEof,
-            _ => false,
+            Self::Syntax(_) | Self::ParseInt(_) | Self::Utf8(_) => false,
         }
     }
 }
@@ -137,12 +138,14 @@ impl TryFrom<&Hunk<Modification>> for HunkHeader {
 }
 
 impl HunkHeader {
+    #[must_use]
     pub fn old_line_range(&self) -> std::ops::Range<u32> {
         let start: u32 = self.old_line_no;
         let end: u32 = self.old_line_no + self.old_size;
         start..end + 1
     }
 
+    #[must_use]
     pub fn new_line_range(&self) -> std::ops::Range<u32> {
         let start: u32 = self.new_line_no;
         let end: u32 = self.new_line_no + self.new_size;
@@ -306,8 +309,8 @@ impl Encode for FileHeader {
                 if old.mode == new.mode {
                     w.meta(format!(
                         "index {}..{} {:o}",
-                        term::format::oid(*old.oid),
-                        term::format::oid(*new.oid),
+                        term::format::oid(old.oid),
+                        term::format::oid(new.oid),
                         u32::from(old.mode.clone()),
                     ))?;
                 } else {
@@ -315,8 +318,8 @@ impl Encode for FileHeader {
                     w.meta(format!("new mode {:o}", u32::from(new.mode.clone())))?;
                     w.meta(format!(
                         "index {}..{}",
-                        term::format::oid(*old.oid),
-                        term::format::oid(*new.oid)
+                        term::format::oid(old.oid),
+                        term::format::oid(new.oid)
                     ))?;
                 }
 
@@ -333,8 +336,8 @@ impl Encode for FileHeader {
                 w.meta(format!("new file mode {:o}", u32::from(new.mode.clone())))?;
                 w.meta(format!(
                     "index {}..{}",
-                    term::format::oid(git::Oid::sha1_zero()),
-                    term::format::oid(*new.oid),
+                    term::format::oid(git::Oid::ZERO_SHA1),
+                    term::format::oid(new.oid),
                 ))?;
 
                 w.meta("--- /dev/null")?;
@@ -354,8 +357,8 @@ impl Encode for FileHeader {
                 ))?;
                 w.meta(format!(
                     "index {}..{}",
-                    term::format::oid(*old.oid),
-                    term::format::oid(git::Oid::sha1_zero())
+                    term::format::oid(old.oid),
+                    term::format::oid(git::Oid::ZERO_SHA1)
                 ))?;
 
                 w.meta(format!("--- a/{}", path.display()))?;
@@ -530,7 +533,7 @@ impl Decode for Modification {
             Some(c) => {
                 return Err(Error::syntax(format!(
                     "indicator character expected, but got '{c}'",
-                )))
+                )));
             }
             None => return Err(Error::UnexpectedEof),
         };
@@ -579,6 +582,7 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
+    #[must_use]
     pub fn styled(mut self, value: bool) -> Self {
         self.styled = value;
         self
@@ -616,31 +620,37 @@ mod test {
     use super::*;
 
     #[test]
-    fn test_diff_encode_decode_diff() {
+    fn diff_encode_decode_diff() {
         let diff_a = diff::Diff::parse(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/data/diff.diff"
         )))
         .unwrap();
-        assert_eq!(
-            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/diff.diff")),
-            diff_a.to_unified_string().unwrap()
+        // Lines are expected to match but line ending might differ depending
+        // on the platform.
+        assert!(
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/diff.diff"))
+                .lines()
+                .eq(diff_a.to_unified_string().unwrap().lines())
         );
     }
 
     #[test]
-    fn test_diff_content_encode_decode_content() {
+    fn diff_content_encode_decode_content() {
         let diff_content = diff::DiffContent::parse(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/data/diff_body.diff"
         )))
         .unwrap();
-        assert_eq!(
+        // Lines are expected to match but line ending might differ depending
+        // on the platform.
+        assert!(
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/data/diff_body.diff"
-            )),
-            diff_content.to_unified_string().unwrap()
+            ))
+            .lines()
+            .eq(diff_content.to_unified_string().unwrap().lines())
         );
     }
 

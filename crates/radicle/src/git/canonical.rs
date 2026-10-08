@@ -10,9 +10,11 @@ use quorum::{CommitQuorum, CommitQuorumFailure, TagQuorum, TagQuorumFailure};
 mod voting;
 
 pub mod effects;
+pub mod protect;
 pub mod rules;
+pub mod symbolic;
 
-pub use rules::{MatchedRule, RawRule, Rules, ValidRule};
+pub use rules::{RawRule, Rules, ValidRule};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -304,7 +306,7 @@ impl<'a, 'b> QuorumFinder<'a, 'b> {
         }
     }
 
-    fn find_merge_bases(&mut self) -> ControlFlow<(), impl Iterator<Item = (Oid, Oid)>> {
+    fn find_merge_bases(&mut self) -> ControlFlow<(), impl Iterator<Item = (Oid, Oid)> + use<>> {
         match self.commit_quorum.next_candidate() {
             Some(candidate) => ControlFlow::Continue(candidate),
             None => ControlFlow::Break(()),
@@ -505,8 +507,8 @@ mod tests {
 
     use super::*;
     use crate::assert_matches;
+    use crate::crypto::{Signer as _, SigningKey};
     use crate::git;
-    use crate::node::device::Device;
     use crate::test::fixtures;
 
     /// Test helper to construct a Canonical and get the quorum
@@ -519,7 +521,7 @@ mod tests {
 
         let mut delegates = Vec::new();
         for (i, head) in heads.iter().enumerate() {
-            let signer = Device::mock_from_seed([(i + 1) as u8; 32]);
+            let signer = SigningKey::mock(i);
             let did = Did::from(signer.public_key());
             delegates.push(did);
             let ns = git::fmt::Component::from(signer.public_key());
@@ -554,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn test_quorum_properties() {
+    fn quorum_properties() {
         let tmp = tempfile::tempdir().unwrap();
         let (repo, c0) = fixtures::repository(tmp.path());
         let c0: crate::git::Oid = c0.into();
@@ -588,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn test_quorum_different_types() {
+    fn quorum_different_types() {
         let tmp = tempfile::tempdir().unwrap();
         let (repo, c0) = fixtures::repository(tmp.path());
         let t0 = fixtures::tag("v1", "", c0, &repo);
@@ -600,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn test_commit_quorum_groups() {
+    fn commit_quorum_groups() {
         let c0 = commit("f2de534b5e81d7c6e2dcaf58c3dd91573c0a0354");
         let c1 = commit("bfb1a513e420eade90b0e6be64117b861b16ecb5");
         let c2 = commit("8fc5160702365f231c77732a8fa162379e54f57a");
@@ -633,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tag_quorum() {
+    fn tag_quorum() {
         let t1 = tag("0480391dd7312d35c79a455ec5d004657260b358");
         let t2 = tag("a2eec713ec5c287ecdf13a0180f68acfef7962d0");
 
@@ -652,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn test_commit_quorum_single() {
+    fn commit_quorum_single() {
         let c0 = commit("f2de534b5e81d7c6e2dcaf58c3dd91573c0a0354");
         let c1 = commit("bfb1a513e420eade90b0e6be64117b861b16ecb5");
         let c2 = commit("8fc5160702365f231c77732a8fa162379e54f57a");
@@ -671,7 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn test_commit_quorum_linear() {
+    fn commit_quorum_linear() {
         let c0 = commit("f2de534b5e81d7c6e2dcaf58c3dd91573c0a0354");
         let c1 = commit("bfb1a513e420eade90b0e6be64117b861b16ecb5");
         let c2 = commit("8fc5160702365f231c77732a8fa162379e54f57a");
@@ -727,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn test_commit_quorum_two_way_fork() {
+    fn commit_quorum_two_way_fork() {
         let c0 = commit("f2de534b5e81d7c6e2dcaf58c3dd91573c0a0354");
         let c1 = commit("bfb1a513e420eade90b0e6be64117b861b16ecb5");
         let c2 = commit("8fc5160702365f231c77732a8fa162379e54f57a");
@@ -793,7 +795,7 @@ mod tests {
 
         // Note for the next two cases we only give enough merge base
         // information so that the quorum fails. If we provided all
-        // `merge_bases`, it would mean that c0 could be chosen as the quourum.
+        // `merge_bases`, it would mean that c0 could be chosen as the quorum.
         let mut cq = CommitQuorum::new([c2, b2].iter(), 2);
         cq.found_merge_bases([MergeBase {
             a: b2.id(),
@@ -835,7 +837,7 @@ mod tests {
     }
 
     #[test]
-    fn test_commit_quorum_three_way_fork() {
+    fn commit_quorum_three_way_fork() {
         let c1 = commit("bfb1a513e420eade90b0e6be64117b861b16ecb5");
         let c2 = commit("8fc5160702365f231c77732a8fa162379e54f57a");
         let c3 = commit("07c2a0f856e0d6b08115f98a265df88c4e507fa0");
@@ -915,7 +917,7 @@ mod tests {
     }
 
     #[test]
-    fn test_commit_quorum_fork_of_a_fork() {
+    fn commit_quorum_fork_of_a_fork() {
         let c0 = commit("f2de534b5e81d7c6e2dcaf58c3dd91573c0a0354");
         let c1 = commit("bfb1a513e420eade90b0e6be64117b861b16ecb5");
         let c2 = commit("8fc5160702365f231c77732a8fa162379e54f57a");
@@ -1198,7 +1200,7 @@ mod tests {
     }
 
     #[test]
-    fn test_commit_quorum_forked_merge_commits() {
+    fn commit_quorum_forked_merge_commits() {
         let c0 = commit("f2de534b5e81d7c6e2dcaf58c3dd91573c0a0354");
         let c1 = commit("bfb1a513e420eade90b0e6be64117b861b16ecb5");
         let c2 = commit("8fc5160702365f231c77732a8fa162379e54f57a");
@@ -1464,7 +1466,7 @@ mod tests {
     }
 
     #[test]
-    fn test_commit_quorum_merges() {
+    fn commit_quorum_merges() {
         let c2 = commit("8fc5160702365f231c77732a8fa162379e54f57a");
         let m1 = commit("dd7ee5bca2fc7288a6efcb4303278e26a2dbaa45");
         let m2 = commit("d54e505e3fb5c0c7e4b9a4b8a1cdeefb3fc9ef18");

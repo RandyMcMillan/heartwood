@@ -1,21 +1,22 @@
 //! Client control socket implementation.
-use std::io::prelude::*;
 use std::io::BufReader;
 use std::io::LineWriter;
+use std::io::prelude::*;
 use std::path::PathBuf;
 use std::{io, net, time};
 
 #[cfg(unix)]
-use std::os::unix::net::{UnixListener as Listener, UnixStream as Stream};
+use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(windows)]
-use winpipe::{WinListener as Listener, WinStream as Stream};
+use uds_windows::{UnixListener, UnixStream};
 
+use radicle::identity::RepoId;
 use radicle::node::Handle;
+use radicle::node::NodeId;
+use radicle::node::{Command, CommandResult};
+use radicle::storage::refs;
 use serde_json as json;
 
-use crate::identity::RepoId;
-use crate::node::NodeId;
-use crate::node::{Command, CommandResult};
 use crate::runtime;
 use crate::runtime::thread;
 
@@ -29,13 +30,13 @@ pub enum Error {
     #[error("invalid socket path specified: {0}")]
     InvalidPath(PathBuf),
     #[error("node: {0}")]
-    Node(#[from] runtime::HandleError),
+    Node(#[from] runtime::handle::Error),
 }
 
 /// Listen for commands on the control socket, and process them.
-pub fn listen<E, H>(listener: Listener, handle: H) -> Result<(), Error>
+pub fn listen<E, H>(listener: UnixListener, handle: H) -> Result<(), Error>
 where
-    H: Handle<Error = runtime::HandleError> + 'static,
+    H: Handle<Error = runtime::handle::Error> + 'static,
     H::Sessions: serde::Serialize,
     CommandResult<E>: From<H::Event>,
     E: serde::Serialize,
@@ -45,12 +46,12 @@ where
 
     for incoming in listener.incoming() {
         match incoming {
-            Ok(stream) => {
+            Ok(mut stream) => {
                 let handle = handle.clone();
 
                 thread::spawn(&nid, "control", move || {
-                    if let Err((e, mut stream)) = command(stream, handle) {
-                        log::error!(target: "control", "Command returned error: {e}");
+                    if let Err(e) = command(&stream, handle) {
+                        log::debug!(target: "control", "Command returned error: {e}");
 
                         CommandResult::error(e).to_writer(&mut stream).ok();
 
@@ -59,7 +60,7 @@ where
                     }
                 });
             }
-            Err(e) => log::error!(target: "control", "Failed to accept incoming connection: {e}"),
+            Err(e) => log::warn!(target: "control", "Failed to accept incoming connection: {e}"),
         }
     }
     log::debug!(target: "control", "Exiting control loop..");
@@ -72,68 +73,21 @@ enum CommandError {
     #[error("(de)serialization failed: {0}")]
     Serialization(#[from] json::Error),
     #[error("runtime error: {0}")]
-    Runtime(#[from] runtime::HandleError),
+    Runtime(#[from] runtime::handle::Error),
     #[error("i/o error: {0}")]
     Io(#[from] io::Error),
 }
 
-#[cfg(unix)]
-fn command<E, H>(stream: Stream, handle: H) -> Result<(), (CommandError, Stream)>
+fn command<E, H>(stream: &UnixStream, mut handle: H) -> Result<(), CommandError>
 where
-    H: Handle<Error = runtime::HandleError> + 'static,
+    H: Handle<Error = runtime::handle::Error> + 'static,
     H::Sessions: serde::Serialize,
     CommandResult<E>: From<H::Event>,
     E: serde::Serialize,
 {
-    let reader = BufReader::new(&stream);
-    let writer = LineWriter::new(&stream);
+    let mut reader = BufReader::new(stream);
+    let mut writer = LineWriter::new(stream);
 
-    command_internal(reader, writer, handle).map_err(|e| (e, stream))
-}
-
-/// Due to different mutability requirements between Unix and Windows,
-/// we are forced to clone the stream on Windows.
-///
-/// # Errors
-///
-/// As of winpipe 0.1.1, [`WinStream::try_clone`] is actually infallible.
-#[cfg(windows)]
-fn command<E, H>(stream: Stream, handle: H) -> Result<(), (CommandError, Stream)>
-where
-    H: Handle<Error = runtime::HandleError> + 'static,
-    H::Sessions: serde::Serialize,
-    CommandResult<E>: From<H::Event>,
-    E: serde::Serialize,
-{
-    let mut reader = match stream.try_clone() {
-        Ok(reader) => reader,
-        Err(err) => return Err((err.into(), stream)),
-    };
-    let reader = BufReader::new(&mut reader);
-
-    let mut writer = match stream.try_clone() {
-        Ok(writer) => writer,
-        Err(err) => return Err((err.into(), stream)),
-    };
-    let writer = LineWriter::new(&mut writer);
-
-    command_internal(reader, writer, handle).map_err(|e| (e, stream))
-}
-
-#[inline(always)]
-fn command_internal<E, H, R, W>(
-    mut reader: BufReader<R>,
-    mut writer: LineWriter<W>,
-    mut handle: H,
-) -> Result<(), CommandError>
-where
-    H: Handle<Error = runtime::HandleError> + 'static,
-    H::Sessions: serde::Serialize,
-    CommandResult<E>: From<H::Event>,
-    E: serde::Serialize,
-    R: io::Read,
-    W: io::Write,
-{
     let mut line = String::new();
 
     reader.read_line(&mut line)?;
@@ -159,8 +113,20 @@ where
                 CommandResult::ok().to_writer(writer).ok();
             }
         },
-        Command::Fetch { rid, nid, timeout } => {
-            fetch(rid, nid, timeout, writer, &mut handle)?;
+        Command::Fetch {
+            rid,
+            nid,
+            timeout,
+            signed_references_minimum_feature_level,
+        } => {
+            fetch(
+                rid,
+                nid,
+                timeout,
+                signed_references_minimum_feature_level,
+                writer,
+                &mut handle,
+            )?;
         }
         Command::Config => {
             let config = handle.config()?;
@@ -210,6 +176,14 @@ where
             }
         },
         Command::Follow { nid, alias } => match handle.follow(nid, alias) {
+            Ok(result) => {
+                CommandResult::updated(result).to_writer(writer)?;
+            }
+            Err(e) => {
+                return Err(CommandError::Runtime(e));
+            }
+        },
+        Command::Block { nid } => match handle.block(nid) {
             Ok(result) => {
                 CommandResult::updated(result).to_writer(writer)?;
             }
@@ -283,14 +257,15 @@ where
     Ok(())
 }
 
-fn fetch<W: Write, H: Handle<Error = runtime::HandleError>>(
+fn fetch<W: Write, H: Handle<Error = runtime::handle::Error>>(
     id: RepoId,
     node: NodeId,
     timeout: time::Duration,
+    signed_references_minimum_feature_level: Option<refs::FeatureLevel>,
     mut writer: W,
     handle: &mut H,
 ) -> Result<(), CommandError> {
-    match handle.fetch(id, node, timeout) {
+    match handle.fetch(id, node, timeout, signed_references_minimum_feature_level) {
         Ok(result) => {
             json::to_writer(&mut writer, &result)?;
         }
@@ -303,23 +278,25 @@ fn fetch<W: Write, H: Handle<Error = runtime::HandleError>>(
 
 #[cfg(test)]
 mod tests {
-    use std::io::prelude::*;
+    use super::*;
+
     use std::thread;
 
-    use super::*;
-    use crate::identity::RepoId;
-    use crate::node::policy::Scope;
-    use crate::node::Handle;
-    use crate::node::{Alias, Node, NodeId};
+    use radicle::identity::RepoId;
+    use radicle::node::Handle;
+    use radicle::node::policy::Scope;
+    use radicle::node::{Alias, Node, NodeId};
+    use radicle::test::arbitrary;
+
     use crate::test;
 
     #[test]
-    fn test_control_socket() {
+    fn control_socket() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = test::handle::Handle::default();
         let socket = tmp.path().join("alice.sock");
-        let rids = test::arbitrary::set::<RepoId>(1..3);
-        let listener = Listener::bind(&socket).unwrap();
+        let rids = arbitrary::set::<RepoId>(1..3);
+        let listener = UnixListener::bind(&socket).unwrap();
         let nid = handle.nid().unwrap();
 
         thread::spawn({
@@ -330,7 +307,7 @@ mod tests {
 
         for rid in &rids {
             let mut stream = loop {
-                if let Ok(stream) = Stream::connect(&socket) {
+                if let Ok(stream) = UnixStream::connect(&socket) {
                     break stream;
                 }
             };
@@ -364,12 +341,12 @@ mod tests {
     }
 
     #[test]
-    fn test_seed_unseed() {
+    fn seed_unseed() {
         let tmp = tempfile::tempdir().unwrap();
         let socket = tmp.path().join("node.sock");
-        let proj = test::arbitrary::gen::<RepoId>(1);
-        let peer = test::arbitrary::gen::<NodeId>(1);
-        let listener = Listener::bind(&socket).unwrap();
+        let proj = arbitrary::r#gen::<RepoId>(1);
+        let peer = arbitrary::r#gen::<NodeId>(1);
+        let listener = UnixListener::bind(&socket).unwrap();
         let mut handle = Node::new(&socket);
 
         thread::spawn({

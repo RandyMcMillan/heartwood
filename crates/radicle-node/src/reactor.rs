@@ -7,14 +7,12 @@ mod transport;
 
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
-use std::io::ErrorKind;
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{io, thread};
 
-use crossbeam_channel::{unbounded, Receiver, TryRecvError};
-use localtime::LocalTime;
+use crossbeam_channel::{Receiver, TryRecvError, unbounded};
 use mio::event::{Event, Source};
 use mio::{Events, Interest, Poll, Waker};
 use thiserror::Error;
@@ -26,7 +24,7 @@ use crate::wire;
 
 pub(crate) use self::controller::{ControlMessage, Controller};
 pub(crate) use listener::Listener;
-pub use session::{NoiseSession, ProtocolArtifact, Socks5Session};
+pub(crate) use session::{NoiseSession, ProtocolArtifact, Socks5Session};
 pub(crate) use token::{Token, Tokens};
 pub(crate) use transport::{SessionEvent, Transport};
 
@@ -34,6 +32,12 @@ const SECONDS_IN_AN_HOUR: u64 = 60 * 60;
 
 /// Maximum amount of time to wait for I/O.
 const WAIT_TIMEOUT: Duration = Duration::from_secs(SECONDS_IN_AN_HOUR);
+
+/// Maximum duration to accept the service to spend handling events (and errors,
+/// ticking, etc.) without warning. Set to log whenever the service becomes so
+/// is so slow to respond that it would not be able to handle at least 10
+/// "requests" per second, i.e. `1s / 10 = 100ms`.
+const LAG_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// A resource which can be managed by the reactor.
 pub trait EventHandler {
@@ -50,51 +54,17 @@ pub trait EventHandler {
     fn handle(&mut self, event: &Event) -> Vec<Self::Reaction>;
 }
 
-/// The trait guarantees that the data are either written in full or, in case
-/// of an error, none of the data is written. Types implementing the trait must
-/// also guarantee that multiple attempts to write do not result in
-/// data to be written out of the initial ordering.
-pub trait WriteAtomic: std::io::Write {
-    /// Atomic non-blocking I/O write operation, which must either write the whole buffer to a
-    /// resource without blocking or fail.
-    ///
-    /// # Panics
-    ///
-    /// If [`WriteAtomic::write_or_buf`] returns an [`std::io::Error`] of kind
-    /// [`ErrorKind::Interrupted`], [`ErrorKind::WouldBlock`], [`ErrorKind::WriteZero`].
-    /// In this case, [`WriteAtomic::write_or_buf`] is expected to buffer.
-    fn write_atomic(&mut self, buf: &[u8]) -> io::Result<()> {
-        use ErrorKind::*;
-
-        if !self.is_ready_to_write() {
-            panic!("WriteAtomic::write_atomic was called when the resource is not ready to write");
-        }
-
-        let result = self.write_or_buf(buf);
-
-        debug_assert!(
-            !matches!(
-                result.as_ref().err().map(|err| err.kind()),
-                Some(Interrupted | WouldBlock | WriteZero)
-            ),
-            "WriteAtomic::write_or_buf must handle erros of kind {Interrupted:?}, {WouldBlock:?}, {WriteZero:?} by buffering",
-        );
-
-        result
-    }
-
-    /// Checks whether resource can be written to without blocking.
-    fn is_ready_to_write(&self) -> bool;
-
-    /// Writes to the resource in a non-blocking way, buffering the data if necessary,
-    /// or failing with a system-level error.
-    ///
-    /// This method shouldn't be called directly; call [`WriteAtomic::write_atomic`] instead.
-    ///
-    /// The method must handle [`std::io::Error`] of kind
-    /// [`ErrorKind::Interrupted`], [`ErrorKind::WouldBlock`], [`ErrorKind::WriteZero`].
-    /// and buffer the data in such cases.
-    fn write_or_buf(&mut self, buf: &[u8]) -> io::Result<()>;
+/// Like [`io::Write`] this is a trait for objects which are byte-oriented sinks.
+/// However, this trait is intended to be used in a non-blocking context, where
+/// the object carries an internal write buffer like [`io::BufWriter`].
+/// The difference to [`io::BufWriter`] is that this trait gives the object
+/// more freedom in handling its internal buffer, e.g., allows it to wait for
+/// a write readiness notification, and supports special handling of errors
+/// like [`io::ErrorKind::WouldBlock`] which is common in the non-blocking
+/// context, which [`io::BufWriter`] does not do.
+pub trait BufferWrite {
+    /// Copies bytes from `buf` into the internal write buffer.
+    fn buffer_write(&mut self, buf: &[u8]);
 }
 
 /// Reactor errors
@@ -209,10 +179,10 @@ pub trait ReactionHandler: Send + Iterator<Item = Action<Self::Listener, Self::T
     ///
     /// Transport is a "full" resource which can be read from - and written to. Usual files, network
     /// connections, database connections etc are all fall into this category.
-    type Transport: EventHandler + Source + Send + Debug + WriteAtomic;
+    type Transport: EventHandler + Source + Send + Debug + BufferWrite;
 
     /// Method called by the reactor on the start of each event loop once the poll has returned.
-    fn tick(&mut self, time: localtime::LocalTime);
+    fn tick(&mut self);
 
     /// Method called by the reactor when a previously set timeout is fired.
     ///
@@ -227,7 +197,7 @@ pub trait ReactionHandler: Send + Iterator<Item = Action<Self::Listener, Self::T
         &mut self,
         token: Token,
         reaction: <Self::Listener as EventHandler>::Reaction,
-        time: localtime::LocalTime,
+        instant: Instant,
     );
 
     /// Method called by the reactor upon a reaction to an I/O event on a transport resource.
@@ -235,7 +205,7 @@ pub trait ReactionHandler: Send + Iterator<Item = Action<Self::Listener, Self::T
         &mut self,
         token: Token,
         reaction: <Self::Transport as EventHandler>::Reaction,
-        time: localtime::LocalTime,
+        instant: Instant,
     );
 
     /// Method called by the reactor when a given resource was successfully registered
@@ -305,7 +275,7 @@ impl Reactor {
         let poll = Poll::new()?;
         let controller = Controller::new(sender, Arc::new(Waker::new(poll.registry(), WAKER)?));
 
-        log::debug!(target: "reactor-controller", "Initializing reactor thread...");
+        log::debug!(target: "reactor-controller", "Initializing reactor thread…");
         let thread = builder.spawn(move || {
             let runtime = Runtime {
                 service,
@@ -372,10 +342,9 @@ impl<H: ReactionHandler> Runtime<H> {
 
     fn run(mut self) {
         loop {
-            let before_poll = LocalTime::now();
             let timeout = self
                 .timeouts
-                .next_expiring_from(before_poll)
+                .next_expiring_from(Instant::now())
                 .unwrap_or(WAIT_TIMEOUT);
 
             self.register_interests()
@@ -385,49 +354,60 @@ impl<H: ReactionHandler> Runtime<H> {
 
             let mut events = Events::with_capacity(1024);
 
-            // Blocking
+            // Block and wait for I/O events, wake by other threads, or timeout.
             let res = self.poll.poll(&mut events, Some(timeout));
 
-            let now = LocalTime::now();
-            self.service.tick(now);
+            // This instant allows to measure the time spent by the service
+            // to handle the result of polling.
+            let tick = Instant::now();
 
-            // The way this is currently used basically ignores which keys have
-            // timed out. So as long as *something* timed out, we wake the service.
-            let timers_fired = self.timeouts.remove_expired_by(now);
+            // Inform the service that time has advanced.
+            self.service.tick();
+
+            // Inform the service about errors during polling.
+            if let Err(err) = res {
+                log::warn!(target: "reactor", "Failure during polling: {err}");
+                self.service.handle_error(Error::Poll(err));
+            }
+
+            // Inform the service that some timers have reacted.
+            // The way this is currently used basically ignores which
+            // timers have expired. As long as *something* timed out,
+            // the service is informed.
+            let timers_fired = self.timeouts.remove_expired_by(tick);
             if timers_fired > 0 {
                 log::trace!(target: "reactor", "Timer has fired");
                 self.service.timer_reacted();
             }
 
-            if let Err(err) = res {
-                log::error!(target: "reactor", "Error during polling: {err}");
-                self.service.handle_error(Error::Poll(err));
-            }
-
-            let awoken = self.handle_events(now, events);
-
-            // Process the commands only if we awoken by the waker.
-            if awoken {
+            if self.handle_events(tick, events) {
+                // If a wake event was emitted, eagerly consume all control messages.
                 loop {
+                    use ControlMessage::*;
+                    use TryRecvError::*;
+
                     match self.receiver.try_recv() {
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => {
-                            panic!("control channel disconnected unexpectedly")
-                        }
-                        Ok(ControlMessage::Shutdown) => return self.handle_shutdown(),
-                        Ok(ControlMessage::Command(cmd)) => self.service.handle_command(*cmd),
+                        Ok(Command(cmd)) => self.service.handle_command(*cmd),
+                        Ok(Shutdown) => return self.handle_shutdown(),
+                        Err(Empty) => break,
+                        Err(Disconnected) => panic!("control channel disconnected unexpectedly"),
                     }
                 }
             }
 
-            self.handle_actions(now);
+            let duration = Instant::now().duration_since(tick);
+            if duration > LAG_TIMEOUT {
+                log::debug!(target: "reactor", "Service was busy {:?} which exceeds the timeout of {:?}", duration, LAG_TIMEOUT);
+            }
+
+            self.handle_actions(tick);
         }
     }
 
     /// # Returns
     ///
     /// Whether one of the events was originated from the waker.
-    fn handle_events(&mut self, time: LocalTime, events: Events) -> bool {
+    fn handle_events(&mut self, instant: Instant, events: Events) -> bool {
         log::trace!(target: "reactor", "Handling events");
         let mut awoken = false;
         let mut deregistered = Vec::new();
@@ -449,7 +429,7 @@ impl<H: ReactionHandler> Runtime<H> {
                         .handle(event)
                         .into_iter()
                         .for_each(|service_event| {
-                            self.service.listener_reacted(token, service_event, time);
+                            self.service.listener_reacted(token, service_event, instant);
                         });
                 } else {
                     let listener = self.deregister_listener(token).unwrap_or_else(|| {
@@ -470,7 +450,8 @@ impl<H: ReactionHandler> Runtime<H> {
                         .handle(event)
                         .into_iter()
                         .for_each(|service_event| {
-                            self.service.transport_reacted(token, service_event, time);
+                            self.service
+                                .transport_reacted(token, service_event, instant);
                         });
                 } else {
                     let transport = self.deregister_transport(token).unwrap_or_else(|| {
@@ -481,21 +462,21 @@ impl<H: ReactionHandler> Runtime<H> {
                     deregistered.push(token);
                 }
             } else if !deregistered.contains(&token) {
-                log::warn!(target: "reactor", token=token.0; "Event from unknown token {}: {:?}", token.0, event);
+                log::debug!(target: "reactor", token=token.0; "Event from unknown token {}: {:?}", token.0, event);
             }
         }
 
         awoken
     }
 
-    fn handle_actions(&mut self, time: LocalTime) {
+    fn handle_actions(&mut self, instant: Instant) {
         while let Some(action) = self.service.next() {
             log::trace!(target: "reactor", "Handling action {action} from the service");
 
             // Deadlock may happen here if the service will generate events over and over
             // in the handle_* calls we may never get out of this loop
-            if let Err(err) = self.handle_action(action, time) {
-                log::error!(target: "reactor", "Error: {err}");
+            if let Err(err) = self.handle_action(action, instant) {
+                log::warn!(target: "reactor", "Failure: {err}");
                 self.service.handle_error(err);
             }
         }
@@ -504,7 +485,7 @@ impl<H: ReactionHandler> Runtime<H> {
     fn handle_action(
         &mut self,
         action: Action<H::Listener, H::Transport>,
-        time: LocalTime,
+        instant: Instant,
     ) -> Result<(), Error<H::Listener, H::Transport>> {
         match action {
             Action::RegisterListener(token, mut listener) => {
@@ -549,20 +530,15 @@ impl<H: ReactionHandler> Runtime<H> {
                 log::trace!(target: "reactor", token=token.0; "Sending {} bytes to {token:?}", data.len());
 
                 if let Some(transport) = self.transports.get_mut(&token) {
-                    if let Err(e) = transport.write_atomic(&data) {
-                        log::error!(target: "reactor", "Fatal error writing to transport {token:?}, disconnecting. Error details: {e:?}");
-                        if let Some(transport) = self.deregister_transport(token) {
-                            return Err(Error::TransportDisconnect(token, transport));
-                        }
-                    }
+                    transport.buffer_write(&data);
                 } else {
-                    log::error!(target: "reactor", token=token.0; "No transport with token {token:?} is known!");
+                    log::debug!(target: "reactor", token=token.0; "No transport with token {token:?} is known!");
                 }
             }
             Action::SetTimer(duration) => {
                 log::trace!(target: "reactor", "Adding timer {duration:?} from now");
 
-                self.timeouts.set_timeout(duration, time);
+                self.timeouts.set_timeout(duration, instant);
             }
         }
         Ok(())
@@ -574,12 +550,12 @@ impl<H: ReactionHandler> Runtime<H> {
 
     fn deregister_listener(&mut self, token: Token) -> Option<H::Listener> {
         let Some(mut source) = self.listeners.remove(&token) else {
-            log::warn!(target: "reactor", token=token.0; "Deregistering non-registered listener with token {}", token.0);
+            log::debug!(target: "reactor", token=token.0; "Deregistering non-registered listener with token {}", token.0);
             return None;
         };
 
         if let Err(err) = self.poll.registry().deregister(&mut source) {
-            log::warn!(target: "reactor", token=token.0; "Failed to deregister listener with token {} from mio: {err}", token.0);
+            log::debug!(target: "reactor", token=token.0; "Failed to deregister listener with token {} from mio: {err}", token.0);
         }
 
         Some(source)
@@ -587,12 +563,12 @@ impl<H: ReactionHandler> Runtime<H> {
 
     fn deregister_transport(&mut self, token: Token) -> Option<H::Transport> {
         let Some(mut source) = self.transports.remove(&token) else {
-            log::warn!(target: "reactor", token=token.0; "Deregistering non-registered transport with token {}", token.0);
+            log::debug!(target: "reactor", token=token.0; "Deregistering non-registered transport with token {}", token.0);
             return None;
         };
 
         if let Err(err) = self.poll.registry().deregister(&mut source) {
-            log::warn!(target: "reactor", token=token.0; "Failed to deregister transport with token {} from mio: {err}", token.0);
+            log::debug!(target: "reactor", token=token.0; "Failed to deregister transport with token {} from mio: {err}", token.0);
         }
 
         Some(source)

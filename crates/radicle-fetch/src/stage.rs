@@ -37,15 +37,15 @@ use either::Either;
 use gix_protocol::handshake::Ref;
 use nonempty::NonEmpty;
 use radicle::crypto::PublicKey;
-use radicle::git::fmt::{refname, Component, Namespaced, Qualified};
+use radicle::git::fmt::{Component, Namespaced, Qualified, refname};
+use radicle::storage::ReadRepository;
 use radicle::storage::git::Repository;
 use radicle::storage::refs::{RefsAt, Special};
-use radicle::storage::ReadRepository;
 
 use crate::git::refs::{Policy, Update, Updates};
 use crate::policy::BlockList;
 use crate::refs::{ReceivedRef, ReceivedRefname};
-use crate::sigrefs;
+use crate::sigrefs::RemoteRefs;
 use crate::state::FetchState;
 use crate::transport::WantsHaves;
 use crate::{policy, refs};
@@ -89,6 +89,42 @@ pub mod error {
     }
 }
 
+/// A `ref-prefix` used in the `ls-refs` step of the fetch protocol.
+///
+/// Since the Radicle protocol only wants to filter by very specific references,
+/// this type captures the possible reference prefixes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum RefPrefix {
+    /// Represents `refs/rad/id`.
+    RadId,
+    /// Represents `"refs/namespaces/<namespace>/refs/rad/id"`.
+    NamespacedRadId { namespace: PublicKey },
+    /// Represents `"refs/namespaces/<namespace>/refs/rad/sigrefs"`.
+    NamespacedRadSigrefs { namespace: PublicKey },
+    /// Represents `"refs/namespaces"`
+    AllNamespaces,
+}
+
+impl RefPrefix {
+    /// Convert the [`RefPrefix`] into its equivalent [`BString`].
+    ///
+    /// See the [`RefPrefix`] variants for their [`BString`] values.
+    pub fn into_bstring(self) -> BString {
+        match self {
+            RefPrefix::RadId => refs::REFS_RAD_ID.as_bstr().into(),
+            RefPrefix::NamespacedRadId { namespace } => {
+                radicle::git::refs::storage::id(&namespace).as_bstr().into()
+            }
+            RefPrefix::NamespacedRadSigrefs { namespace } => {
+                radicle::git::refs::storage::sigrefs(&namespace)
+                    .as_bstr()
+                    .into()
+            }
+            RefPrefix::AllNamespaces => "refs/namespaces".into(),
+        }
+    }
+}
+
 /// A [`ProtocolStage`] describes a single roundtrip with the Radicle
 /// node that is serving the data.
 ///
@@ -107,7 +143,7 @@ pub mod error {
 ///      refdb (in-memory and production).
 pub(crate) trait ProtocolStage {
     /// If and how to perform `ls-refs`.
-    fn ls_refs(&self) -> Option<NonEmpty<BString>>;
+    fn ls_refs(&self) -> Option<NonEmpty<RefPrefix>>;
 
     /// Filter a remote-advertised [`Ref`].
     ///
@@ -163,8 +199,8 @@ pub struct CanonicalId {
 }
 
 impl ProtocolStage for CanonicalId {
-    fn ls_refs(&self) -> Option<NonEmpty<BString>> {
-        Some(NonEmpty::new(refs::REFS_RAD_ID.as_bstr().into()))
+    fn ls_refs(&self) -> Option<NonEmpty<RefPrefix>> {
+        Some(NonEmpty::new(RefPrefix::RadId))
     }
 
     fn ref_filter(&self, r: Ref) -> Option<ReceivedRef> {
@@ -204,7 +240,7 @@ impl ProtocolStage for CanonicalId {
         let verified = repo
             .identity_doc_at(
                 *s.canonical_rad_id()
-                    .expect("ensure we got canonicdal 'rad/id' ref"),
+                    .expect("ensure we got canonical 'rad/id' ref"),
             )
             .map_err(|err| error::Prepare::Verification {
                 remote: self.remote,
@@ -250,17 +286,17 @@ pub struct SpecialRefs {
 }
 
 impl ProtocolStage for SpecialRefs {
-    fn ls_refs(&self) -> Option<NonEmpty<BString>> {
+    fn ls_refs(&self) -> Option<NonEmpty<RefPrefix>> {
         match &self.followed {
-            policy::Allowed::All => Some(NonEmpty::new("refs/namespaces".into())),
+            policy::Allowed::All => Some(NonEmpty::new(RefPrefix::AllNamespaces)),
             policy::Allowed::Followed { remotes } => NonEmpty::collect(
                 remotes
                     .iter()
                     .chain(self.delegates.iter())
                     .flat_map(|remote| {
                         [
-                            BString::from(radicle::git::refs::storage::id(remote).to_string()),
-                            BString::from(radicle::git::refs::storage::sigrefs(remote).to_string()),
+                            RefPrefix::NamespacedRadSigrefs { namespace: *remote },
+                            RefPrefix::NamespacedRadId { namespace: *remote },
                         ]
                     }),
             ),
@@ -331,15 +367,19 @@ pub struct SigrefsAt {
 }
 
 impl ProtocolStage for SigrefsAt {
-    fn ls_refs(&self) -> Option<NonEmpty<BString>> {
+    fn ls_refs(&self) -> Option<NonEmpty<RefPrefix>> {
         // N.b. the `Oid`s are known but the `rad/sigrefs` are still
-        // asked for to mark them for updating the fetch state.
-        NonEmpty::collect(self.refs_at.iter().map(|refs_at| {
-            BString::from(radicle::git::refs::storage::sigrefs(&refs_at.remote).to_string())
-        }))
+        // requested to mark them for updating the fetch state.
+        NonEmpty::collect(
+            self.refs_at
+                .iter()
+                .map(|refs_at| RefPrefix::NamespacedRadSigrefs {
+                    namespace: refs_at.remote,
+                }),
+        )
     }
 
-    // We only asked for `rad/sigrefs` so we should only get
+    // We only requested `rad/sigrefs` so we should only get
     // `rad/sigrefs`.
     fn ref_filter(&self, r: Ref) -> Option<ReceivedRef> {
         let (refname, tip) = refs::unpack_ref(r).ok()?;
@@ -407,21 +447,25 @@ impl ProtocolStage for SigrefsAt {
 /// any that were found to exist before the latest fetch.
 #[derive(Debug)]
 pub struct DataRefs {
-    /// The node that is being fetched from.
-    #[allow(dead_code)]
-    pub remote: PublicKey,
     /// The set of signed references from each remote that was
     /// fetched.
-    pub remotes: sigrefs::RemoteRefs,
-    /// The data limit for this stage of fetching.
-    #[allow(dead_code)]
-    pub limit: u64,
+    remotes: RemoteRefs,
+}
+
+impl DataRefs {
+    pub(crate) fn new(remotes: RemoteRefs) -> Self {
+        Self { remotes }
+    }
+
+    pub(crate) fn into_inner(self) -> RemoteRefs {
+        self.remotes
+    }
 }
 
 impl ProtocolStage for DataRefs {
     // We don't need to ask for refs since we have all reference names
     // and `Oid`s in `rad/sigrefs`.
-    fn ls_refs(&self) -> Option<NonEmpty<BString>> {
+    fn ls_refs(&self) -> Option<NonEmpty<RefPrefix>> {
         None
     }
 
@@ -444,10 +488,13 @@ impl ProtocolStage for DataRefs {
     ) -> Result<WantsHaves, error::WantsHaves> {
         let mut wants_haves = WantsHaves::default();
 
-        for (remote, loaded) in &self.remotes {
+        for (remote, result) in self.remotes.iter() {
+            let Ok(Some(refs)) = result else {
+                continue;
+            };
             wants_haves.add(
                 refdb,
-                loaded.refs.iter().filter_map(|(refname, tip)| {
+                refs.iter().filter_map(|(refname, tip)| {
                     let refname = Qualified::from_refstr(refname)
                         .map(|refname| refname.with_namespace(Component::from(remote)))?;
                     Some((refname, *tip))
@@ -466,8 +513,11 @@ impl ProtocolStage for DataRefs {
     ) -> Result<Updates<'a>, error::Prepare> {
         let mut updates = Updates::default();
 
-        for (remote, refs) in &self.remotes {
-            let mut signed = HashSet::with_capacity(refs.refs.len());
+        for (remote, result) in &self.remotes {
+            let Ok(Some(refs)) = result else {
+                continue;
+            };
+            let mut signed = HashSet::with_capacity(refs.refs().len());
             for (name, tip) in refs.iter() {
                 let tracking: Namespaced<'_> = Qualified::from_refstr(name)
                     .and_then(|q| refs::ReceivedRefname::remote(*remote, q).to_namespaced())

@@ -1,4 +1,3 @@
-#![allow(clippy::type_complexity)]
 use std::str::FromStr;
 
 use localtime::LocalTime;
@@ -6,10 +5,10 @@ use sqlite as sql;
 use thiserror::Error;
 
 use crate::git::Oid;
+use crate::node::NodeId;
 use crate::node::address;
 use crate::node::address::Store as _;
-use crate::node::NodeId;
-use crate::node::{seed::SyncedSeed, Database, SyncedAt};
+use crate::node::{Database, SyncedAt, seed::SyncedSeed};
 use crate::prelude::{RepoId, Timestamp};
 
 #[derive(Error, Debug)]
@@ -35,6 +34,7 @@ pub trait Store: address::Store {
         timestamp: Timestamp,
     ) -> Result<bool, Error>;
     /// Get the repos seeded by the given node.
+    #[allow(clippy::type_complexity)]
     fn seeded_by(
         &self,
         nid: &NodeId,

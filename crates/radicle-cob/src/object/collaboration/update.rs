@@ -5,8 +5,8 @@ use nonempty::NonEmpty;
 use oid::Oid;
 
 use crate::{
-    change, change_graph::ChangeGraph, history::EntryId, CollaborativeObject, Embed, Evaluate,
-    ExtendedSignature, ObjectId, TypeName,
+    CollaborativeObject, Embed, Evaluate, ObjectId, TypeName, change, change_graph::ChangeGraph,
+    history::EntryId,
 };
 
 use super::error;
@@ -50,24 +50,28 @@ pub struct Update {
 /// The `parents` are other the parents of this object, for example a
 /// code commit.
 ///
-/// The `identifier` is a unqiue id that is passed through to the
+/// The `identifier` is a unique id that is passed through to the
 /// [`crate::object::Storage`].
 ///
 /// The `args` are the metadata for this [`CollaborativeObject`]
-/// udpate. See [`Update`] for further information.
-pub fn update<T, S, G>(
-    storage: &S,
-    signer: &G,
+/// update. See [`Update`] for further information.
+pub fn update<T, Storage>(
+    storage: &Storage,
+    signer: &impl crypto::Signer,
     resource: Option<Oid>,
     related: Vec<Oid>,
-    identifier: &S::Namespace,
+    identifier: &Storage::Namespace,
     args: Update,
 ) -> Result<Updated<T>, error::Update>
 where
-    T: Evaluate<S>,
-    S: crate::object::Storage,
-    S: change::Storage<ObjectId = Oid, Parent = Oid, Signatures = ExtendedSignature>,
-    G: signature::Signer<ExtendedSignature>,
+    T: Evaluate<Storage>,
+    Storage: crate::object::Storage,
+    Storage: change::Storage<
+            ObjectId = Oid,
+            Parent = Oid,
+            PublicKey = crypto::PublicKey,
+            Signature = crypto::Signature,
+        >,
 {
     let Update {
         type_name: ref typename,

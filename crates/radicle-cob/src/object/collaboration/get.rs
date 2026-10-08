@@ -1,8 +1,6 @@
 // Copyright © 2022 The Radicle Link Contributors
 
-use crypto::ssh::ExtendedSignature;
-
-use crate::{change_graph::ChangeGraph, CollaborativeObject, Evaluate, ObjectId, TypeName};
+use crate::{CollaborativeObject, Evaluate, ObjectId, TypeName, change_graph::ChangeGraph};
 
 use super::error;
 
@@ -24,10 +22,11 @@ where
     T: Evaluate<S>,
     S: crate::object::Storage,
     S: crate::change::Storage<
-        ObjectId = crate::object::Oid,
-        Parent = crate::object::Oid,
-        Signatures = ExtendedSignature,
-    >,
+            ObjectId = crate::object::Oid,
+            Parent = crate::object::Oid,
+            PublicKey = crypto::PublicKey,
+            Signature = crypto::Signature,
+        >,
 {
     let tip_refs = storage
         .objects(typename, oid)

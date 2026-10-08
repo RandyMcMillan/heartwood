@@ -1,15 +1,13 @@
-use std::ops::Deref;
+extern crate std;
+
 use std::path::{Path, PathBuf};
+use std::string::String;
 use std::{fs, io};
 
-#[cfg(feature = "cyphernet")]
-use cyphernet::{EcSk, EcSkInvalid, Ecdh};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-use crate::{KeyPair, PublicKey, SecretKey, Signature, Signer, SignerError};
-
-use super::ExtendedSignature;
+use crate::{PublicKey, Seed, SigningKey};
 
 /// A secret key passphrase.
 pub type Passphrase = Zeroizing<String>;
@@ -27,6 +25,10 @@ pub enum Error {
     AlreadyInitialized { exists: PathBuf },
     #[error("keystore is encrypted; a passphrase is required")]
     PassphraseMissing,
+    #[error(transparent)]
+    Signature(#[from] crate::signature::Error),
+    #[error("invalid key")]
+    Invalid,
 }
 
 impl Error {
@@ -91,19 +93,22 @@ impl Keystore {
         &self,
         comment: &str,
         passphrase: Option<Passphrase>,
-        seed: ec25519::Seed,
+        seed: Seed,
     ) -> Result<PublicKey, Error> {
-        self.store(KeyPair::from_seed(seed), comment, passphrase)
+        let signing_key = SigningKey::from_seed(seed);
+        self.store(&signing_key, comment, passphrase)?;
+        Ok(*signing_key.public_key())
     }
 
     /// Store a keypair on disk. Returns an error if any of the two key files already exist.
     pub fn store(
         &self,
-        keypair: KeyPair,
+        keypair: &SigningKey,
         comment: &str,
         passphrase: Option<Passphrase>,
-    ) -> Result<PublicKey, Error> {
-        let ssh_pair = ssh_key::private::Ed25519Keypair::from_bytes(&keypair)?;
+    ) -> Result<(), Error> {
+        let keypair_bytes = keypair.to_keypair_bytes();
+        let ssh_pair = ssh_key::private::Ed25519Keypair::from_bytes(&keypair_bytes)?;
         let ssh_pair = ssh_key::private::KeypairData::Ed25519(ssh_pair);
         let secret = ssh_key::PrivateKey::new(ssh_pair, comment)?;
         let secret = if let Some(p) = passphrase {
@@ -119,12 +124,12 @@ impl Keystore {
             });
         }
 
-        if let Some(path_public) = &self.path_public {
-            if path_public.exists() {
-                return Err(Error::AlreadyInitialized {
-                    exists: path_public.to_path_buf(),
-                });
-            }
+        if let Some(path_public) = &self.path_public
+            && path_public.exists()
+        {
+            return Err(Error::AlreadyInitialized {
+                exists: path_public.to_path_buf(),
+            });
         }
 
         // NOTE: If [`PathBuf::parent`] returns `None`,
@@ -160,11 +165,14 @@ impl Keystore {
             public.write_openssh_file(path_public)?;
         }
 
-        Ok(keypair.pk.into())
+        Ok(())
     }
 
     /// Load the public key from the store. Returns `None` if it wasn't found.
     pub fn public_key(&self) -> Result<Option<PublicKey>, Error> {
+        use KeyData::*;
+        use ssh_key::{PublicKey as SshPublicKey, public::KeyData};
+
         let Some(path_public) = &self.path_public else {
             return Ok(None);
         };
@@ -173,24 +181,24 @@ impl Keystore {
             return Ok(None);
         }
 
-        let public = ssh_key::PublicKey::read_openssh_file(path_public)?;
-        PublicKey::try_from(public)
-            .map(Some)
-            .map_err(|_| Error::InvalidKeyType)
+        match KeyData::from(SshPublicKey::read_openssh_file(path_public)?) {
+            Ed25519(key) => Ok(Some(PublicKey::from(key))),
+            _ => Err(Error::InvalidKeyType),
+        }
     }
 
     /// Load the secret key from the store, decrypting it with the given passphrase.
     /// Returns `None` if it wasn't found.
-    pub fn secret_key(
-        &self,
-        passphrase: Option<Passphrase>,
-    ) -> Result<Option<Zeroizing<SecretKey>>, Error> {
+    pub fn secret_key(&self, passphrase: Option<Passphrase>) -> Result<Option<SigningKey>, Error> {
+        use KeypairData::*;
+        use ssh_key::{PrivateKey, private::KeypairData};
+
         let path = &self.path_secret;
         if !path.exists() {
             return Ok(None);
         }
 
-        let secret = ssh_key::PrivateKey::read_openssh_file(path)?;
+        let secret = PrivateKey::read_openssh_file(path)?;
 
         let secret = if let Some(p) = passphrase {
             secret.decrypt(p)?
@@ -200,9 +208,7 @@ impl Keystore {
             secret
         };
         match secret.key_data() {
-            ssh_key::private::KeypairData::Ed25519(pair) => {
-                Ok(Some(SecretKey::from(pair.to_bytes()).into()))
-            }
+            Ed25519(pair) => Ok(Some(SigningKey::try_from(pair.to_bytes())?)),
             _ => Err(Error::InvalidKeyType),
         }
     }
@@ -227,177 +233,19 @@ impl Keystore {
     }
 }
 
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum MemorySignerError {
-    #[error(transparent)]
-    Keystore(#[from] Error),
-    #[error("key not found in '{0}'")]
-    NotFound(PathBuf),
-    #[error("invalid passphrase")]
-    InvalidPassphrase,
-    #[error("secret key '{secret}' and public key '{public}' do not match")]
-    KeyMismatch { secret: PathBuf, public: PathBuf },
-}
-
-/// An in-memory signer that keeps its secret key internally
-/// so that signing never fails.
-///
-/// Can be created from a [`Keystore`] with the [`MemorySigner::load`] function.
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct MemorySigner {
-    public: PublicKey,
-    secret: Zeroizing<SecretKey>,
-}
-
-impl signature::Signer<Signature> for MemorySigner {
-    fn try_sign(&self, msg: &[u8]) -> Result<Signature, signature::Error> {
-        Ok(Signer::sign(self, msg))
-    }
-}
-
-impl signature::Signer<ExtendedSignature> for MemorySigner {
-    fn try_sign(&self, msg: &[u8]) -> Result<ExtendedSignature, signature::Error> {
-        Ok(ExtendedSignature {
-            key: self.public,
-            sig: Signer::sign(self, msg),
-        })
-    }
-}
-
-impl Signer for MemorySigner {
-    fn public_key(&self) -> &PublicKey {
-        &self.public
-    }
-
-    fn sign(&self, msg: &[u8]) -> Signature {
-        Signature(self.secret.deref().deref().sign(msg, None))
-    }
-
-    fn try_sign(&self, msg: &[u8]) -> Result<Signature, SignerError> {
-        Ok(Signer::sign(self, msg))
-    }
-}
-
-#[cfg(feature = "cyphernet")]
-impl EcSk for MemorySigner {
-    type Pk = PublicKey;
-
-    fn generate_keypair() -> (Self, Self::Pk)
-    where
-        Self: Sized,
-    {
-        let ms = Self::gen();
-        let pk = ms.public;
-
-        (ms, pk)
-    }
-
-    fn to_pk(&self) -> Result<Self::Pk, EcSkInvalid> {
-        Ok(self.public)
-    }
-}
-
-#[cfg(feature = "cyphernet")]
-impl Ecdh for MemorySigner {
-    type SharedSecret = [u8; 32];
-
-    fn ecdh(&self, pk: &Self::Pk) -> Result<Self::SharedSecret, cyphernet::EcdhError> {
-        self.secret.ecdh(pk).map_err(cyphernet::EcdhError::from)
-    }
-}
-
-impl MemorySigner {
-    /// Load this signer from a keystore, given a secret key passphrase.
-    pub fn load(
-        keystore: &Keystore,
-        passphrase: Option<Passphrase>,
-    ) -> Result<Self, MemorySignerError> {
-        let secret = keystore
-            .secret_key(passphrase)
-            .map_err(|e| {
-                if e.is_crypto_err() {
-                    MemorySignerError::InvalidPassphrase
-                } else {
-                    e.into()
-                }
-            })?
-            .ok_or_else(|| MemorySignerError::NotFound(keystore.secret_key_path().to_path_buf()))?;
-
-        let Some(public_path) = keystore.public_key_path() else {
-            // There is no public key in the key store, so there's nothing
-            // to validate. Derive it from the secret key.
-            return Ok(Self::from_secret(secret));
-        };
-
-        let public = keystore
-            .public_key()?
-            .ok_or_else(|| MemorySignerError::NotFound(public_path.to_path_buf()))?;
-
-        secret
-            .validate_public_key(&public)
-            .map_err(|_| MemorySignerError::KeyMismatch {
-                secret: keystore.secret_key_path().to_path_buf(),
-                public: public_path.to_path_buf(),
-            })?;
-
-        Ok(Self { public, secret })
-    }
-
-    /// Create a new memory signer from the given secret key, deriving
-    /// the public key from the secret key.
-    pub fn from_secret(secret: Zeroizing<SecretKey>) -> Self {
-        Self {
-            public: PublicKey(secret.public_key()),
-            secret,
-        }
-    }
-
-    /// Box this signer into a trait object.
-    pub fn boxed(self) -> Box<dyn Signer> {
-        Box::new(self)
-    }
-
-    /// Generate a new memory signer.
-    pub fn gen() -> Self {
-        let keypair = KeyPair::generate();
-        let sk = keypair.sk;
-
-        Self {
-            public: sk.public_key().into(),
-            secret: Zeroizing::new(sk.into()),
-        }
-    }
-}
-
-impl TryFrom<ssh_key::PublicKey> for PublicKey {
-    type Error = Error;
-
-    fn try_from(public: ssh_key::PublicKey) -> Result<Self, Self::Error> {
-        match public.key_data() {
-            ssh_key::public::KeyData::Ed25519(ssh_key::public::Ed25519PublicKey(data)) => {
-                Ok(Self::from(*data))
-            }
-            _ => Err(Error::InvalidKeyType),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use std::borrow::ToOwned as _;
+
     #[test]
-    fn test_init_passphrase() {
+    fn init_passphrase() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Keystore::new(&tmp);
 
         let public = store
-            .init(
-                "test",
-                Some("hunter".to_owned().into()),
-                ec25519::Seed::default(),
-            )
+            .init("test", Some("hunter".to_owned().into()), Seed::mock(1))
             .unwrap();
         assert_eq!(public, store.public_key().unwrap().unwrap());
         assert!(store.is_encrypted().unwrap());
@@ -406,7 +254,10 @@ mod tests {
             .secret_key(Some("hunter".to_owned().into()))
             .unwrap()
             .unwrap();
-        assert_eq!(PublicKey::from(secret.public_key()), public);
+
+        let secret_public = secret.public_key();
+
+        assert_eq!(secret_public, &public);
 
         store
             .secret_key(Some("blunder".to_owned().into()))
@@ -414,32 +265,29 @@ mod tests {
     }
 
     #[test]
-    fn test_init_no_passphrase() {
+    fn init_no_passphrase() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Keystore::new(&tmp);
 
-        let public = store.init("test", None, ec25519::Seed::default()).unwrap();
+        let public = store.init("test", None, Seed::mock(1)).unwrap();
         assert_eq!(public, store.public_key().unwrap().unwrap());
         assert!(!store.is_encrypted().unwrap());
 
         let secret = store.secret_key(None).unwrap().unwrap();
-        assert_eq!(PublicKey::from(secret.public_key()), public);
+        let secret_public = secret.public_key();
+        assert_eq!(secret_public, &public);
     }
 
     #[test]
-    fn test_signer() {
+    fn signer() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Keystore::new(&tmp);
 
         let public = store
-            .init(
-                "test",
-                Some("hunter".to_owned().into()),
-                ec25519::Seed::default(),
-            )
+            .init("test", Some("hunter".to_owned().into()), Seed::mock(1))
             .unwrap();
-        let signer = MemorySigner::load(&store, Some("hunter".to_owned().into())).unwrap();
+        let signer = SigningKey::load(&store, Some("hunter".to_owned().into())).unwrap();
 
-        assert_eq!(public, *signer.public_key());
+        assert_eq!(&public, signer.public_key());
     }
 }

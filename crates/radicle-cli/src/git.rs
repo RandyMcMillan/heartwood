@@ -14,22 +14,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
 
-use anyhow::anyhow;
 use anyhow::Context as _;
+use anyhow::anyhow;
 use thiserror::Error;
 
 use radicle::crypto::ssh;
 use radicle::git;
-use radicle::git::{Version, VERSION_REQUIRED};
+use radicle::git::raw::{ErrorExt as _, Repository};
 use radicle::prelude::{NodeId, RepoId};
 use radicle::storage::git::transport;
-
-pub use radicle::git::Oid;
-
-pub use radicle::git::raw::{
-    build::CheckoutBuilder, AnnotatedCommit, Commit, Direction, ErrorCode, ErrorExt as _,
-    MergeAnalysis, MergeOptions, Reference, Repository, Signature,
-};
 
 pub const CONFIG_COMMIT_GPG_SIGN: &str = "commit.gpgsign";
 pub const CONFIG_SIGNING_KEY: &str = "user.signingkey";
@@ -37,12 +30,99 @@ pub const CONFIG_GPG_FORMAT: &str = "gpg.format";
 pub const CONFIG_GPG_SSH_PROGRAM: &str = "gpg.ssh.program";
 pub const CONFIG_GPG_SSH_ALLOWED_SIGNERS: &str = "gpg.ssh.allowedSignersFile";
 
+/// A parsed git version.
+#[derive(PartialEq, Eq, Debug, PartialOrd, Ord)]
+pub(crate) struct Version {
+    pub major: u8,
+    pub minor: u8,
+    pub patch: u8,
+}
+
+impl std::fmt::Display for Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+/// Minimum required git version.
+pub(crate) const VERSION_REQUIRED: Version = Version {
+    major: 2,
+    minor: 31,
+    patch: 0,
+};
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum VersionError {
+    #[error("malformed git version string")]
+    Malformed,
+    #[error("malformed git version string: {0}")]
+    ParseInt(#[from] std::num::ParseIntError),
+    #[error("malformed git version string: {0}")]
+    Utf8(#[from] std::string::FromUtf8Error),
+    #[error("error retrieving git version: {0}")]
+    Io(#[from] io::Error),
+    #[error("error retrieving git version: {0}")]
+    Other(String),
+}
+
+impl std::str::FromStr for Version {
+    type Err = VersionError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let rest = input
+            .strip_prefix("git version ")
+            .ok_or(VersionError::Malformed)?;
+        let rest = rest.split(' ').next().ok_or(VersionError::Malformed)?;
+        let rest = rest.trim_end();
+
+        let mut parts = rest.split('.');
+        let major = parts.next().ok_or(VersionError::Malformed)?.parse()?;
+        let minor = parts.next().ok_or(VersionError::Malformed)?.parse()?;
+
+        let patch = match parts.next() {
+            None => 0,
+            Some(patch) => patch.parse()?,
+        };
+
+        Ok(Self {
+            major,
+            minor,
+            patch,
+        })
+    }
+}
+
+/// Get the system's git version.
+pub(crate) fn version() -> Result<Version, VersionError> {
+    let mut command = Command::new("git");
+    command.arg("version");
+
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(
+        &mut command,
+        radicle_windows::process::creation_flags::CREATE_NO_WINDOW.0,
+    );
+
+    let output = command.output()?;
+
+    if output.status.success() {
+        let output = String::from_utf8(output.stdout)?;
+        let version = output.parse()?;
+
+        return Ok(version);
+    }
+    Err(VersionError::Other(
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    ))
+}
+
 /// Git revision parameter. Supports extended SHA-1 syntax.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rev(String);
 
 impl Rev {
     /// Return the revision as a string.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -97,9 +177,13 @@ impl<'a> TryFrom<git::raw::Remote<'a>> for Remote<'a> {
         })?;
         let pushurl = value
             .pushurl()
+            .map_err(|_| RemoteError::MissingUrl)?
             .map(radicle::git::Url::from_str)
             .transpose()?;
-        let name = value.name().ok_or(RemoteError::MissingName)?;
+        let name = value
+            .name()
+            .map_err(|_| RemoteError::MissingName)?
+            .ok_or(RemoteError::MissingName)?;
 
         Ok(Self {
             name: name.to_owned(),
@@ -250,13 +334,13 @@ pub fn is_signing_configured(repo: &Path) -> Result<bool, anyhow::Error> {
     Ok(git(repo, ["config", CONFIG_SIGNING_KEY]).is_ok())
 }
 
-/// Return the list of radicle remotes for the given repository.
+/// Return the list of Radicle remotes for the given repository.
 pub fn rad_remotes(repo: &Repository) -> anyhow::Result<Vec<Remote<'_>>> {
     let remotes: Vec<_> = repo
         .remotes()?
         .iter()
         .filter_map(|name| {
-            let remote = repo.find_remote(name?).ok()?;
+            let remote = repo.find_remote(name.ok()??).ok()?;
             Remote::try_from(remote).ok()
         })
         .collect();
@@ -277,7 +361,7 @@ pub fn rad_remote(repo: &Repository) -> anyhow::Result<(git::raw::Remote<'_>, Re
     match radicle::rad::remote(repo) {
         Ok((remote, id)) => Ok((remote, id)),
         Err(radicle::rad::RemoteError::NotFound(_)) => Err(anyhow!(
-            "could not find radicle remote in git config; did you forget to run `rad init`?"
+            "could not find Radicle remote in git config; did you forget to run `rad init`?"
         )),
         Err(err) => Err(err).context("could not read git remote configuration"),
     }
@@ -305,7 +389,7 @@ pub fn remove_remote(repo: &Repository, rid: &RepoId) -> anyhow::Result<()> {
     }
 }
 
-/// Setup an upstream tracking branch for the given remote and branch.
+/// Set up an upstream tracking branch for the given remote and branch.
 /// Creates the tracking branch if it does not exist.
 ///
 /// > scooby/master...rad/scooby/heads/master
@@ -332,24 +416,6 @@ pub fn branch_remote(repo: &Repository, branch: &str) -> anyhow::Result<String> 
     let remote = cfg.get_string(&format!("branch.{branch}.remote"))?;
 
     Ok(remote)
-}
-
-/// Check that the system's git version is supported. Returns an error otherwise.
-pub fn check_version() -> Result<Version, anyhow::Error> {
-    let git_version = git::version()?;
-
-    if git_version < VERSION_REQUIRED {
-        anyhow::bail!("a minimum git version of {} is required", VERSION_REQUIRED);
-    }
-    Ok(git_version)
-}
-
-/// Parse a remote refspec into a peer id and ref.
-pub fn parse_remote(refspec: &str) -> Option<(NodeId, &str)> {
-    refspec
-        .strip_prefix("refs/remotes/")
-        .and_then(|s| s.split_once('/'))
-        .and_then(|(peer, r)| NodeId::from_str(peer).ok().map(|p| (p, r)))
 }
 
 pub fn add_tag(
@@ -388,11 +454,75 @@ pub fn commit_ssh_fingerprint(path: &Path, sha1: &str) -> Result<Option<String>,
         .transpose()?;
 
     // We only return a fingerprint if it's not an empty string
-    if let Some(s) = string {
-        if !s.is_empty() {
-            return Ok(Some(s));
-        }
+    if let Some(s) = string
+        && !s.is_empty()
+    {
+        return Ok(Some(s));
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn version_ord() {
+        assert!(
+            Version {
+                major: 2,
+                minor: 34,
+                patch: 1
+            } > Version {
+                major: 2,
+                minor: 34,
+                patch: 0
+            }
+        );
+        assert!(
+            Version {
+                major: 2,
+                minor: 24,
+                patch: 12
+            } < Version {
+                major: 2,
+                minor: 34,
+                patch: 0
+            }
+        );
+    }
+
+    #[test]
+    fn version_from_str() {
+        assert_eq!(
+            Version::from_str("git version 2.34.1\n").ok(),
+            Some(Version {
+                major: 2,
+                minor: 34,
+                patch: 1
+            })
+        );
+
+        assert_eq!(
+            Version::from_str("git version 2.34.1 (macOS)").ok(),
+            Some(Version {
+                major: 2,
+                minor: 34,
+                patch: 1
+            })
+        );
+
+        assert_eq!(
+            Version::from_str("git version 2.34").ok(),
+            Some(Version {
+                major: 2,
+                minor: 34,
+                patch: 0
+            })
+        );
+
+        assert!(Version::from_str("2.34").is_err());
+    }
 }

@@ -15,10 +15,10 @@ use crate::change::store::Version;
 use crate::signatures;
 use crate::trailers::CommitTrailer;
 use crate::{
-    change,
-    change::{store, Contents, Entry, Timestamp},
+    Embed, change,
+    change::{Contents, Entry, Timestamp, store},
     signatures::{ExtendedSignature, Signatures},
-    trailers, Embed,
+    trailers,
 };
 
 use super::commit::Commit;
@@ -94,18 +94,17 @@ impl change::Storage for git2::Repository {
 
     type ObjectId = Oid;
     type Parent = Oid;
-    type Signatures = ExtendedSignature;
 
-    fn store<Signer>(
+    type PublicKey = crypto::PublicKey;
+    type Signature = crypto::Signature;
+
+    fn store(
         &self,
         resource: Option<Self::Parent>,
         mut related: Vec<Self::Parent>,
-        signer: &Signer,
+        signer: &impl crypto::Signer,
         spec: store::Template<Self::ObjectId>,
-    ) -> Result<Entry, Self::StoreError>
-    where
-        Signer: signature::Signer<Self::Signatures>,
-    {
+    ) -> Result<Entry, Self::StoreError> {
         let change::Template {
             type_name,
             tips,
@@ -116,7 +115,8 @@ impl change::Storage for git2::Repository {
         let manifest = store::Manifest::new(type_name, Version::default());
         let revision = write_manifest(self, &manifest, embeds, &contents)?;
         let tree = self.find_tree(revision)?;
-        let signature = signer.sign(revision.as_bytes());
+        let signature = ExtendedSignature::try_sign(signer, revision.as_bytes())
+            .map_err(|source| error::Create::Signer(Box::new(source)))?;
 
         // Make sure there are no duplicates in the related list.
         related.sort();
@@ -252,7 +252,7 @@ fn load_contents(repo: &git2::Repository, tree: &git2::Tree) -> Result<Contents,
         .filter_map(|entry| {
             entry.kind().and_then(|kind| match kind {
                 git2::ObjectType::Blob => {
-                    let name = entry.name()?.parse::<i8>().ok()?;
+                    let name = entry.name().ok()?.parse::<i8>().ok()?;
                     let blob = entry
                         .to_object(repo)
                         .and_then(|object| object.peel_to_blob())

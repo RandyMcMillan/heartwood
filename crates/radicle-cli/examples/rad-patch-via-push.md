@@ -9,7 +9,7 @@ Switched to a new branch 'feature/1'
 $ git commit -a -m "Add things" -q --allow-empty
 $ git push -o patch.message="Add things #1" -o patch.message="See commits for details." rad HEAD:refs/patches
 ✓ Patch 6035d2f582afbe01ff23ea87528ae523d76875b6 opened
-hint: to update, run `git push` or `git push rad -f HEAD:patches/6035d2f582afbe01ff23ea87528ae523d76875b6`
+hint: to update, run `git push` or `git push rad --force-with-lease HEAD:patches/6035d2f582afbe01ff23ea87528ae523d76875b6`
 hint: offline push, your node is not running
 hint: to sync with the network, run `rad node start`
 To rad://z42hL2jL4XNk6K8oHQaSWfMgCL7ji/z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi
@@ -20,22 +20,23 @@ We can see a patch was created:
 
 ```
 $ rad patch show 6035d2f582afbe01ff23ea87528ae523d76875b6
-╭────────────────────────────────────────────────────╮
-│ Title     Add things #1                            │
-│ Patch     6035d2f582afbe01ff23ea87528ae523d76875b6 │
-│ Author    alice (you)                              │
-│ Head      42d894a83c9c356552a57af09ccdbd5587a99045 │
-│ Base      [..                                    ] │
-│ Branches  feature/1                                │
-│ Commits   ahead 1, behind 0                        │
-│ Status    open                                     │
-│                                                    │
-│ See commits for details.                           │
-├────────────────────────────────────────────────────┤
-│ 42d894a Add things                                 │
-├────────────────────────────────────────────────────┤
-│ ● Revision 6035d2f @ 42d894a by alice (you) now    │
-╰────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────╮
+│ Title     Add things #1                                  │
+│ Patch     6035d2f582afbe01ff23ea87528ae523d76875b6       │
+│ Author    alice (you)                                    │
+│ Head      42d894a83c9c356552a57af09ccdbd5587a99045       │
+│ Base      [..                                    ]       │
+│ Target    master                                         │
+│ Branches  feature/1                                      │
+│ Commits   ahead 1, behind 0                              │
+│ Status    open                                           │
+│                                                          │
+│ See commits for details.                                 │
+├──────────────────────────────────────────────────────────┤
+│ 42d894a Add things                                       │
+├──────────────────────────────────────────────────────────┤
+│ ● Revision 6035d2f @ [..   ]..42d894a by alice (you) now │
+╰──────────────────────────────────────────────────────────╯
 ```
 
 If we check our local branch, we can see its upstream is set to track a remote
@@ -62,7 +63,6 @@ And let's look at our local and remote refs:
 $ git show-ref
 42d894a83c9c356552a57af09ccdbd5587a99045 refs/heads/feature/1
 f2de534b5e81d7c6e2dcaf58c3dd91573c0a0354 refs/heads/master
-f2de534b5e81d7c6e2dcaf58c3dd91573c0a0354 refs/remotes/rad/HEAD
 f2de534b5e81d7c6e2dcaf58c3dd91573c0a0354 refs/remotes/rad/master
 42d894a83c9c356552a57af09ccdbd5587a99045 refs/remotes/rad/patches/6035d2f582afbe01ff23ea87528ae523d76875b6
 ```
@@ -98,12 +98,12 @@ And both patches:
 
 ```
 $ rad patch
-╭───────────────────────────────────────────────────────────────────────────────╮
-│ ●  ID       Title            Author         Reviews  Head     +   -   Updated │
-├───────────────────────────────────────────────────────────────────────────────┤
-│ ●  6035d2f  Add things #1    alice   (you)  -        42d894a  +0  -0  now     │
-│ ●  9580891  Add more things  alice   (you)  -        8b0ea80  +0  -0  now     │
-╰───────────────────────────────────────────────────────────────────────────────╯
+╭───────────────────────────────────────────────────────────────────────────────────────╮
+│ ●  ID       Title            Author         Reviews  Head     +   -   Updated  Labels │
+├───────────────────────────────────────────────────────────────────────────────────────┤
+│ ●  6035d2f  Add things #1    alice   (you)  -        42d894a  +0  -0  now             │
+│ ●  9580891  Add more things  alice   (you)  -        8b0ea80  +0  -0  now             │
+╰───────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 To update our patch, we simply push commits to the upstream branch:
@@ -139,22 +139,23 @@ We can then see that the patch head has moved:
 
 ```
 $ rad patch show 9580891
-╭────────────────────────────────────────────────────╮
-│ Title     Add more things                          │
-│ Patch     95808913573cead52ad7b42c7b475260ec45c4b2 │
-│ Author    alice (you)                              │
-│ Head      02bef3fac41b2f98bb3c02b868a53ddfecb55b5f │
-│ Base      [..                                    ] │
-│ Branches  feature/2                                │
-│ Commits   ahead 2, behind 0                        │
-│ Status    open                                     │
-├────────────────────────────────────────────────────┤
-│ 02bef3f Improve code                               │
-│ 8b0ea80 Add more things                            │
-├────────────────────────────────────────────────────┤
-│ ● Revision 9580891 @ 8b0ea80 by alice (you) now    │
-│ ↑ Revision d7040c6 @ 02bef3f by alice (you) now    │
-╰────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────╮
+│ Title     Add more things                                │
+│ Patch     95808913573cead52ad7b42c7b475260ec45c4b2       │
+│ Author    alice (you)                                    │
+│ Head      02bef3fac41b2f98bb3c02b868a53ddfecb55b5f       │
+│ Base      [..                                    ]       │
+│ Target    master                                         │
+│ Branches  feature/2                                      │
+│ Commits   ahead 2, behind 0                              │
+│ Status    open                                           │
+├──────────────────────────────────────────────────────────┤
+│ 02bef3f Improve code                                     │
+│ 8b0ea80 Add more things                                  │
+├──────────────────────────────────────────────────────────┤
+│ ● Revision 9580891 @ [..   ]..8b0ea80 by alice (you) now │
+│ ↑ Revision d7040c6 @ [..   ]..02bef3f by alice (you) now │
+╰──────────────────────────────────────────────────────────╯
 ```
 
 And we can check that all the refs are properly updated in our repository:
@@ -203,10 +204,10 @@ hint: See the 'Note about fast-forwards' in 'git push --help' for details.
 ```
 
 The push fails because it's not a fast-forward update. To remedy this, we can
-use `--force` to force the update.
+use `--force-with-lease` (or `--force`) to force the update.
 
 ``` (stderr)
-$ git push --force
+$ git push --force-with-lease
 ✓ Patch 9580891 updated to revision 670d02794aa05afd6e0851f4aa848bc87c4712c7
 To compare against your previous revision d7040c6, run:
 
@@ -220,23 +221,24 @@ That worked. We can see the new revision if we call `rad patch show`:
 
 ```
 $ rad patch show 9580891
-╭────────────────────────────────────────────────────╮
-│ Title     Add more things                          │
-│ Patch     95808913573cead52ad7b42c7b475260ec45c4b2 │
-│ Author    alice (you)                              │
-│ Head      9304dbc445925187994a7a93222a3f8bde73b785 │
-│ Base      [..                                    ] │
-│ Branches  feature/2                                │
-│ Commits   ahead 2, behind 0                        │
-│ Status    open                                     │
-├────────────────────────────────────────────────────┤
-│ 9304dbc Amended commit                             │
-│ 8b0ea80 Add more things                            │
-├────────────────────────────────────────────────────┤
-│ ● Revision 9580891 @ 8b0ea80 by alice (you) now    │
-│ ↑ Revision d7040c6 @ 02bef3f by alice (you) now    │
-│ ↑ Revision 670d027 @ 9304dbc by alice (you) now    │
-╰────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────╮
+│ Title     Add more things                                │
+│ Patch     95808913573cead52ad7b42c7b475260ec45c4b2       │
+│ Author    alice (you)                                    │
+│ Head      9304dbc445925187994a7a93222a3f8bde73b785       │
+│ Base      [..                                    ]       │
+│ Target    master                                         │
+│ Branches  feature/2                                      │
+│ Commits   ahead 2, behind 0                              │
+│ Status    open                                           │
+├──────────────────────────────────────────────────────────┤
+│ 9304dbc Amended commit                                   │
+│ 8b0ea80 Add more things                                  │
+├──────────────────────────────────────────────────────────┤
+│ ● Revision 9580891 @ [..   ]..8b0ea80 by alice (you) now │
+│ ↑ Revision d7040c6 @ [..   ]..02bef3f by alice (you) now │
+│ ↑ Revision 670d027 @ [..   ]..9304dbc by alice (you) now │
+╰──────────────────────────────────────────────────────────╯
 ```
 
 ## Detached HEAD
@@ -330,6 +332,7 @@ we should get an error:
 
 ``` (stderr) (fail)
 $ git push rad master:refs/patches
+warn: attempted to create a patch using the commit f2de534b5e81d7c6e2dcaf58c3dd91573c0a0354, but this commit is already included in the base branch
 To rad://z42hL2jL4XNk6K8oHQaSWfMgCL7ji/z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi
  ! [remote rejected] master -> refs/patches (patch commits are already included in the base branch)
 error: failed to push some refs to 'rad://z42hL2jL4XNk6K8oHQaSWfMgCL7ji/z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi'

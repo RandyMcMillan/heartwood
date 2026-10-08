@@ -14,6 +14,37 @@ If creating an issue, please make sure to include:
 - the output of `rad debug`,
 - the contents of the log files referred to by that output.
 
+If possible, please reproduce the issue after setting the log level
+for `radicle-node` to "debug". This is done by specifying the
+commandline argument `--log-level debug`.
+If you start `radicle-node` via `rad node start`, then change the
+invocation to `rad node start -- --log-level debug`.
+
+### Issue Labels
+
+At the moment, only delegates of the `heartwood` repository are allowed to edit
+the labels of an issue.
+You can see who the delegates are by running:
+```
+$ rad inspect --delegates
+```
+
+There is no strict convention on the labeling of our issues, however, we do try
+to follow a loose scheme and have landed on the following set to begin with:
+
+```
+p=<low | medium | high> – priority
+crate=<crate name>,<other crate>
+due=<YYYY-QX>
+cob=<typename>
+good-first-issue
+type=<bug|feature|improvement|refactor|spec|doc>
+release=X.Y.Z
+os=<unix|linux|windows|macos|android|ios|…>
+```
+
+These can be used to search for different families of issues, and we will strive
+to always keep labels up to date on our issue log.
 
 ## Contributing Code
 
@@ -28,22 +59,36 @@ simple guidelines.
   before submitting a patch. We wouldn't want you to waste your time!
 * If you need help or would like to discuss your changes, come to our community chat on [Zulip][zulip].
 
-[guide]: https://radicle.xyz/guides/user#working-with-patches
+[guide]: https://radicle.dev/guides/user#working-with-patches
 [zulip]: https://radicle.zulipchat.com
 
 ### Submitting patches
 
 Patch formatting follows the same rules as commit formatting. See below.
 
+### Git hooks & Task runner
+
+We use [`just >= v1.49.0`](https://just.systems/) as our task runner. You can see all available commands by running `just` or `just --list` in the repository root.
+
+If you are not using Nix (which sets up hooks automatically), you should install the local git hooks:
+
+    $ just install-hooks
+
+These hooks will run formatting, linting, and spelling checks on `pre-commit` and `pre-push`. For security, our hooks are copied rather than symlinked. If you check out a branch that modifies sensitive files (like `build.rs` or `justfile`), the hook will pause and ask for your confirmation before executing any code.
+
 ### Linting & formatting
 
 Always check your code with the linter (`clippy`), by running:
 
-    $ cargo clippy --workspace --tests
+    $ just lint-rust
 
-And make sure your code is formatted with, using:
+And make sure your code is formatted using:
 
-    $ cargo fmt
+    $ just format-rust
+
+You can also run the entire suite of pre-commit checks (which includes spelling and shell checks) with:
+
+    $ just pre-commit
 
 Finally, ensure there is no trailing whitespace anywhere.
 
@@ -56,12 +101,26 @@ Make sure all tests are passing with:
 Some tests require `jq`. If `jq` is not detected, these tests will succeed
 without effectively testing anything.
 
+#### `cargo nextest`
+
+Another popular test runner is [`nextest`](https://nexte.st/), which can be used through `cargo nextest`.
+
+The equivalent to the above `cargo test` command would be:
+
+    $ cargo nextest run --workspace
+
+Note that `cargo nextest` does not include doc tests, however, we do not write doc tests.
+
+To run the test suite, use the command:
+
+    $ just test-rust
+
 ### Checking the docs
 
 If you make documentation changes, you may want to check whether there are any
 warnings or errors:
 
-    $ cargo doc --workspace --all-features
+    $ just check-docs
 
 ### Code style
 
@@ -69,31 +128,42 @@ The following code guidelines will help make code review smoother.
 
 #### Use of `unwrap` and `expect`
 
-Use `unwrap` only in either of three circumstances:
+In general, `unwrap` or `expect` should be seldom used.
+Instead, proper handling of these cases should made, whether through better expressing
+the logic using types, through error handling, or a combination of these.
 
-1. Based on manual static analysis, you've concluded that it's impossible for
-the code to panic; so unwrapping is *safe*. An example would be:
+However, there are some instances where they are acceptable:
 
-        let list = vec![a, b, c];
-        let first = list.first().unwrap();
+1. In tests, where `#[allow(clippy::unwrap_used)]` is commonly used.
+2. If, after analysing the code for yourself, you have concluded that
+   a call to `unwrap` does not panic (not under any circumstance, for any given
+   input). In this case, it is still preferred to use `expect` and provide
+   a message which gives your argument.
+   Note that if your analysis does not appear very stable under possible future
+   refactorings and changes, it might still not be accepted.
+3. The presence of `Option::None` or `Result::Err` is truly an unexpected scenario
+   and you intend the program to panic.
 
-2. The panic caused by `unwrap` would indicate a bug in the software, and it
-would be impossible to continue in that case.
+#### Use of the terms "safe" and "safety"
 
-3. The `unwrap` is part of test code, ie. `cfg!(test)` is `true`.
+As we are programming in Rust, the terms safe and unsafe are narrowly defined to
+refer to the safety in the sense that is common to the Rust programming community,
+i.e. "Safe Rust" and "Unsafe Rust", as mentioned in [The Rustonomicon].
 
-In the first and second case, document `unwrap` call sites with a comment prefixed
-with `SAFETY:` that explains why it's safe to unwrap, eg.
+With this in mind, we only accept the use of "safe" about code if it is related
+to implementing something within the realm of Unsafe Rust, as well as upholding
+guarantees demanded by Safe Rust. The comment must describe why the use of
+Unsafe Rust is in fact safe (i.e. which invariants are considered), and under
+which conditions.
 
-    // SAFETY: Node IDs are valid ref strings.
-    let r = RefString::try_from(node.to_string()).unwrap();
+We will not accept the use of "safe" to describe conditions under which code
+will not panic, i.e. why it would be panic-free to use `unreachable!`, `unwrap`,
+or `expect`. As we differentiate between "panic-free Rust" and Safe Rust.
+We will, however, still recommend that those uses are documented – generally
+using a `# Panics` header followed by an explanatory paragraph in a documenting
+comment.
 
-Use `expect` only if the function expects certain invariants that were not met,
-either due to bad inputs, or a problem with the environment; and include the
-expectation in the message. For example:
-
-    logger::init(log::Level::Debug)
-        .expect("logger must only be initialized once");
+[The Rustonomicon]: https://doc.rust-lang.org/nomicon/meet-safe-and-unsafe.html
 
 #### Module imports
 
@@ -108,7 +178,7 @@ are separated from private modules with a blank line:
     use std::time;
     use std::process;
 
-    ...
+    …
 
 Imports are organized in groups, from least specific to more specific:
 
@@ -119,9 +189,11 @@ Imports are organized in groups, from least specific to more specific:
     use git_ref_format as format;    // Then, external dependencies.
     use serde_json::Value;
 
-    use crate::crypto::PublicKey;    // Finally, local crate imports.
+    use crate::crypto::PublicKey;    // Then, local crate imports.
     use crate::storage::refs::Refs;
     use crate::storage::RemoteId;
+
+    use super::Oid;                  // Finally, super imports.
 
 #### Variable naming
 
@@ -129,13 +201,13 @@ Use short 1-letter names when the variable scope is only a few lines, or the con
 obvious, eg.
 
     if let Some(e) = result.err() {
-        ...
+        …
     }
 
 Use 1-word names for function parameters or variables that have larger scopes:
 
     pub fn commit(repo: &Repository, sig: &Signature) -> Result<Commit, Error> {
-        ...
+        …
     }
 
 Use the most descriptive names for globals:
@@ -178,11 +250,11 @@ for the reader:
     // all of it. It can happen that inventory is not properly tracked if for eg. the
     // user creates a new repository while the node is stopped.
     for rid in self.storage.inventory()? {
-        ...
+        …
 
-### Referring to radicle.xyz in Code
+### Referring to radicle.dev in Code
 
-While <https://radicle.xyz> is the main website of the project, and also the domain
+While <https://radicle.dev> is the main website of the project, and also the domain
 associated with COBs implemented in this repo, we strive to write code that is as
 independent as reasonably possible from this particular domain name. For example, it
 should not be used for default configuration values, or if it is, there should be a
@@ -194,10 +266,17 @@ or fork it altogether. It also tends to produce better, more flexible, code.
 In tests, instead use names that are compliant with RFC 2606, e.g.
 "radicle.example.com".
 
-Note that as of 2025-08, there are still a few mentions of "radicle.xyz" in the
+Note that as of 2025-08, there are still a few mentions of "radicle.dev" in the
 codebase (mostly tests or user hints, fallback for configuration), and some of them
 are not easy to remove. However, this is in no way a justification to add more
 references.
+
+In 2026-04, the project moved from "radicle.xyz" to "radicle.dev", and many IDs,
+most notably COB type names and payload IDs (both in reverse domain name notation)
+were not changed to stay backward compatible. So, while generally, "radicle.xyz"
+should not be used anymore, think twice before changing such occurrences to
+"radicle.dev". The same holds for "xyz.radicle", but in that case please think
+thrice.
 
 ### Proposing changes
 
@@ -215,20 +294,32 @@ When proposing changes via a patch:
 
 **Preparing commits**
 
-1. Each commit in your patch must pass all the tests, lints and checks. This is
-   so that they can be built into binaries and to make git bisecting possible.
-2. Do not include any commits that are fixes or refactorings of previous patch
+1. It is preferred that each commit in your patch passes all the tests, lints
+   and checks. This is so that they can be built into binaries and to make git
+   bisecting possible. There are times when it is necessary to have commits that
+   do not pass checks, e.g. the commit would become too large.
+2. Do not include any commits that are fixes or refactoring of previous patch
    commits. These should be squashed to the minimal diff required to make the
    change, unless it's helpful to make a large change over multiple commits,
    while still respecting (1). Do not include `fixup!` commits either.
 3. A commit *may* include a category prefix such as `cli:` or `node:` if it
-   mainly concerns a certain area of the codebase. For example. These prefixes
+   mainly concerns a certain area of the codebase. For example, these prefixes
    should usually be the name of the crate, minus any common prefix. Eg.
    `cli:`, and *not* `radicle-cli:`. For documentation, you can use `docs:`,
-   and for CI-related files, you can use `ci:`.
+   and for CI-related files, you can use `ci:`. Additionally, you can add
+   further scope within the crate, e.g. `node/service`.
 
 To help with the above, use `git commit --amend` and `git rebase -i`. You can
-also interactively construct a commit from a working tree using `git add -p`.
+also interactively construct a commit from a working tree using `git add -p**.
+
+**Git Hooks**
+
+The `justfile` contains a way to install Git hooks using:
+
+    $ just install-hooks
+
+This will allow you to have a `pre-commit` and `pre-push` hooks that will ensure
+that all of the project checks are performed.
 
 ### Writing commit messages
 
@@ -271,5 +362,13 @@ When it comes to formatting, here's a model git commit message[1]:
      - Use a hanging indent.
 
 ---
+
+### Using `direnv`
+
+The team maintains an `.envrc.sample` file (see [direnv](https://direnv.net/)), that contributors may choose to copy or symlink to their local `.envrc` file.
+This provides some basic tooling and setup that is common to the team.
+For example, if `nix` is installed, the `flake.nix` and `rust-toolchain.toml` files are automatically watched for updates.
+
+_NOTE: It is suggested you do not use `source_env .envrc.sample` in your `.envrc` as [`direnv`'s security checks](https://direnv.net/man/direnv-stdlib.1.html#codesourceenv-ltfileordirpathgtcode) are not triggered when changes are made to `.envrc.sample`._
 
 [1]: http://tbaggery.com/2008/04/19/a-note-about-git-commit-messages.html

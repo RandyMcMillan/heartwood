@@ -9,7 +9,7 @@ use radicle::prelude::*;
 use crate::node::SyncSettings;
 use crate::terminal;
 
-pub(crate) const ABOUT: &str = "Manage repository seeding policies";
+const ABOUT: &str = "Manage repository seeding policies";
 
 const LONG_ABOUT: &str = r#"
 The `seed` command, when no Repository ID is provided, will list the
@@ -43,16 +43,14 @@ pub struct Args {
     pub(super) from: Vec<NodeId>,
 
     /// Fetch timeout in seconds
-    #[arg(long, short, value_name = "SECS", default_value_t = 9)]
-    timeout: u64,
+    ///
+    /// Valid arguments are for example "10s", "5min" or "2h 37min"
+    #[arg(long, short, value_parser = humantime::parse_duration, default_value = "9s")]
+    timeout: std::time::Duration,
 
     /// Peer follow scope for this repository
-    #[arg(
-        long,
-        default_value_t = Scope::All,
-        value_parser = terminal::args::ScopeParser
-    )]
-    pub(super) scope: Scope,
+    #[arg(long, value_parser = terminal::args::ScopeParser)]
+    pub(super) scope: Option<Scope>,
 
     /// Verbose output
     #[arg(long, short)]
@@ -65,7 +63,7 @@ pub(super) enum Operation {
         rids: NonEmpty<RepoId>,
         should_fetch: bool,
         settings: SyncSettings,
-        scope: Scope,
+        scope: Option<Scope>,
     },
 }
 
@@ -90,7 +88,7 @@ impl From<Args> for Operation {
 
 impl Args {
     fn timeout(&self) -> time::Duration {
-        time::Duration::from_secs(self.timeout)
+        self.timeout
     }
 
     fn should_fetch(&self) -> bool {

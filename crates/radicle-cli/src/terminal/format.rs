@@ -2,21 +2,22 @@ use std::fmt;
 
 use localtime::LocalTime;
 
-pub use radicle_term::format::*;
-pub use radicle_term::{style, Paint};
+pub(crate) use radicle_term::format::*;
+pub(crate) use radicle_term::{Paint, style};
 
 use radicle::cob::ObjectId;
 use radicle::identity::Visibility;
 use radicle::node::policy::Policy;
-use radicle::node::{Address, Alias, AliasStore, HostName, NodeId};
+use radicle::node::{Alias, AliasStore, NodeId};
 use radicle::prelude::Did;
-use radicle::profile::{env, Profile};
+use radicle::profile::{Profile, env};
 use radicle::storage::RefUpdate;
 use radicle_term::element::Line;
 
 use crate::terminal as term;
 
 /// Format a node id to be more compact.
+#[must_use]
 pub fn node_id_human_compact(node: &NodeId) -> Paint<String> {
     let node = node.to_human();
     let start = node.chars().take(7).collect::<String>();
@@ -26,34 +27,47 @@ pub fn node_id_human_compact(node: &NodeId) -> Paint<String> {
 }
 
 /// Format a node id.
+#[must_use]
 pub fn node_id_human(node: &NodeId) -> Paint<String> {
     Paint::new(node.to_human())
 }
 
-pub fn addr_compact(address: &Address) -> Paint<String> {
-    let host = match address.host() {
-        HostName::Ip(ip) => ip.to_string(),
-        HostName::Dns(dns) => dns.clone(),
-        HostName::Tor(onion) => {
-            let onion = onion.to_string();
-            let start = onion.chars().take(8).collect::<String>();
-            let end = onion
-                .chars()
-                .skip(onion.len() - 8 - ".onion".len())
-                .collect::<String>();
-            format!("{start}…{end}")
-        }
-        _ => unreachable!(),
-    };
-
-    let port = address.port().to_string();
-
-    Paint::new(format!("{host}:{port}"))
+/// Format a Git object identifier.
+/// To format a Git object identifier in short form, see [`oid`].
+pub fn oid_long(oid: impl Into<radicle::git::Oid>) -> Paint<String> {
+    Paint::new(format!("{}", oid.into()))
 }
 
-/// Format a git Oid.
+/// Format a Git object identifier, shortened to the first 7 characters.
+/// To format a Git object identifier in long form, see [`oid_long`].
 pub fn oid(oid: impl Into<radicle::git::Oid>) -> Paint<String> {
     Paint::new(format!("{:.7}", oid.into()))
+}
+
+fn double_dot(base: impl std::fmt::Display, head: impl std::fmt::Display) -> Paint<String> {
+    Paint::new(format!("{}..{}", base, head))
+}
+
+/// Format a range between Git object identifiers (usually commits).
+/// Both object identifiers are formatted in their long form,
+/// see [`oid_long`].
+/// To format a range in short form, see [`range`].
+pub fn range_long<IntoOid>(base: IntoOid, head: IntoOid) -> Paint<String>
+where
+    IntoOid: Into<radicle::git::Oid>,
+{
+    double_dot(oid_long(base), oid_long(head))
+}
+
+/// Format a range between Git object identifiers (usually commits).
+/// Both object identifiers are formatted in short form,
+/// see [`oid`].
+/// To format a range in long form, see [`range_long`].
+pub fn range<IntoOid>(base: IntoOid, head: IntoOid) -> Paint<String>
+where
+    IntoOid: Into<radicle::git::Oid>,
+{
+    double_dot(oid(base), oid(head))
 }
 
 /// Wrap parenthesis around styled input, eg. `"input"` -> `"(input)"`.
@@ -72,17 +86,20 @@ pub fn command<D: fmt::Display>(cmd: D) -> Paint<String> {
 }
 
 /// Format a COB id.
+#[must_use]
 pub fn cob(id: &ObjectId) -> Paint<String> {
     Paint::new(format!("{:.7}", id.to_string()))
 }
 
 /// Format a DID.
+#[must_use]
 pub fn did(did: &Did) -> Paint<String> {
     let nid = did.as_key().to_human();
     Paint::new(format!("{}…{}", &nid[..7], &nid[nid.len() - 7..]))
 }
 
 /// Format a Visibility.
+#[must_use]
 pub fn visibility(v: &Visibility) -> Paint<&str> {
     match v {
         Visibility::Public => term::format::positive("public"),
@@ -91,6 +108,7 @@ pub fn visibility(v: &Visibility) -> Paint<&str> {
 }
 
 /// Format a policy.
+#[must_use]
 pub fn policy(p: &Policy) -> Paint<String> {
     match p {
         Policy::Allow => term::format::positive(p.to_string()),
@@ -108,6 +126,7 @@ pub fn timestamp(time: impl Into<LocalTime>) -> Paint<String> {
     Paint::new(fmt.convert(duration.into()))
 }
 
+#[must_use]
 pub fn bytes(size: usize) -> Paint<String> {
     const KB: usize = 1024;
     const MB: usize = 1024usize.pow(2);
@@ -125,6 +144,7 @@ pub fn bytes(size: usize) -> Paint<String> {
 }
 
 /// Format a ref update.
+#[must_use]
 pub fn ref_update(update: &RefUpdate) -> Paint<&'static str> {
     match update {
         RefUpdate::Updated { .. } => term::format::tertiary("updated"),
@@ -134,6 +154,7 @@ pub fn ref_update(update: &RefUpdate) -> Paint<&'static str> {
     }
 }
 
+#[must_use]
 pub fn ref_update_verbose(update: &RefUpdate) -> Paint<String> {
     match update {
         RefUpdate::Created { name, .. } => format!(
@@ -175,6 +196,7 @@ pub struct Identity<'a> {
 }
 
 impl<'a> Identity<'a> {
+    #[must_use]
     pub fn new(profile: &'a Profile) -> Self {
         Self {
             profile,
@@ -183,11 +205,13 @@ impl<'a> Identity<'a> {
         }
     }
 
+    #[must_use]
     pub fn short(mut self) -> Self {
         self.short = true;
         self
     }
 
+    #[must_use]
     pub fn styled(mut self) -> Self {
         self.styled = true;
         self
@@ -227,6 +251,7 @@ pub struct Author<'a> {
 }
 
 impl<'a> Author<'a> {
+    #[must_use]
     pub fn new(nid: &'a NodeId, profile: &Profile, verbose: bool) -> Author<'a> {
         let alias = profile.alias(nid);
 
@@ -238,10 +263,12 @@ impl<'a> Author<'a> {
         }
     }
 
+    #[must_use]
     pub fn alias(&self) -> Option<term::Label> {
         self.alias.as_ref().map(|a| a.to_string().into())
     }
 
+    #[must_use]
     pub fn you(&self) -> Option<term::Label> {
         if self.you {
             Some(term::format::primary("(you)").dim().italic().into())
@@ -256,6 +283,7 @@ impl<'a> Author<'a> {
     ///   * `(<did>, (you))` -- the `Author` is the local peer and has no alias
     ///   * `(<alias>, <did>)` -- the `Author` is another peer and has an alias
     ///   * `(<blank>, <did>)` -- the `Author` is another peer and has no alias
+    #[must_use]
     pub fn labels(self) -> (term::Label, term::Label) {
         let node_id = if self.verbose {
             term::format::node_id_human(self.nid)
@@ -274,6 +302,7 @@ impl<'a> Author<'a> {
         (alias, author)
     }
 
+    #[must_use]
     pub fn line(self) -> Line {
         let (alias, author) = self.labels();
         Line::spaced([alias, author])
@@ -283,6 +312,7 @@ impl<'a> Author<'a> {
 /// HTML-related formatting.
 pub mod html {
     /// Comment a string with HTML comments.
+    #[must_use]
     pub fn commented(s: &str) -> String {
         format!("<!--\n{s}\n-->")
     }
@@ -290,6 +320,7 @@ pub mod html {
     /// Remove html style comments from a string.
     ///
     /// The HTML comments must start at the beginning of a line and stop at the end.
+    #[must_use]
     pub fn strip_comments(s: &str) -> String {
         let ends_with_newline = s.ends_with('\n');
         let mut is_comment = false;
@@ -323,6 +354,7 @@ pub mod issue {
     use radicle::issue::{CloseReason, State};
 
     /// Format issue state.
+    #[must_use]
     pub fn state(s: &State) -> term::Paint<String> {
         match s {
             State::Open => term::format::positive(s.to_string()),
@@ -341,6 +373,7 @@ pub mod patch {
     use super::*;
     use radicle::patch::{State, Verdict};
 
+    #[must_use]
     pub fn verdict(v: Option<Verdict>) -> term::Paint<String> {
         match v {
             Some(Verdict::Accept) => term::PREFIX_SUCCESS.into(),
@@ -350,6 +383,7 @@ pub mod patch {
     }
 
     /// Format patch state.
+    #[must_use]
     pub fn state(s: &State) -> term::Paint<String> {
         match s {
             State::Draft => term::format::dim(s.to_string()),
@@ -366,12 +400,12 @@ pub mod identity {
     use radicle::cob::identity::State;
 
     /// Format identity revision state.
+    #[must_use]
     pub fn state(s: &State) -> term::Paint<String> {
         match s {
             State::Active => term::format::tertiary(s.to_string()),
             State::Accepted => term::format::positive(s.to_string()),
-            State::Rejected => term::format::negative(s.to_string()),
-            State::Stale => term::format::dim(s.to_string()),
+            State::Rejected(_) | State::Redacted(_) => term::format::negative(s.to_string()),
         }
     }
 }
@@ -379,10 +413,9 @@ pub mod identity {
 #[cfg(test)]
 mod test {
     use super::*;
-    use html::strip_comments;
 
     #[test]
-    fn test_strip_comments() {
+    fn strip_comments() {
         let test = "\
         commit 2\n\
         \n\
@@ -394,7 +427,7 @@ mod test {
         commit 2\n\
         ";
 
-        let res = strip_comments(test);
+        let res = html::strip_comments(test);
         assert_eq!(exp, res);
 
         let test = "\
@@ -404,7 +437,7 @@ mod test {
         commit 2\n\
         -->";
 
-        let res = strip_comments(test);
+        let res = html::strip_comments(test);
         assert_eq!(exp, res);
 
         let test = "\
@@ -413,7 +446,7 @@ mod test {
         ";
         let exp = "";
 
-        let res = strip_comments(test);
+        let res = html::strip_comments(test);
         assert_eq!(exp, res);
 
         let test = "\
@@ -430,17 +463,20 @@ mod test {
         \n\
         -->";
 
-        let res = strip_comments(test);
+        let res = html::strip_comments(test);
         assert_eq!(exp, res);
     }
 
     #[test]
-    fn test_bytes() {
-        assert_eq!(bytes(1023).to_string(), "1023 B");
-        assert_eq!(bytes(1024).to_string(), "1 KiB");
-        assert_eq!(bytes(1024 * 9).to_string(), "9 KiB");
-        assert_eq!(bytes(1024usize.pow(2)).to_string(), "1 MiB");
-        assert_eq!(bytes(1024usize.pow(2) * 56).to_string(), "56 MiB");
-        assert_eq!(bytes(1024usize.pow(3) * 1024).to_string(), "1024 GiB");
+    fn bytes() {
+        assert_eq!(super::bytes(1023).to_string(), "1023 B");
+        assert_eq!(super::bytes(1024).to_string(), "1 KiB");
+        assert_eq!(super::bytes(1024 * 9).to_string(), "9 KiB");
+        assert_eq!(super::bytes(1024usize.pow(2)).to_string(), "1 MiB");
+        assert_eq!(super::bytes(1024usize.pow(2) * 56).to_string(), "56 MiB");
+        assert_eq!(
+            super::bytes(1024usize.pow(3) * 1024).to_string(),
+            "1024 GiB"
+        );
     }
 }

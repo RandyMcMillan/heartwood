@@ -1,4 +1,3 @@
-#![allow(clippy::identity_op)]
 use std::ops::{Deref, DerefMut};
 
 pub use bloomy::BloomFilter;
@@ -7,13 +6,13 @@ use radicle::identity::RepoId;
 
 /// Size in bytes of *large* bloom filter.
 /// It can store about 13'675 items with a false positive rate of 1%.
-pub const FILTER_SIZE_L: usize = 16 * 1024;
+pub const FILTER_SIZE_L: usize = 1024 * 16;
 /// Size in bytes of *medium* bloom filter.
 /// It can store about 3'419 items with a false positive rate of 1%.
-pub const FILTER_SIZE_M: usize = 4 * 1024;
+pub const FILTER_SIZE_M: usize = 1024 * 4;
 /// Size in bytes of *small* bloom filter.
 /// It can store about 855 items with a false positive rate of 1%.
-pub const FILTER_SIZE_S: usize = 1 * 1024;
+pub const FILTER_SIZE_S: usize = 1024;
 
 /// Valid filter sizes.
 pub const FILTER_SIZES: [usize; 3] = [FILTER_SIZE_S, FILTER_SIZE_M, FILTER_SIZE_L];
@@ -70,7 +69,7 @@ impl Filter {
             let seed = match seed {
                 Ok(seed) => seed,
                 Err(err) => {
-                    log::error!(target: "protocol::filter", "Failed to read seed policy: {err}");
+                    log::debug!(target: "protocol::filter", "Failed to read seed policy: {err}");
                     continue;
                 }
             };
@@ -137,7 +136,7 @@ mod test {
     use radicle::test::arbitrary;
 
     #[test]
-    fn test_parameters() {
+    fn parameters() {
         // To store 10'000 items with a false positive rate of 1%, we need about 12KB.
         assert_eq!(bloomy::bloom::optimal_bits(10_000, 0.01) / 8, 11_981);
         // To store 1'000 items with a false positive rate of 1%, we need about 1KB.
@@ -176,7 +175,7 @@ mod test {
     }
 
     #[test]
-    fn test_sizes() {
+    fn sizes() {
         let ids = arbitrary::vec::<RepoId>(3420);
         let f = Filter::new(ids.iter().cloned().take(10));
         assert_eq!(f.size(), FILTER_SIZE_S);

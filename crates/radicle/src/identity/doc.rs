@@ -1,7 +1,5 @@
 pub mod update;
 
-mod id;
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -13,7 +11,7 @@ use std::sync::LazyLock;
 use crate::git::Oid;
 use nonempty::NonEmpty;
 use radicle_cob::type_name::{TypeName, TypeNameParse};
-use serde::{de, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de};
 use thiserror::Error;
 
 use crate::canonical::formatter::CanonicalFormatter;
@@ -21,18 +19,20 @@ use crate::cob::identity;
 use crate::crypto;
 use crate::crypto::Signature;
 use crate::git;
-use crate::git::canonical::rules;
+use crate::git::canonical::rules::{self, ResolvedDelegates};
+use crate::git::fmt::Qualified;
+use crate::git::fmt::RefString;
 use crate::git::raw::ErrorExt as _;
-use crate::identity::{project::Project, Did};
-use crate::node::device::Device;
+use crate::identity::crefs;
+use crate::identity::{Did, project::Project};
 use crate::storage;
 use crate::storage::{ReadRepository, RepositoryError};
 
-pub use crypto::PublicKey;
-pub use id::*;
+pub use crypto::{PublicKey, VerifyingKey};
+pub use radicle_core::repo::*;
 
-use super::crefs::{self, RawCanonicalRefs};
 use super::CanonicalRefs;
+use super::crefs::RawCanonicalRefs;
 
 /// Path to the identity document in the identity branch.
 pub static PATH: LazyLock<&Path> = LazyLock::new(|| Path::new("radicle.json"));
@@ -77,11 +77,20 @@ impl DocError {
 }
 
 #[derive(Debug, Error)]
-pub enum DefaultBranchRuleError {
-    #[error("could not create rule due to the reference name being invalid: {0}")]
-    Pattern(#[from] rules::PatternError),
-    #[error("could not load `xyz.radicle.project` to get default branch name: {0}")]
-    Payload(#[from] PayloadError),
+pub enum DefaultBranchError {
+    #[error(
+        "could not find default branch in any of the payloads `xyz.radicle.project` ({project}) or `xyz.radicle.crefs` ({crefs})"
+    )]
+    Payload {
+        project: PayloadError,
+        crefs: PayloadError,
+    },
+
+    #[error("no symbolic reference with name `HEAD` is defined")]
+    MissingHead,
+
+    #[error(transparent)]
+    CanonicalRefsError(#[from] CanonicalRefsError),
 }
 
 /// The version number of the identity document.
@@ -104,7 +113,7 @@ impl Version {
     pub fn new(n: u32) -> Result<Version, VersionError> {
         match NonZeroU32::new(n) {
             None => Err(VersionError::ZeroVersion),
-            Some(n) if n > IDENTITY_VERSION.into() => Err(VersionError::UnkownVersion(n)),
+            Some(n) if n > IDENTITY_VERSION.into() => Err(VersionError::UnknownVersion(n)),
             Some(n) => Ok(Version(n)),
         }
     }
@@ -146,7 +155,7 @@ pub enum VersionError {
     #[error("the version 0 is not supported")]
     ZeroVersion,
     #[error("unknown identity document version {0}, only version {IDENTITY_VERSION} is supported")]
-    UnkownVersion(NonZeroU32),
+    UnknownVersion(NonZeroU32),
 }
 
 impl VersionError {
@@ -155,14 +164,14 @@ impl VersionError {
     /// This will give a user more information on how to upgrade to a newer
     /// version of an identity document, if there is one.
     pub fn verbose(&self) -> String {
-        const UNKOWN_VERSION_ERROR: &str = r#"
+        const UNKNOWN_VERSION_ERROR: &str = r#"
 Perhaps a new version of the identity document is released which is not supported by the current client.
-See https://radicle.xyz for the latest versions of Radicle.
+See https://radicle.dev for the latest versions of Radicle.
 The CLI command `rad id migrate` will help to migrate to an up-to-date versions."#;
 
         match self {
             err @ Self::ZeroVersion => err.to_string(),
-            err @ Self::UnkownVersion(_) => format!("{err}{UNKOWN_VERSION_ERROR}"),
+            err @ Self::UnknownVersion(_) => format!("{err}{UNKNOWN_VERSION_ERROR}"),
         }
     }
 }
@@ -217,22 +226,21 @@ impl FromStr for PayloadId {
     }
 }
 
+static CANONICAL_REFS: LazyLock<PayloadId> = LazyLock::new(|| PayloadId::new("xyz.radicle.crefs"));
+static PROJECT: LazyLock<PayloadId> = LazyLock::new(|| PayloadId::new("xyz.radicle.project"));
+
 impl PayloadId {
-    /// Project payload type.
-    pub fn project() -> Self {
-        Self(
-            // SAFETY: We know this is valid.
-            TypeName::from_str("xyz.radicle.project")
-                .expect("PayloadId::project: type name is valid"),
-        )
+    pub fn canonical_refs() -> &'static Self {
+        &CANONICAL_REFS
     }
 
-    pub fn canonical_refs() -> Self {
-        Self(
-            // SAFETY: We know this is valid.
-            TypeName::from_str("xyz.radicle.crefs")
-                .expect("PayloadId::canonical_refs: type name is valid"),
-        )
+    pub fn project() -> &'static Self {
+        &PROJECT
+    }
+
+    #[inline]
+    fn new(type_name: &'static str) -> Self {
+        Self::from_str(type_name).expect("type_name is valid")
     }
 }
 
@@ -240,8 +248,6 @@ impl PayloadId {
 pub enum PayloadError {
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("payload '{0}' not found in identity document")]
-    NotFound(PayloadId),
 }
 
 /// A `Payload` is a free-form JSON value that can be associated with an
@@ -260,6 +266,10 @@ impl Payload {
     ) -> Option<&mut serde_json::value::Map<String, serde_json::Value>> {
         self.value.as_object_mut()
     }
+
+    pub fn into_inner(self) -> serde_json::Value {
+        self.value
+    }
 }
 
 impl From<serde_json::Value> for Payload {
@@ -273,6 +283,43 @@ impl Deref for Payload {
 
     fn deref(&self) -> &Self::Target {
         &self.value
+    }
+}
+
+/// Trait for all types that may carry payloads.
+pub trait GetPayload {
+    fn get_payload(&self, id: &PayloadId) -> Option<&Payload>;
+
+    fn load_payload<T: de::DeserializeOwned>(
+        &self,
+        id: &PayloadId,
+    ) -> Option<Result<T, PayloadError>> {
+        self.get_payload(id).map(|payload| {
+            serde_json::from_value(payload.deref().clone()).map_err(PayloadError::Json)
+        })
+    }
+
+    /// Get the [`Project`] by deserializing from the payload.
+    fn project(&self) -> Option<Result<Project, PayloadError>> {
+        self.load_payload(PayloadId::project())
+    }
+
+    /// Retrieve the [`RawCanonicalRefs`] by deserializing from the payload
+    /// (if present).
+    fn raw_canonical_refs(&self) -> Option<Result<RawCanonicalRefs, PayloadError>> {
+        self.load_payload(PayloadId::canonical_refs())
+    }
+}
+
+impl GetPayload for Doc {
+    fn get_payload(&self, id: &PayloadId) -> Option<&Payload> {
+        self.payload.get(id)
+    }
+}
+
+impl GetPayload for RawDoc {
+    fn get_payload(&self, id: &PayloadId) -> Option<&Payload> {
+        self.payload.get(id)
     }
 }
 
@@ -405,7 +452,7 @@ impl RawDoc {
 
         Self {
             version: IDENTITY_VERSION,
-            payload: BTreeMap::from_iter([(PayloadId::project(), Payload::from(project))]),
+            payload: BTreeMap::from_iter([(PayloadId::project().clone(), Payload::from(project))]),
             delegates,
             threshold,
             visibility,
@@ -415,17 +462,6 @@ impl RawDoc {
     /// Get the version of the document.
     pub fn version(&self) -> &Version {
         &self.version
-    }
-
-    /// Get the project payload, if it exists and is valid, out of this document.
-    pub fn project(&self) -> Result<Project, PayloadError> {
-        let value = self
-            .payload
-            .get(&PayloadId::project())
-            .ok_or_else(|| PayloadError::NotFound(PayloadId::project()))?;
-        let proj: Project = serde_json::from_value((**value).clone())?;
-
-        Ok(proj)
     }
 
     /// Check if the given `did` is in the set of [`RawDoc::delegates`].
@@ -676,7 +712,7 @@ impl Doc {
 
         Self {
             version: IDENTITY_VERSION,
-            payload: BTreeMap::from_iter([(PayloadId::project(), Payload::from(project))]),
+            payload: BTreeMap::from_iter([(PayloadId::project().clone(), Payload::from(project))]),
             delegates: Delegates(NonEmpty::new(delegate)),
             threshold: Threshold(NonZeroUsize::MIN),
             visibility,
@@ -728,28 +764,163 @@ impl Doc {
         &self.payload
     }
 
-    /// Get the project payload, if it exists and is valid, out of this document.
-    pub fn project(&self) -> Result<Project, PayloadError> {
-        let value = self
-            .payload
-            .get(&PayloadId::project())
-            .ok_or_else(|| PayloadError::NotFound(PayloadId::project()))?;
-        let proj: Project = serde_json::from_value((**value).clone())?;
-
-        Ok(proj)
+    /// Gets the qualified reference name of the default branch,
+    /// according to payloads `xyz.radicle.project` and `xyz.radicle.crefs`
+    /// in this document.
+    pub fn default_branch(&self) -> Result<git::fmt::Qualified<'_>, DefaultBranchError> {
+        let crefs = self.canonical_refs()?;
+        let qualified = crefs
+            .symbolic()
+            .resolve_head()
+            .ok_or(DefaultBranchError::MissingHead)?;
+        Ok(qualified.to_owned())
     }
 
-    pub fn default_branch_rule(
+    pub fn default_branch_name(&self) -> Result<git::fmt::RefString, DefaultBranchError> {
+        let qualified = self.default_branch()?;
+        Ok(qualified
+            .strip_prefix(RefString::try_from("refs/heads").expect("valid refstring"))
+            .expect("valid branch")
+            .to_ref_string())
+    }
+
+    /// Construct the canonical references for this document.
+    ///
+    /// Uses the `xyz.radicle.crefs` payload (if present) and the
+    /// `xyz.radicle.project` payload to determine the `HEAD` symbolic
+    /// reference and its associated rule.
+    ///
+    /// There are three cases, depending on whether `HEAD` is already
+    /// defined in the crefs payload and whether a project payload exists:
+    ///
+    /// 1. **Explicit HEAD + project**: `HEAD` must agree with
+    ///    [`Project::default_branch_qualified`], and the matching rule must
+    ///    use `delegates` with the document's threshold.
+    /// 2. **Explicit HEAD, no project**: The matching rule must use
+    ///    `delegates` with the document's threshold.
+    /// 3. **No HEAD**: A rule and `HEAD` symbolic reference are synthesized
+    ///    from the project payload (which must exist).
+    ///
+    /// In all cases the result must pass [`RawCanonicalRefs::try_into_canonical_refs`]
+    /// validation. If a rule for `HEAD`'s target is missing, it will be
+    /// caught as a dangling reference there.
+    ///
+    /// [`RawCanonicalRefs`]: super::crefs::RawCanonicalRefs
+    pub fn canonical_refs(&self) -> Result<CanonicalRefs, CanonicalRefsError> {
+        let resolve = &mut || self.delegates.clone();
+        let crefs = self
+            .raw_canonical_refs()
+            .transpose()
+            .map_err(CanonicalRefsError::Payload)?
+            .map(|crefs| crefs.try_into_canonical_refs(resolve))
+            .transpose()
+            .map_err(CanonicalRefsError::CanonicalRefs)?
+            .unwrap_or_default();
+
+        // Determine where `HEAD` comes from. The `resolve_head()` result
+        // borrows `raw_crefs`, so clone to allow mutation in the synthesis
+        // path.
+        let head: Option<Qualified<'static>> = crefs.symbolic().resolve_head().cloned();
+
+        match (head, self.project()) {
+            (Some(ref default_branch), Some(Ok(project))) => {
+                let project_branch = project.default_branch_qualified();
+                if project_branch != *default_branch {
+                    return Err(CanonicalRefsError::DefaultBranchRuleError(
+                        DefaultBranchRuleError::HeadMismatch {
+                            cref: default_branch.to_ref_string(),
+                            project: project_branch.to_ref_string(),
+                        },
+                    ));
+                }
+                self.validate_head_rule(&crefs, default_branch)?;
+            }
+            (Some(ref default_branch), None) => {
+                self.validate_head_rule(&crefs, default_branch)?;
+            }
+            (None, Some(Ok(project))) => {
+                return Ok(self
+                    .synthesize_head(crefs, &project)
+                    .try_into_canonical_refs(resolve)?);
+            }
+            (None, None) => {
+                return Err(CanonicalRefsError::SynthesisPayloadMissing);
+            }
+            (_, Some(Err(err))) => {
+                return Err(CanonicalRefsError::ProjectPayload(err));
+            }
+        }
+
+        Ok(crefs)
+    }
+
+    /// Validate that the rule matching `HEAD`'s target branch uses
+    /// `delegates` and the document's threshold.
+    ///
+    /// If no rule matches the target, `HEAD` will dangle — this is caught
+    /// later by [`RawCanonicalRefs::try_into_canonical_refs`] validation.
+    fn validate_head_rule(
         &self,
-    ) -> Result<(rules::Pattern, rules::ValidRule), DefaultBranchRuleError> {
-        let proj = self.project()?;
-        let refname = proj.default_branch();
-        let pattern = rules::Pattern::try_from(git::refs::branch(refname).to_owned())?;
-        let rule = rules::Rule::new(
-            rules::ResolvedDelegates::Delegates(self.delegates.clone()),
-            self.threshold,
-        );
-        Ok((pattern, rule))
+        crefs: &CanonicalRefs,
+        default_branch: &Qualified<'static>,
+    ) -> Result<(), CanonicalRefsError> {
+        let Some((pattern, rule)) = crefs.rules().matches(default_branch).next() else {
+            return Ok(());
+        };
+
+        let _allowed = rule.allowed();
+        match rule.allowed() {
+            ResolvedDelegates::Delegates(_) => {
+                // This is the expected case, so we continue to validate the threshold.
+            }
+            ResolvedDelegates::Set(actual) => {
+                return Err(CanonicalRefsError::DefaultBranchRuleError(
+                    DefaultBranchRuleError::Allowed {
+                        pattern: pattern.to_string(),
+                        actual: actual
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    },
+                ));
+            }
+        }
+        let actual = (*rule.threshold()).into();
+        let expected = self.threshold();
+        if actual != expected {
+            return Err(CanonicalRefsError::DefaultBranchRuleError(
+                DefaultBranchRuleError::Threshold {
+                    pattern: pattern.to_string(),
+                    actual,
+                    expected,
+                },
+            ));
+        }
+        Ok(())
+    }
+
+    /// Synthesize a `HEAD` symbolic reference and a default branch rule
+    /// from the project payload.
+    fn synthesize_head(&self, crefs: CanonicalRefs, project: &Project) -> RawCanonicalRefs {
+        let default_branch = project.default_branch_qualified();
+
+        let add_rule = crefs.rules().matches(&default_branch).next().is_none();
+
+        let mut raw_crefs = RawCanonicalRefs::from(crefs);
+
+        if add_rule {
+            raw_crefs.raw_rules_mut().insert(
+                git::fmt::refspec::QualifiedPattern::from(default_branch.to_owned()),
+                rules::Rule::new(rules::Allowed::Delegates, self.threshold()),
+            );
+        }
+
+        raw_crefs
+            .symbolic_mut()
+            .insert(git::fmt::refname!("HEAD"), default_branch.to_ref_string());
+
+        raw_crefs
     }
 
     /// Return the associated [`Visibility`] of this document.
@@ -804,13 +975,16 @@ impl Doc {
         signature: &Signature,
         blob: Oid,
     ) -> Result<(), PublicKey> {
+        use crypto::signature::Verifier as _;
+
         if !self.is_delegate(&key.into()) {
             return Err(*key);
         }
-        if key.verify(AsRef::<[u8]>::as_ref(&blob), signature).is_err() {
-            return Err(*key);
-        }
-        Ok(())
+
+        VerifyingKey::try_from(key)
+            .map_err(|_| *key)?
+            .verify(AsRef::<[u8]>::as_ref(&blob), signature)
+            .map_err(|_| *key)
     }
 
     /// Check the provided `votes` passes the [`Doc::majority`].
@@ -847,10 +1021,10 @@ impl Doc {
 
     /// [`Doc::encode`] and sign the [`Doc`], returning the set of bytes, its
     /// corresponding Git [`Oid`] and the [`Signature`] over the [`Oid`].
-    pub fn sign<G>(&self, signer: &G) -> Result<(git::Oid, Vec<u8>, Signature), DocError>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
+    pub fn sign(
+        &self,
+        signer: &impl crypto::Signer,
+    ) -> Result<(git::Oid, Vec<u8>, Signature), DocError> {
         let (oid, bytes) = self.encode()?;
         let sig = signer.sign(oid.as_ref());
 
@@ -858,10 +1032,7 @@ impl Doc {
     }
 
     /// Similar to [`Doc::sign`], but only returning the [`Signature`].
-    pub fn signature_of<G>(&self, signer: &G) -> Result<Signature, DocError>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
+    pub fn signature_of(&self, signer: &impl crypto::Signer) -> Result<Signature, DocError> {
         let (_, _, sig) = self.sign(signer)?;
 
         Ok(sig)
@@ -882,22 +1053,16 @@ impl Doc {
 
     /// Initialize an [`identity::Identity`] with this [`Doc`] as the associated
     /// document.
-    pub fn init<G>(
+    pub fn init(
         &self,
         repo: &storage::git::Repository,
-        signer: &Device<G>,
-    ) -> Result<git::Oid, RepositoryError>
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
+        signer: &impl crypto::Signer,
+    ) -> Result<git::Oid, RepositoryError> {
         let cob = identity::Identity::initialize(self, repo, signer)?;
-        let id_ref = git::refs::storage::id(signer.public_key());
-        let cob_ref = git::refs::storage::cob(
-            signer.public_key(),
-            &crate::cob::identity::TYPENAME,
-            &cob.id,
-        );
-        // Set `.../refs/rad/id` -> `.../refs/cobs/xyz.radicle.id/<id>`
+        let public_key = signer.public_key();
+        let id_ref = git::refs::storage::id(public_key);
+        let cob_ref = git::refs::storage::cob(public_key, &crate::cob::identity::TYPENAME, &cob.id);
+        // Set `…/refs/rad/id` -> `…/refs/cobs/xyz.radicle.id/<id>`
         repo.backend.reference_symbolic(
             id_ref.as_str(),
             cob_ref.as_str(),
@@ -912,85 +1077,66 @@ impl Doc {
 #[derive(Debug, Error)]
 pub enum CanonicalRefsError {
     #[error(transparent)]
-    Json(#[from] serde_json::Error),
+    Payload(PayloadError),
+
     #[error(transparent)]
-    CanonicalRefs(#[from] rules::ValidationError),
+    CanonicalRefs(#[from] crefs::ValidationError),
+
+    #[error("could not load `xyz.radicle.project` to get default branch name: {0}")]
+    ProjectPayload(PayloadError),
+
+    #[error("payload `xyz.radicle.project` is missing")]
+    SynthesisPayloadMissing,
+
     #[error(transparent)]
-    DefaultBranch(#[from] DefaultBranchRuleError),
+    DefaultBranchRuleError(#[from] DefaultBranchRuleError),
 }
 
-impl crefs::GetCanonicalRefs for Doc {
-    type Error = CanonicalRefsError;
+#[derive(Debug, Error)]
+pub enum DefaultBranchRuleError {
+    #[error(
+        "rule for pattern '{pattern}' which matches the target of symbolic reference 'HEAD' (possibly synthesized from payload 'xyz.radicle.project') must use 'allow' value of \"delegates\" but uses {actual}"
+    )]
+    Allowed { pattern: String, actual: String },
 
-    fn canonical_refs(&self) -> Result<Option<CanonicalRefs>, Self::Error> {
-        self.raw_canonical_refs().and_then(|raw| {
-            raw.map(|raw| {
-                raw.try_into_canonical_refs(&mut || self.delegates.clone())
-                    .map_err(CanonicalRefsError::from)
-                    .and_then(|mut crefs| {
-                        self.default_branch_rule()
-                            .map_err(CanonicalRefsError::from)
-                            .map(|rule| {
-                                crefs.extend([rule]);
-                                crefs
-                            })
-                    })
-            })
-            .transpose()
-        })
-    }
+    #[error(
+        "rule for pattern '{pattern}' which matches the target of symbolic reference 'HEAD' (possibly synthesized from payload 'xyz.radicle.project') must use a threshold of {expected} as required by the identity document but uses {actual}"
+    )]
+    Threshold {
+        pattern: String,
+        actual: usize,
+        expected: usize,
+    },
 
-    fn raw_canonical_refs(&self) -> Result<Option<RawCanonicalRefs>, Self::Error> {
-        let value = self.payload.get(&PayloadId::canonical_refs());
-        let crefs = value
-            .map(|value| {
-                serde_json::from_value((**value).clone()).map_err(CanonicalRefsError::from)
-            })
-            .transpose()?;
-        Ok(crefs)
-    }
-}
-
-impl crefs::GetCanonicalRefs for RawDoc {
-    type Error = CanonicalRefsError;
-
-    fn canonical_refs(&self) -> Result<Option<CanonicalRefs>, Self::Error> {
-        Ok(None)
-    }
-
-    fn raw_canonical_refs(&self) -> Result<Option<RawCanonicalRefs>, Self::Error> {
-        let value = self.payload.get(&PayloadId::canonical_refs());
-        let crefs = value
-            .map(|value| {
-                serde_json::from_value((**value).clone()).map_err(CanonicalRefsError::from)
-            })
-            .transpose()?;
-        Ok(crefs)
-    }
+    #[error(
+        "target symbolic reference 'HEAD' ('{cref}') does not match `defaultBranch` from payload `xyz.radicle.project` ('{project}')"
+    )]
+    HeadMismatch { cref: RefString, project: RefString },
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod test {
+    use crypto::{Signer as _, SigningKey};
     use serde_json::json;
 
     use crate::assert_matches;
     use crate::rad;
-    use crate::storage::git::transport;
     use crate::storage::git::Storage;
+    use crate::storage::git::transport;
     use crate::storage::{ReadStorage as _, RemoteId, WriteStorage as _};
     use crate::test::arbitrary;
-    use crate::test::arbitrary::gen;
+    use crate::test::arbitrary::r#gen;
     use crate::test::fixtures;
 
     use super::*;
     use qcheck_macros::quickcheck;
 
     #[test]
-    fn test_duplicate_dids() {
-        let delegate = Device::mock_from_seed([0xff; 32]);
+    fn duplicate_dids() {
+        let delegate = SigningKey::mock(usize::MAX);
         let did = Did::from(delegate.public_key());
-        let mut doc = RawDoc::new(gen::<Project>(1), vec![did], 1, Visibility::Public);
+        let mut doc = RawDoc::new(r#gen::<Project>(1), vec![did], 1, Visibility::Public);
         doc.delegate(did);
         let doc = doc.verified().unwrap();
         assert!(doc.delegates().len() == 1, "Duplicate DID was not removed");
@@ -998,13 +1144,15 @@ mod test {
     }
 
     #[test]
-    fn test_max_delegates() {
+    fn max_delegates() {
         // Generate more than the max delegates
-        let delegates = (0..MAX_DELEGATES + 1).map(gen).collect::<Vec<Did>>();
+        let delegates = arbitrary::set::<Did>(MAX_DELEGATES + 1..=MAX_DELEGATES + 1)
+            .into_iter()
+            .collect::<Vec<_>>();
 
         // A document with max delegates will be fine
         let doc = RawDoc::new(
-            gen::<Project>(1),
+            r#gen::<Project>(1),
             delegates[0..MAX_DELEGATES].into(),
             1,
             Visibility::Public,
@@ -1012,12 +1160,12 @@ mod test {
         assert_matches!(doc.verified(), Ok(_));
 
         // A document that exceeds max delegates should fail
-        let doc = RawDoc::new(gen::<Project>(1), delegates, 1, Visibility::Public);
+        let doc = RawDoc::new(r#gen::<Project>(1), delegates, 1, Visibility::Public);
         assert_matches!(doc.verified(), Err(DocError::Delegates(DelegatesError(_))));
     }
 
     #[test]
-    fn test_is_valid_version() {
+    fn is_valid_version() {
         // 0 is not a valid version
         assert!(!Version::is_valid_version(&0));
 
@@ -1032,18 +1180,18 @@ mod test {
     }
 
     #[test]
-    fn test_future_version_error() {
+    fn future_version_error() {
         let v = Version(NonZeroU32::MAX).to_string();
         assert_eq!(
             serde_json::from_str::<Version>(&v)
                 .expect_err("should fail to deserialize")
                 .to_string(),
-            VersionError::UnkownVersion(NonZeroU32::MAX).to_string(),
+            VersionError::UnknownVersion(NonZeroU32::MAX).to_string(),
         )
     }
 
     #[test]
-    fn test_parse_version() {
+    fn parse_version() {
         // Original document before introducing the version field
         let v1 = json!(
             {
@@ -1067,7 +1215,7 @@ mod test {
         // `IDENTITY_VERSION`.
         let doc = serde_json::from_str::<RawDoc>(&v1.to_string()).unwrap();
         let payload = [(
-            PayloadId::project(),
+            PayloadId::project().clone(),
             Payload {
                 value: json!({
                     "name": "heartwood",
@@ -1117,13 +1265,13 @@ mod test {
     }
 
     #[test]
-    fn test_canonical_example() {
+    fn canonical_example() {
         let tempdir = tempfile::tempdir().unwrap();
         let storage = Storage::open(tempdir.path().join("storage"), fixtures::user()).unwrap();
 
         transport::local::register(storage.clone());
 
-        let delegate = Device::mock_from_seed([0xff; 32]);
+        let delegate = SigningKey::mock(usize::MAX);
         let (repo, _) = fixtures::repository(tempdir.path().join("working"));
         let (id, _, _) = rad::init(
             &repo,
@@ -1148,11 +1296,11 @@ mod test {
     }
 
     #[test]
-    fn test_not_found() {
+    fn not_found() {
         let tempdir = tempfile::tempdir().unwrap();
         let storage = Storage::open(tempdir.path().join("storage"), fixtures::user()).unwrap();
-        let remote = arbitrary::gen::<RemoteId>(1);
-        let proj = arbitrary::gen::<RepoId>(1);
+        let remote = arbitrary::r#gen::<RemoteId>(1);
+        let proj = arbitrary::r#gen::<RepoId>(1);
         let repo = storage.create(proj).unwrap();
         let oid = git::raw::Oid::from_str("2d52a53ce5e4f141148a5f770cfd3ead2d6a45b8").unwrap();
 
@@ -1167,14 +1315,14 @@ mod test {
     }
 
     #[test]
-    fn test_canonical_doc() {
+    fn canonical_doc() {
         let tempdir = tempfile::tempdir().unwrap();
         let storage = Storage::open(tempdir.path().join("storage"), fixtures::user()).unwrap();
         transport::local::register(storage.clone());
 
         let (working, _) = fixtures::repository(tempdir.path().join("working"));
 
-        let delegate = Device::mock_from_seed([0xff; 32]);
+        let delegate = SigningKey::mock(usize::MAX);
         let (rid, doc, _) = rad::init(
             &working,
             "heartwood".try_into().unwrap(),
@@ -1197,7 +1345,7 @@ mod test {
     }
 
     #[test]
-    fn test_visibility_json() {
+    fn visibility_json() {
         use std::str::FromStr;
 
         assert_eq!(
@@ -1215,6 +1363,113 @@ mod test {
             .unwrap()]))
             .unwrap(),
             serde_json::json!({ "type": "private", "allow": ["did:key:z6MksFqXN3Yhqk8pTJdUGLwATkRfQvwZXPqR2qMEhbS9wzpT"] })
+        );
+    }
+
+    /// A [`Doc`] containing symbolic references that contain a chain must still
+    /// be readable after [`Doc::encode`]
+    #[test]
+    fn encode_preserves_symbolic_chain() {
+        let value = json!({
+            "payload": {
+                "xyz.radicle.crefs": {
+                    "symbolic": {
+                        "MAIN": "refs/heads/master",
+                        "HEAD": "MAIN",
+                    },
+                    "rules": {
+                        "refs/heads/master": { "allow": "delegates", "threshold": 1 }
+                    }
+                }
+            },
+            "delegates": ["did:key:z6MkireRatUThvd3qzfKht1S44wpm4FEWSSa4PRMTSQZ3voM"],
+            "threshold": 1
+        });
+
+        let doc = serde_json::from_value::<Doc>(value).unwrap();
+        doc.canonical_refs()
+            .expect("symref chain is valid before encoding");
+
+        let (_, bytes) = doc.encode().unwrap();
+        let decoded = RawDoc::from_json(&bytes).unwrap().verified().unwrap();
+
+        assert_eq!(decoded, doc);
+        assert_eq!(
+            decoded
+                .canonical_refs()
+                .expect("symref chain is still valid after encoding")
+                .symbolic()
+                .resolve_head()
+                .map(|q| q.to_string()),
+            Some("refs/heads/master".to_owned()),
+        );
+    }
+
+    #[test]
+    fn default_branch_without_project() {
+        let value = serde_json::json!(
+            {
+                "payload": {
+                    "xyz.radicle.crefs": {
+                        "symbolic": {
+                            "HEAD": "refs/heads/main",
+                        },
+                        "rules": {
+                            "refs/heads/main": {
+                                "allow": "delegates",
+                                "threshold": 1,
+                            }
+                        }
+                    }
+                },
+                "delegates": [
+                    "did:key:z6MkireRatUThvd3qzfKht1S44wpm4FEWSSa4PRMTSQZ3voM"
+                ],
+                "threshold": 1
+            }
+        );
+
+        let doc = serde_json::from_value::<Doc>(value).unwrap();
+        assert_eq!(doc.default_branch().unwrap().as_str(), "refs/heads/main");
+    }
+
+    #[test]
+    fn default_branch_clash() {
+        let value = serde_json::json!(
+            {
+                "payload": {
+                    "xyz.radicle.project": {
+                        "name": "example",
+                        "description": "An example project",
+                        "defaultBranch": "main",
+                    },
+                    "xyz.radicle.crefs": {
+                        "symbolic": {
+                            "HEAD": "refs/heads/master",
+                        },
+                        "rules": {
+                            "refs/heads/master": {
+                                "allow": "delegates",
+                                "threshold": 1,
+                            }
+                        }
+                    }
+                },
+                "delegates": [
+                    "did:key:z6MkireRatUThvd3qzfKht1S44wpm4FEWSSa4PRMTSQZ3voM"
+                ],
+                "threshold": 1
+            }
+        );
+
+        let doc = serde_json::from_value::<Doc>(value).unwrap();
+        assert_matches!(
+            doc.default_branch(),
+            Err(DefaultBranchError::CanonicalRefsError(
+                CanonicalRefsError::DefaultBranchRuleError(
+                    DefaultBranchRuleError::HeadMismatch { .. }
+                )
+            ))
         );
     }
 }

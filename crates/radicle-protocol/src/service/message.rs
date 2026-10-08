@@ -1,13 +1,14 @@
+use std::str::FromStr;
 use std::{fmt, mem};
 
 use bytes::{Buf, BufMut};
 use nonempty::NonEmpty;
 
 use radicle::crypto;
+use radicle::crypto::Signer as _;
 use radicle::git;
 use radicle::identity::RepoId;
 use radicle::node;
-use radicle::node::device::Device;
 use radicle::node::{Address, Alias, UserAgent};
 use radicle::storage;
 use radicle::storage::refs::RefsAt;
@@ -50,7 +51,7 @@ impl Subscribe {
 pub struct NodeAnnouncement {
     /// Supported protocol version.
     pub version: u8,
-    /// Advertized features.
+    /// Advertised features.
     pub features: node::Features,
     /// Monotonic timestamp.
     pub timestamp: Timestamp,
@@ -92,7 +93,7 @@ impl NodeAnnouncement {
         .expect("proof-of-work output vector is a valid length");
 
         // Calculate the number of leading zero bits in the output vector.
-        if let Some((zero_bytes, non_zero)) = output.iter().enumerate().find(|(_, &x)| x != 0) {
+        if let Some((zero_bytes, non_zero)) = output.iter().enumerate().find(|&(_, &x)| x != 0) {
             zero_bytes as u32 * 8 + non_zero.leading_zeros()
         } else {
             output.len() as u32 * 8
@@ -106,14 +107,11 @@ impl NodeAnnouncement {
     /// is returned.
     pub fn solve(mut self, target: u32) -> Option<Self> {
         loop {
-            if let Some(nonce) = self.nonce.checked_add(1) {
-                self.nonce = nonce;
+            let nonce = self.nonce.checked_add(1)?;
+            self.nonce = nonce;
 
-                if self.work() >= target {
-                    break;
-                }
-            } else {
-                return None;
+            if self.work() >= target {
+                break;
             }
         }
         Some(self)
@@ -142,7 +140,9 @@ impl wire::Decode for NodeAnnouncement {
         let nonce = u64::decode(buf)?;
         let agent = match UserAgent::decode(buf) {
             Ok(ua) => ua,
-            Err(wire::Error::UnexpectedEnd { .. }) => UserAgent::default(),
+            Err(wire::Error::UnexpectedEnd { .. }) => {
+                UserAgent::from_str("/radicle/message/truncated/").expect("valid user agent")
+            }
             Err(e) => return Err(e),
         };
 
@@ -217,9 +217,9 @@ impl RefsStatus {
                 self.want.push(theirs);
             }
             Err(e) => {
-                log::warn!(
+                log::debug!(
                     target: "service",
-                    "Error getting cached ref of {repo} for refs status: {e}"
+                    "Failed to get cached 'rad/sigrefs' of {} in {repo} for refs status: {e}", theirs.remote,
                 );
             }
         }
@@ -261,18 +261,15 @@ pub enum AnnouncementMessage {
 
 impl AnnouncementMessage {
     /// Sign this announcement message.
-    pub fn signed<G>(self, signer: &Device<G>) -> Announcement
-    where
-        G: crypto::signature::Signer<crypto::Signature>,
-    {
+    pub fn signed(self, secret_key: &crypto::SigningKey) -> Announcement {
         use crypto::signature::Signer as _;
 
         let msg = self.encode_to_vec();
 
-        let signature = signer.sign(&msg);
+        let signature = secret_key.sign(&msg);
 
         Announcement {
-            node: *signer.public_key(),
+            node: *secret_key.public_key(),
             message: self,
             signature,
         }
@@ -368,8 +365,15 @@ impl Announcement {
 
     /// Verify this announcement's signature.
     pub fn verify(&self) -> bool {
+        use crypto::signature::Verifier as _;
+
+        let Ok(verifier) = crypto::VerifyingKey::try_from(&self.node) else {
+            // Public key is not a valid verifying key, so the signature cannot be valid.
+            return false;
+        };
+
         let msg = self.message.encode_to_vec();
-        self.node.verify(msg, &self.signature).is_ok()
+        verifier.verify(&msg, &self.signature).is_ok()
     }
 
     pub fn matches(&self, filter: &Filter) -> bool {
@@ -449,18 +453,12 @@ impl Message {
         .into()
     }
 
-    pub fn node<G: crypto::signature::Signer<crypto::Signature>>(
-        message: NodeAnnouncement,
-        signer: &Device<G>,
-    ) -> Self {
-        AnnouncementMessage::from(message).signed(signer).into()
+    pub fn node(message: NodeAnnouncement, secret_key: &crypto::SigningKey) -> Self {
+        AnnouncementMessage::from(message).signed(secret_key).into()
     }
 
-    pub fn inventory<G: crypto::signature::Signer<crypto::Signature>>(
-        message: InventoryAnnouncement,
-        signer: &Device<G>,
-    ) -> Self {
-        AnnouncementMessage::from(message).signed(signer).into()
+    pub fn inventory(message: InventoryAnnouncement, secret_key: &crypto::SigningKey) -> Self {
+        AnnouncementMessage::from(message).signed(secret_key).into()
     }
 
     pub fn subscribe(filter: Filter, since: Timestamp, until: Timestamp) -> Self {
@@ -482,26 +480,35 @@ impl Message {
         };
         let msg = match self {
             Self::Announcement(Announcement { node, message, .. }) => match message {
-                AnnouncementMessage::Node(NodeAnnouncement { addresses, timestamp, .. }) => format!(
+                AnnouncementMessage::Node(NodeAnnouncement {
+                    addresses,
+                    timestamp,
+                    ..
+                }) => format!(
                     "{verb} node announcement of {node} with {} address(es) {prep} {remote} (t={timestamp})",
                     addresses.len()
                 ),
-                AnnouncementMessage::Refs(RefsAnnouncement { rid, refs, timestamp }) => format!(
+                AnnouncementMessage::Refs(RefsAnnouncement {
+                    rid,
+                    refs,
+                    timestamp,
+                }) => format!(
                     "{verb} refs announcement of {node} for {rid} with {} remote(s) {prep} {remote} (t={timestamp})",
                     refs.len()
                 ),
-                AnnouncementMessage::Inventory(InventoryAnnouncement { inventory, timestamp }) => {
+                AnnouncementMessage::Inventory(InventoryAnnouncement {
+                    inventory,
+                    timestamp,
+                }) => {
                     format!(
                         "{verb} inventory announcement of {node} with {} item(s) {prep} {remote} (t={timestamp})",
                         inventory.len()
                     )
                 }
             },
-            Self::Info(Info::RefsAlreadySynced { rid,  .. }) => {
-                format!(
-                    "{verb} `refs-already-synced` info {prep} {remote} for {rid}"
-                )
-            },
+            Self::Info(Info::RefsAlreadySynced { rid, .. }) => {
+                format!("{verb} `refs-already-synced` info {prep} {remote} for {rid}")
+            }
             Self::Ping { .. } => format!("{verb} ping {prep} {remote}"),
             Self::Pong { .. } => format!("{verb} pong {prep} {remote}"),
             Self::Subscribe(Subscribe { .. }) => {
@@ -530,7 +537,7 @@ impl Ping {
     /// Maximum number of zero bytes in a pong message.
     pub const MAX_PONG_ZEROES: wire::Size =
         Message::MAX_SIZE - mem::size_of::<wire::Size>() as wire::Size; // Account for zeroes length
-                                                                        // prefix.
+    // prefix.
 
     pub fn new(rng: &mut fastrand::Rng) -> Self {
         let ponglen = rng.u16(0..Self::MAX_PONG_ZEROES);
@@ -674,12 +681,10 @@ impl qcheck::Arbitrary for ZeroBytes {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use std::str::FromStr;
 
-    use fastrand;
     use localtime::LocalTime;
     use qcheck_macros::quickcheck;
-    use radicle::git::raw;
+    use radicle::crypto::SigningKey;
     use radicle::test::arbitrary;
 
     use crate::wire::Decode as _;
@@ -687,10 +692,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ref_remote_limit() {
+    fn ref_remote_limit() {
         let mut refs = BoundedVec::<_, REF_REMOTE_LIMIT>::new();
-        let signer = Device::mock();
-        let at = raw::Oid::zero().into();
+        let signer = SigningKey::mock(18);
+        let at = git::Oid::ZERO_SHA1;
 
         assert_eq!(refs.capacity(), REF_REMOTE_LIMIT);
 
@@ -703,11 +708,11 @@ mod tests {
         }
 
         let msg: Message = AnnouncementMessage::from(RefsAnnouncement {
-            rid: arbitrary::gen(1),
+            rid: arbitrary::r#gen(1),
             refs,
             timestamp: LocalTime::now().into(),
         })
-        .signed(&Device::mock())
+        .signed(&crypto::SigningKey::mock(93))
         .into();
 
         let mut buf = Vec::new();
@@ -719,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn test_inventory_limit() {
+    fn inventory_limit() {
         let msg = Message::inventory(
             InventoryAnnouncement {
                 inventory: arbitrary::vec(INVENTORY_LIMIT)
@@ -727,7 +732,7 @@ mod tests {
                     .expect("size within bounds limit"),
                 timestamp: LocalTime::now().into(),
             },
-            &Device::mock(),
+            &crypto::SigningKey::mock(218),
         );
         let mut buf: Vec<u8> = Vec::new();
         msg.encode(&mut buf);
@@ -746,12 +751,12 @@ mod tests {
 
     #[quickcheck]
     fn prop_refs_announcement_signing(rid: RepoId) {
-        let signer = Device::mock_rng(&mut fastrand::Rng::new());
+        let secret_key = crypto::SigningKey::mock(242);
         let timestamp = Timestamp::EPOCH;
-        let at = raw::Oid::zero().into();
+        let at = git::Oid::ZERO_SHA1;
         let refs = BoundedVec::collect_from(
             &mut [RefsAt {
-                remote: *signer.public_key(),
+                remote: *secret_key.public_key(),
                 at,
             }]
             .into_iter(),
@@ -761,13 +766,13 @@ mod tests {
             refs,
             timestamp,
         });
-        let ann = message.signed(&signer);
+        let ann = message.signed(&secret_key);
 
         assert!(ann.verify());
     }
 
     #[test]
-    fn test_node_announcement_validate() {
+    fn node_announcement_validate() {
         let ann = NodeAnnouncement {
             version: 1,
             features: node::Features::SEED,
@@ -775,12 +780,12 @@ mod tests {
             alias: Alias::new("alice"),
             addresses: BoundedVec::new(),
             nonce: 0,
-            agent: UserAgent::from_str("/heartwood:1.0.0/").unwrap(),
+            agent: UserAgent::test(),
         };
 
-        assert_eq!(ann.work(), 1);
+        assert_eq!(ann.work(), 2);
         assert_eq!(ann.clone().solve(1).unwrap().work(), 1);
-        assert_eq!(ann.clone().solve(8).unwrap().work(), 10);
+        assert_eq!(ann.clone().solve(8).unwrap().work(), 8);
         assert_eq!(ann.solve(14).unwrap().work(), 14);
     }
 }

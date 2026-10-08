@@ -8,16 +8,16 @@ use serde_json as json;
 use thiserror::Error;
 
 use radicle::cob::{Title, TypeNameParse};
+use radicle::identity::doc::PayloadId;
 use radicle::identity::doc::update::EditVisibility;
 use radicle::identity::doc::update::PayloadUpsert;
-use radicle::identity::doc::PayloadId;
 use radicle::prelude::{Did, RepoId};
 
 use crate::git::Rev;
 
 use crate::terminal::Interactive;
 
-pub(crate) const ABOUT: &str = "Manage repository identities";
+const ABOUT: &str = "Manage repository identities";
 const LONG_ABOUT: &str = r#"
 The `id` command is used to manage and propose changes to the
 identity of a Radicle repository.
@@ -49,12 +49,11 @@ pub(super) fn parse_many_upserts(
 ) -> impl Iterator<Item = Result<PayloadUpsert, PayloadUpsertParseError>> + use<'_> {
     // `clap` ensures we have 3 values per option occurrence,
     // so we can chunk the aggregated slice exactly.
-    let chunks = values.chunks_exact(3);
+    let (chunks, remainder) = values.as_chunks::<3>();
 
-    assert!(chunks.remainder().is_empty());
+    assert!(remainder.is_empty());
 
-    chunks.map(|chunk| {
-        // Slice accesses will not panic, guaranteed by `chunks_exact(3)`.
+    chunks.iter().map(|chunk| {
         Ok(PayloadUpsert {
             id: PayloadId::from_str(&chunk[0])?,
             key: chunk[1].to_owned(),
@@ -110,6 +109,11 @@ pub struct Args {
     #[arg(long, short)]
     #[arg(global = true)]
     pub(super) quiet: bool,
+
+    /// Print full OIDs instead of abbreviated ones
+    #[arg(long, short)]
+    #[arg(global = true)]
+    pub(super) verbose: bool,
 }
 
 impl Args {
@@ -203,7 +207,7 @@ pub(super) enum Command {
         /// Update the identity by setting metadata in one of the identity payloads
         ///
         /// [example values: xyz.radicle.project name '"radicle-example"']
-        // TODO(erikili:) Value parsers do not operate on series of values, yet. This will
+        // TODO(erikli:) Value parsers do not operate on series of values, yet. This will
         // change with clap v5, so we can hopefully use `Vec<Payload>`.
         // - https://github.com/clap-rs/clap/discussions/5930#discussioncomment-12315889
         // - https://docs.rs/clap/latest/clap/_derive/index.html#arg-types
@@ -235,13 +239,19 @@ pub(super) enum Command {
         #[arg(value_name = "REVISION_ID")]
         revision: Rev,
     },
+
+    /// Re-cache the identity
+    Cache {
+        #[arg(long)]
+        storage: bool,
+    },
 }
 
 #[cfg(test)]
 mod test {
-    use super::{parse_many_upserts, Args};
-    use clap::error::ErrorKind;
+    use super::{Args, parse_many_upserts};
     use clap::Parser;
+    use clap::error::ErrorKind;
 
     #[test]
     fn should_parse_single_payload() {
@@ -318,7 +328,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "assertion failed: chunks.remainder().is_empty()")]
+    #[should_panic(expected = "assertion failed: remainder.is_empty()")]
     fn should_not_parse_into_payload() {
         let _: Result<Vec<_>, _> =
             parse_many_upserts(&["xyz.radicle.project".to_string(), "name".to_string()]).collect();

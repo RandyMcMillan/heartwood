@@ -7,8 +7,8 @@ use radicle_surf::diff;
 use radicle_surf::diff::{Added, Copied, Deleted, FileStats, Hunks, Modified, Moved};
 use radicle_surf::diff::{Diff, DiffContent, FileDiff, Hunk, Modification};
 use radicle_term as term;
-use term::cell::Cell;
 use term::VStack;
+use term::cell::Cell;
 
 use crate::git::unified_diff::FileHeader;
 use crate::terminal::highlight::{Highlighter, Theme};
@@ -338,7 +338,7 @@ impl ToPretty for Added {
         repo: &R,
     ) -> Self::Output {
         let old = None;
-        let new = Some((self.path.as_path(), Oid::from(*self.new.oid)));
+        let new = Some((self.path.as_path(), self.new.oid));
 
         pretty_modification(header, &self.diff, old, new, repo, hi)
     }
@@ -354,7 +354,7 @@ impl ToPretty for Deleted {
         header: &Self::Context,
         repo: &R,
     ) -> Self::Output {
-        let old = Some((self.path.as_path(), Oid::from(*self.old.oid)));
+        let old = Some((self.path.as_path(), self.old.oid));
         let new = None;
 
         pretty_modification(header, &self.diff, old, new, repo, hi)
@@ -371,8 +371,8 @@ impl ToPretty for Modified {
         header: &Self::Context,
         repo: &R,
     ) -> Self::Output {
-        let old = Some((self.path.as_path(), Oid::from(*self.old.oid)));
-        let new = Some((self.path.as_path(), Oid::from(*self.new.oid)));
+        let old = Some((self.path.as_path(), self.old.oid));
+        let new = Some((self.path.as_path(), self.new.oid));
 
         pretty_modification(header, &self.diff, old, new, repo, hi)
     }
@@ -537,14 +537,14 @@ impl ToPretty for Modification {
         match self {
             Modification::Deletion(diff::Deletion { line, line_no }) => {
                 if let Some(lines) = &blobs.old.as_ref() {
-                    lines[*line_no as usize - 1].clone()
+                    lines.get(*line_no as usize - 1).unwrap().clone()
                 } else {
                     term::Line::new(String::from_utf8_lossy(line.as_bytes()).as_ref())
                 }
             }
             Modification::Addition(diff::Addition { line, line_no }) => {
                 if let Some(lines) = &blobs.new.as_ref() {
-                    lines[*line_no as usize - 1].clone()
+                    lines.get(*line_no as usize - 1).unwrap().clone()
                 } else {
                     term::Line::new(String::from_utf8_lossy(line.as_bytes()).as_ref())
                 }
@@ -554,7 +554,7 @@ impl ToPretty for Modification {
             } => {
                 // Nb. we can check in the old or the new blob, we choose the new.
                 if let Some(lines) = &blobs.new.as_ref() {
-                    lines[*line_no_new as usize - 1].clone()
+                    lines.get(*line_no_new as usize - 1).unwrap().clone()
                 } else {
                     term::Line::new(String::from_utf8_lossy(line.as_bytes()).as_ref())
                 }
@@ -600,7 +600,7 @@ mod test {
 
     #[test]
     #[ignore]
-    fn test_pretty() {
+    fn pretty() {
         let repo = Repository::open_ext::<_, _, &[&OsStr]>(
             env!("CARGO_MANIFEST_DIR"),
             RepositoryOpenFlags::all(),

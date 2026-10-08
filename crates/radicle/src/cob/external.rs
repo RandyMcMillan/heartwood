@@ -81,13 +81,13 @@
 //! [remote helpers]: https://git-scm.com/docs/gitremote-helpers
 
 use std::collections::HashMap;
-use std::io::{Error as IoError, ErrorKind};
+use std::io::Error as IoError;
 use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use serde_json::{from_slice, to_writer, Error as JsonError, Map, Value};
+use serde_json::{Error as JsonError, Map, Value, from_slice, to_writer};
 
 use crate::cob::object::collaboration::Evaluate;
 use crate::cob::op::{Op as CobOp, OpEncodingError};
@@ -114,6 +114,8 @@ pub enum Error {
     Op(#[from] OpEncodingError),
     #[error("serde_json: {0}")]
     Serde(#[from] JsonError),
+    #[error("failed to spawn program '{program}': {source}")]
+    Spawn { program: String, source: IoError },
     #[error("io: {0}")]
     Io(#[from] IoError),
 }
@@ -158,17 +160,16 @@ impl External {
             prefix + suffix
         };
 
-        let child = Command::new(command_name)
+        let mut child = Command::new(&command_name)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .spawn()?;
+            .spawn()
+            .map_err(|source| Error::Spawn {
+                program: command_name,
+                source,
+            })?;
 
-        let Some(stdin) = &child.stdin else {
-            return Err(Error::Io(IoError::new(
-                ErrorKind::BrokenPipe,
-                "stdin not available",
-            )));
-        };
+        let stdin = child.stdin.take().expect("handle preset");
 
         #[derive(Serialize)]
         struct OpMessage {

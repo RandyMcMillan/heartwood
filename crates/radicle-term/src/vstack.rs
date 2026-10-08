@@ -22,21 +22,21 @@ impl Default for VStackOptions {
 enum Row<'a> {
     Element(Box<dyn Element + 'a>),
     #[default]
-    Dividier,
+    Divider,
 }
 
 impl Row<'_> {
     fn width(&self, c: Constraint) -> usize {
         match self {
             Self::Element(e) => e.columns(c),
-            Self::Dividier => c.min.cols,
+            Self::Divider => c.min.cols,
         }
     }
 
     fn height(&self, c: Constraint) -> usize {
         match self {
             Self::Element(e) => e.rows(c),
-            Self::Dividier => 1,
+            Self::Divider => 1,
         }
     }
 }
@@ -62,7 +62,7 @@ impl<'a> VStack<'a> {
 
     /// Add a horizontal divider.
     pub fn divider(mut self) -> Self {
-        self.rows.push(Row::Dividier);
+        self.rows.push(Row::Divider);
         self
     }
 
@@ -177,7 +177,7 @@ impl Element for VStack<'_> {
                         }
                     }
                 }
-                Row::Dividier => {
+                Row::Divider => {
                     if let Some(color) = self.opts.border {
                         lines.push(
                             Line::default()
@@ -215,7 +215,7 @@ mod test {
     use pretty_assertions::assert_eq;
 
     #[test]
-    fn test_vstack() {
+    fn vstack() {
         let mut v = VStack::default().border(Some(Color::Unset)).padding(1);
 
         v.push(Line::new("banana"));
@@ -245,7 +245,7 @@ mod test {
     }
 
     #[test]
-    fn test_vstack_maximize() {
+    fn vstack_maximize() {
         let mut v = VStack::default().border(Some(Color::Unset)).padding(1);
 
         v.push(Line::new("banana"));

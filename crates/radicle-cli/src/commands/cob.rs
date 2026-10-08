@@ -11,6 +11,8 @@ use nonempty::NonEmpty;
 
 use radicle::cob;
 use radicle::cob::store::CobAction;
+use radicle::cob::store::access::ReadOnly;
+use radicle::cob::store::access::WriteAs;
 use radicle::cob::stream::CobStream as _;
 use radicle::git;
 use radicle::prelude::*;
@@ -21,7 +23,7 @@ use crate::terminal as term;
 
 pub use args::Args;
 
-use args::{parse_many_embeds, FilteredTypeName, Format};
+use args::{FilteredTypeName, Format, parse_many_embeds};
 
 fn embeds(
     repo: &storage::git::Repository,
@@ -48,36 +50,37 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
             type_name,
             operation,
         }) => {
-            let signer = &profile.signer()?;
+            let signer = profile.signer()?;
+            let access = WriteAs::new(&signer);
             let repo = storage.repository_mut(repo)?;
             let embeds = embeds(&repo, operation.embed_files, operation.embed_hashes)?;
 
             let oid = match type_name {
                 Patch => {
-                    let store: Store<cob::patch::Patch, _> = Store::open(&repo)?;
+                    let mut store: Store<cob::patch::Patch, _, _> = Store::open(&repo, access)?;
                     let actions = read_jsonl_actions(&operation.actions)?;
-                    let (oid, _) = store.create(&operation.message, actions, embeds, signer)?;
+                    let (oid, _) = store.create(&operation.message, actions, embeds)?;
                     oid
                 }
                 Issue => {
-                    let store: Store<cob::issue::Issue, _> = Store::open(&repo)?;
+                    let mut store: Store<cob::issue::Issue, _, _> = Store::open(&repo, access)?;
                     let actions = read_jsonl_actions(&operation.actions)?;
-                    let (oid, _) = store.create(&operation.message, actions, embeds, signer)?;
+                    let (oid, _) = store.create(&operation.message, actions, embeds)?;
                     oid
                 }
                 Identity => anyhow::bail!(
                     "Creation of collaborative objects of type {} is not supported.",
-                    &type_name
+                    type_name
                 ),
                 Other(type_name) => {
-                    let store: Store<cob::external::External, _> =
-                        Store::open_for(&type_name, &repo)?;
+                    let mut store: Store<cob::external::External, _, _> =
+                        Store::open_for(&type_name, &repo, access)?;
                     let actions = read_jsonl_actions(&operation.actions)?;
-                    let (oid, _) = store.create(&operation.message, actions, embeds, signer)?;
+                    let (oid, _) = store.create(&operation.message, actions, embeds)?;
                     oid
                 }
             };
-            println!("{oid}");
+            term::println(oid);
         }
         Migrate => {
             let mut db = profile.cobs_db_mut()?;
@@ -97,7 +100,7 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
                 FilteredTypeName::from(type_name).as_ref(),
             )?;
             for cob in cobs {
-                println!("{}", cob.id);
+                term::println(cob.id);
             }
         }
         Log {
@@ -150,24 +153,17 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
             repo,
             objects,
             type_name,
-            format: _,
+            ..
         } => {
             let repo = storage.repository(repo)?;
-            if let Err(e) = show(objects, &repo, type_name.into(), &profile) {
-                if let Some(err) = e.downcast_ref::<std::io::Error>() {
-                    if err.kind() == std::io::ErrorKind::BrokenPipe {
-                        return Ok(());
-                    }
-                }
-                return Err(e);
-            }
+            show(objects, &repo, type_name.into(), &profile)?;
         }
         Update(args::Update {
             repo,
             type_name,
             object,
             operation,
-            format: _,
+            ..
         }) => {
             let signer = &profile.signer()?;
             let repo = storage.repository_mut(repo)?;
@@ -178,9 +174,9 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
                 Patch => {
                     let actions: Vec<cob::patch::Action> =
                         read_jsonl_actions(&operation.actions)?.into();
-                    let mut patches = profile.patches_mut(&repo)?;
+                    let mut patches = crate::terminal::cob::patches_mut(&profile, &repo, signer)?;
                     let mut patch = patches.get_mut(&oid)?;
-                    patch.transaction(&operation.message, &*profile.signer()?, |tx| {
+                    patch.transaction(&operation.message, |tx| {
                         tx.extend(actions)?;
                         tx.embed(embeds)?;
                         Ok(())
@@ -189,9 +185,9 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
                 Issue => {
                     let actions: Vec<cob::issue::Action> =
                         read_jsonl_actions(&operation.actions)?.into();
-                    let mut issues = profile.issues_mut(&repo)?;
+                    let mut issues = crate::terminal::cob::issues_mut(&profile, &repo, signer)?;
                     let mut issue = issues.get_mut(&oid)?;
-                    issue.transaction(&operation.message, &*profile.signer()?, |tx| {
+                    issue.transaction(&operation.message, |tx| {
                         tx.extend(actions)?;
                         tx.embed(embeds)?;
                         Ok(())
@@ -199,19 +195,20 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
                 }
                 Identity => anyhow::bail!(
                     "Update of collaborative objects of type {} is not supported.",
-                    &type_name
+                    type_name
                 ),
                 Other(type_name) => {
                     use cob::external::{Action, External};
                     let actions: Vec<Action> = read_jsonl_actions(&operation.actions)?.into();
-                    let mut store: Store<External, _> = Store::open_for(&type_name, &repo)?;
+                    let mut store: Store<External, _, _> =
+                        Store::open_for(&type_name, &repo, WriteAs::new(signer))?;
                     let tx = cob::store::Transaction::new(type_name.clone(), actions, embeds);
-                    let (_, oid) = tx.commit(&operation.message, oid, &mut store, signer)?;
+                    let (_, oid) = tx.commit(&operation.message, oid, &mut store)?;
                     oid
                 }
             };
 
-            println!("{oid}");
+            term::println(oid);
         }
     }
     Ok(())
@@ -244,6 +241,7 @@ fn show(
         }
         FilteredTypeName::Issue => {
             use radicle::issue::cache::Issues as _;
+
             let issues = term::cob::issues(profile, repo)?;
             for oid in oids {
                 let oid = &oid.resolve(&repo.backend)?;
@@ -259,6 +257,7 @@ fn show(
         }
         FilteredTypeName::Patch => {
             use radicle::patch::cache::Patches as _;
+
             let patches = term::cob::patches(profile, repo)?;
             for oid in oids {
                 let oid = &oid.resolve(&repo.backend)?;
@@ -273,8 +272,9 @@ fn show(
             }
         }
         FilteredTypeName::Other(type_name) => {
-            let store =
-                cob::store::Store::<cob::external::External, _>::open_for(&type_name, repo)?;
+            let store = cob::store::Store::<cob::external::External, _, _>::open_for(
+                &type_name, repo, ReadOnly,
+            )?;
             for oid in oids {
                 let oid = &oid.resolve(&repo.backend)?;
                 let cob = store
@@ -296,18 +296,18 @@ where
         std::time::UNIX_EPOCH + std::time::Duration::from_secs(op.timestamp.as_secs()),
     )
     .to_rfc2822();
-    term::print(term::format::yellow(format!("commit   {}", op.id)));
+    term::println(term::format::yellow(format!("commit   {}", op.id)));
     if let Some(oid) = op.identity {
-        term::print(term::format::tertiary(format!("resource {oid}")));
+        term::println(term::format::tertiary(format!("resource {oid}")));
     }
     for parent in op.parents {
-        term::print(format!("parent   {parent}"));
+        term::println(format!("parent   {parent}"));
     }
     for parent in op.related {
-        term::print(format!("rel      {parent}"));
+        term::println(format!("rel      {parent}"));
     }
-    term::print(format!("author   {}", op.author));
-    term::print(format!("date     {time}"));
+    term::println(format!("author   {}", op.author));
+    term::println(format!("date     {time}"));
     term::blank();
     for action in op.actions {
         let val = serde_json::to_string_pretty(&action)?;
@@ -323,7 +323,7 @@ fn print_op_json<A>(op: cob::Op<A>) -> anyhow::Result<()>
 where
     A: serde::Serialize,
 {
-    term::print(serde_json::to_value(&op)?);
+    term::println(serde_json::to_value(&op)?);
     Ok(())
 }
 

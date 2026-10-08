@@ -1,17 +1,18 @@
 use std::{fmt, str::FromStr};
 
 use serde::{
-    de::{self, MapAccess, Visitor},
     Deserialize, Serialize,
+    de::{self, MapAccess, Visitor},
 };
 use thiserror::Error;
 
 use crate::crypto;
 use crate::git::BranchName;
+use crate::git::{fmt::Qualified, refs::branch};
 use crate::identity::doc;
 use crate::identity::doc::Payload;
 
-pub use crypto::PublicKey;
+pub use crypto::VerifyingKey;
 
 /// A project-related error.
 #[derive(Debug, Error)]
@@ -172,7 +173,7 @@ impl<'de> Deserialize<'de> for Project {
                 })
             }
         }
-        const FIELDS: &[&str] = &["name", "descrption", "defaultBranch"];
+        const FIELDS: &[&str] = &["name", "description", "defaultBranch"];
         deserializer.deserialize_struct("Project", FIELDS, ProjectVisitor)
     }
 }
@@ -250,9 +251,19 @@ impl Project {
         &self.description
     }
 
+    /// Return the default branch of the project.
+    ///
+    /// To obtain the default branch of the repository, prefer
+    /// [`super::Doc::default_branch_name`].
     #[inline]
     pub fn default_branch(&self) -> &BranchName {
         &self.default_branch
+    }
+
+    /// Return the qualified name of the default branch.
+    #[inline]
+    pub fn default_branch_qualified(&self) -> Qualified<'_> {
+        branch(&self.default_branch)
     }
 }
 
@@ -272,7 +283,7 @@ mod test {
     use crate::assert_matches;
 
     #[test]
-    fn test_project_name() {
+    fn project_name() {
         assert_matches!(serde_json::from_str::<ProjectName>("\"\""), Err(_));
         assert_matches!(
             serde_json::from_str::<ProjectName>("\"invalid name\""),

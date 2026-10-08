@@ -9,8 +9,8 @@ use thiserror::Error;
 
 pub mod collaboration;
 pub use collaboration::{
-    create, get, info, list, parse_refstr, remove, update, CollaborativeObject, Create, Evaluate,
-    Update, Updated,
+    CollaborativeObject, Create, Evaluate, Update, Updated, create, get, info, list, parse_refstr,
+    remove, update,
 };
 
 pub mod storage;
@@ -98,7 +98,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_serde() {
+    fn serde() {
         let id = ObjectId::from_str("3ad84420bd882f983c2f9b605e7a68f5bdf95f5c").unwrap();
 
         assert_eq!(

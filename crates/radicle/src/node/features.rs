@@ -1,8 +1,8 @@
-//! Node features advertized on the network.
+//! Node features advertised on the network.
 use serde::{Deserialize, Serialize};
 use std::{fmt, ops};
 
-/// Advertized node features. Signals what services the node supports.
+/// Advertised node features. Signals what services the node supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Features(u64);
@@ -113,16 +113,20 @@ mod test {
     use super::*;
 
     #[test]
-    fn test_operations() {
+    fn operations() {
         assert_eq!(Features::NONE.with(Features::SEED), Features::SEED);
 
-        assert!(!Features::from(u64::MAX)
-            .without(Features::SEED)
-            .has(Features::SEED));
+        assert!(
+            !Features::from(u64::MAX)
+                .without(Features::SEED)
+                .has(Features::SEED)
+        );
 
-        assert!(Features::from(u64::MIN)
-            .with(Features::SEED)
-            .has(Features::SEED));
+        assert!(
+            Features::from(u64::MIN)
+                .with(Features::SEED)
+                .has(Features::SEED)
+        );
 
         assert_eq!(
             Features::NONE.with(Features::SEED).without(Features::SEED),

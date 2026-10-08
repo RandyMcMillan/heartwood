@@ -18,24 +18,32 @@
 
 mod fetch;
 mod list;
+mod protocol;
 mod push;
+mod service;
 
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process;
 use std::str::FromStr;
-use std::{env, fmt, io};
+use std::{env, fmt};
 
 use thiserror::Error;
 
+use radicle::cob::store::access::{ReadOnly, WriteAs};
+use radicle::crypto;
 use radicle::prelude::NodeId;
 use radicle::storage::git::transport::local::{Url, UrlError};
 use radicle::storage::{ReadRepository, WriteStorage};
 use radicle::version::Version;
+use radicle::{Profile, git, storage};
 use radicle::{cob, profile};
-use radicle::{git, storage, Profile};
-use radicle_cli::terminal as cli;
+use radicle_cli as cli;
+use radicle_term as term;
 
-pub const VERSION: Version = Version {
+use crate::protocol::{Command, Line, LineReader};
+
+const VERSION: Version = Version {
     name: env!("CARGO_BIN_NAME"),
     commit: env!("GIT_HEAD"),
     version: env!("RADICLE_VERSION"),
@@ -45,8 +53,8 @@ pub const VERSION: Version = Version {
 fn main() {
     let mut args = env::args();
 
-    if let Some(lvl) = radicle::logger::env_level() {
-        let logger = radicle::logger::StderrLogger::new(lvl);
+    if let Some(lvl) = radicle_log::env_level() {
+        let logger = radicle_log::StderrLogger::new();
         log::set_boxed_logger(Box::new(logger))
             .expect("no other logger should have been set already");
         log::set_max_level(lvl.to_level_filter());
@@ -74,7 +82,7 @@ fn main() {
 }
 
 #[derive(Debug, Error)]
-pub enum Error {
+enum Error {
     /// Failed to parse `base`.
     #[error("failed to parse base revision: {0}")]
     Base(#[source] git::raw::Error),
@@ -84,9 +92,6 @@ pub enum Error {
     /// Remote repository not found (or empty).
     #[error("remote repository `{0}` not found")]
     RepositoryNotFound(PathBuf),
-    /// Invalid command received.
-    #[error("invalid command `{0}`")]
-    InvalidCommand(String),
     /// Invalid arguments received.
     #[error("invalid arguments: {0:?}")]
     InvalidArguments(Vec<String>),
@@ -120,6 +125,9 @@ pub enum Error {
     /// Invalid object ID.
     #[error("invalid oid: {0}")]
     InvalidOid(#[from] radicle::git::ParseOidError),
+    /// Protocol error.
+    #[error(transparent)]
+    Protocol(#[from] protocol::Error),
 }
 
 /// Models values for the `verbosity` option, see
@@ -158,7 +166,7 @@ impl FromStr for Verbosity {
 
 /// Branch creation options when creating a patch.
 #[derive(Debug, Default, Clone)]
-pub enum Branch {
+enum Branch {
     /// Don't create a new branch.
     #[default]
     None,
@@ -171,10 +179,7 @@ pub enum Branch {
 impl Branch {
     /// Return the branch name to be used for the local branch when creating a
     /// patch.
-    pub fn to_branch_name(
-        self,
-        object: &radicle::patch::PatchId,
-    ) -> Option<git::fmt::Qualified<'_>> {
+    fn into_branch_name(self, object: &radicle::patch::PatchId) -> Option<git::fmt::Qualified<'_>> {
         match self {
             Self::None => None,
             Self::MirrorUpstream => Some(git::refs::patch(object)),
@@ -189,7 +194,7 @@ impl Branch {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct Options {
+struct Options {
     /// Don't sync after push.
     no_sync: bool,
     /// Sync debugging.
@@ -201,17 +206,19 @@ pub struct Options {
     /// Patch base to use, when opening or updating a patch.
     base: Option<git::Oid>,
     /// Patch message.
-    message: cli::patch::Message,
+    message: cli::terminal::patch::Message,
     /// Create a branch and set its upstream when opening a patch.
     branch: Branch,
+    /// Patch target to use, when opening or updating a patch.
+    target: cob::patch::MergeTarget,
     verbosity: Verbosity,
 }
 
-/// Run the radicle remote helper using the given profile.
-pub fn run(profile: radicle::Profile) -> Result<(), Error> {
+/// Run the Radicle remote helper using the given profile.
+fn run(profile: radicle::Profile) -> Result<(), Error> {
     // Since we're going to be writing user output to `stderr`, make sure the paint
     // module is aware of that.
-    cli::Paint::set_terminal(cli::TerminalFile::Stderr);
+    term::Paint::set_terminal(term::TerminalFile::Stderr);
 
     let (remote, url): (Option<git::fmt::RefString>, Url) = {
         let args = env::args().skip(1).take(2).collect::<Vec<_>>();
@@ -238,85 +245,173 @@ pub fn run(profile: radicle::Profile) -> Result<(), Error> {
     let debug = radicle::profile::env::debug();
 
     let stdin = io::stdin();
-    let mut line = String::new();
-    let mut opts = Options::default();
+    let stdout = io::stdout();
+    let git = service::RealGitService;
+    let mut node = service::RealNodeSession::new(&profile);
 
-    if let Err(e) = radicle::io::set_file_limit(4096) {
-        if debug {
-            eprintln!("{}: unable to set open file limit: {e}", VERSION.name);
-        }
+    if let Err(e) = radicle::io::set_file_limit(4096)
+        && debug
+    {
+        eprintln!("{}: unable to set open file limit: {e}", VERSION.name);
     }
 
-    loop {
-        let tokens = read_line(&stdin, &mut line)?;
+    run_loop(
+        stdin.lock(),
+        stdout.lock(),
+        &git,
+        &mut node,
+        &stored,
+        &profile,
+        remote,
+        url,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_loop<R: BufRead, W: Write, G: service::GitService, N: service::NodeSession>(
+    mut input: R,
+    mut output: W,
+    git: &G,
+    node: &mut N,
+    stored: &storage::git::Repository,
+    profile: &Profile,
+    remote: Option<git::fmt::RefString>,
+    url: Url,
+) -> Result<(), Error> {
+    let mut opts = Options::default();
+    let mut expected_refs = Vec::new();
+    let debug = radicle::profile::env::debug();
+
+    let mut command_reader = LineReader::new(&mut input);
+
+    while let Some(line) = command_reader.next() {
+        let line = line??;
 
         if debug {
-            eprintln!("{}: {}", VERSION.name, &tokens.join(" "));
+            eprintln!("{}: {:?}", VERSION.name, line);
         }
 
-        match tokens.as_slice() {
-            ["capabilities"] => {
-                println!("option");
-                println!("push"); // Implies `list` command.
-                println!("fetch");
-                println!();
+        match line {
+            Line::Valid(Command::Capabilities) => {
+                writeln!(output, "option")?;
+                writeln!(output, "push")?; // Implies `list` command.
+                writeln!(output, "fetch")?;
+                writeln!(output)?;
             }
-            ["option", "verbosity", verbosity] => match verbosity.parse::<Verbosity>() {
-                Ok(verbosity) => {
-                    opts.verbosity = verbosity;
-                    println!("ok");
+            Line::Valid(Command::Option { key, value }) => match key.as_str() {
+                "verbosity" => {
+                    if let Some(val) = value {
+                        match val.parse::<Verbosity>() {
+                            Ok(verbosity) => {
+                                opts.verbosity = verbosity;
+                                writeln!(output, "ok")?;
+                            }
+                            Err(err) => {
+                                writeln!(output, "error {err}")?;
+                            }
+                        }
+                    } else {
+                        writeln!(output, "error missing value for verbosity")?;
+                    }
                 }
-                Err(err) => {
-                    println!("error {err}");
+                "push-option" => {
+                    if let Some(val) = value {
+                        let args = val.split(' ').collect::<Vec<_>>();
+                        // Nb. Git documentation says that we can print `error <msg>` or `unsupported`
+                        // for options that are not supported, but this results in Git saying that
+                        // "push-option" itself is an unsupported option, which is not helpful or correct.
+                        // Hence, we just exit with an error in this case.
+                        push_option(&args, &mut opts)?;
+                        writeln!(output, "ok")?;
+                    } else {
+                        writeln!(output, "error missing value for push-option")?;
+                    }
+                }
+                "cas" => {
+                    if let Some(val) = value {
+                        expected_refs.push(val);
+                        writeln!(output, "ok")?;
+                    } else {
+                        writeln!(output, "error missing value for cas")?;
+                    }
+                }
+                "progress" => {
+                    writeln!(output, "unsupported")?;
+                }
+                "pushcert" => match value {
+                    Some(value) if value == "false" || value == "if-asked" => {
+                        writeln!(output, "ok")?;
+                    }
+                    Some(_) => {
+                        writeln!(output, "unsupported")?;
+                    }
+                    None => {
+                        writeln!(output, "error missing value for pushcert")?;
+                    }
+                },
+                _ => {
+                    writeln!(output, "unsupported")?;
                 }
             },
-            ["option", "push-option", args @ ..] => {
-                // Nb. Git documentation says that we can print `error <msg>` or `unsupported`
-                // for options that are not supported, but this results in Git saying that
-                // "push-option" itself is an unsupported option, which is not helpful or correct.
-                // Hence, we just exit with an error in this case.
-                push_option(args, &mut opts)?;
-                println!("ok");
-            }
-            ["option", "progress", ..] | ["option", ..] => {
-                println!("unsupported");
-            }
-            ["fetch", oid, refstr] => {
-                let oid = git::Oid::from_str(oid)?;
-                let refstr = git::fmt::RefString::try_from(*refstr)?;
+            Line::Valid(Command::Fetch { oid, refstr }) => {
+                let oid = git::Oid::from_str(&oid)?;
+                let refstr = git::fmt::RefString::try_from(refstr.as_str())?;
 
-                return Ok(fetch::run(
+                fetch::run(
                     vec![(oid, refstr)],
                     stored,
-                    &stdin,
+                    git,
+                    &mut command_reader,
                     opts.verbosity,
-                )?);
-            }
-            ["push", refspec] => {
-                return Ok(push::run(
-                    vec![refspec.to_string()],
-                    remote,
-                    url,
-                    &stored,
-                    &profile,
-                    &stdin,
-                    opts,
-                )?);
-            }
-            ["list"] => {
-                list::for_fetch(&url, &profile, &stored)?;
-            }
-            ["list", "for-push"] => {
-                list::for_push(&profile, &stored)?;
-            }
-            [] => {
+                )?;
+
+                // Nb. An empty line means we're done
+                writeln!(output)?;
+
                 return Ok(());
             }
-            _ => {
-                return Err(Error::InvalidCommand(line.trim().to_owned()));
+            Line::Valid(Command::Push(refspec)) => {
+                let result = push::run(
+                    vec![refspec],
+                    remote.clone(),
+                    url.clone(),
+                    stored,
+                    profile,
+                    &mut command_reader,
+                    opts.clone(),
+                    &expected_refs,
+                    git,
+                    node,
+                )?;
+
+                for line in result {
+                    writeln!(output, "{line}")?;
+                }
+                writeln!(output)?;
+
+                return Ok(());
+            }
+            Line::Valid(Command::List) => {
+                let refs = list::for_fetch(&url, profile, stored)?;
+                for line in refs {
+                    writeln!(output, "{line}")?;
+                }
+                writeln!(output)?;
+            }
+            Line::Valid(Command::ListForPush) => {
+                let refs = list::for_push(profile, stored)?;
+                for line in refs {
+                    writeln!(output, "{line}")?;
+                }
+                writeln!(output)?;
+            }
+            Line::Blank => {
+                break;
             }
         }
     }
+
+    Ok(())
 }
 
 /// Parse a single push option. Returns `Ok` if it was successful.
@@ -359,6 +454,12 @@ fn push_option(args: &[&str], opts: &mut Options) -> Result<(), Error> {
                 "patch.branch" => {
                     opts.branch = Branch::Provided(git::fmt::RefString::try_from(val)?)
                 }
+                "patch.target" => {
+                    let target = val.parse::<cob::patch::TargetBranch>().map_err(|e| {
+                        Error::UnsupportedPushOption(format!("invalid patch.target '{val}': {e}"))
+                    })?;
+                    opts.target = cob::patch::MergeTarget::Branch(target);
+                }
                 other => {
                     return Err(Error::UnsupportedPushOption(other.to_owned()));
                 }
@@ -368,39 +469,25 @@ fn push_option(args: &[&str], opts: &mut Options) -> Result<(), Error> {
     Ok(())
 }
 
-/// Read one line from stdin, and split it into tokens.
-pub(crate) fn read_line<'a>(stdin: &io::Stdin, line: &'a mut String) -> io::Result<Vec<&'a str>> {
-    line.clear();
-
-    let read = stdin.read_line(line)?;
-    if read == 0 {
-        return Ok(vec![]);
-    }
-    let line = line.trim();
-    let tokens = line.split(' ').filter(|t| !t.is_empty()).collect();
-
-    Ok(tokens)
-}
-
 /// Write a hint to the user.
 pub(crate) fn hint(s: impl fmt::Display) {
-    eprintln!("{}", cli::format::hint(format!("hint: {s}")));
+    eprintln!("{}", term::format::hint(format!("hint: {s}")));
 }
 
 /// Write a warning to the user.
 pub(crate) fn warn(s: impl fmt::Display) {
-    eprintln!("{}", cli::format::hint(format!("warn: {s}")));
+    eprintln!("{}", term::format::hint(format!("warn: {s}")));
 }
 
 /// Get the patch store.
-pub(crate) fn patches<'a, R: ReadRepository + cob::Store<Namespace = NodeId>>(
+pub(crate) fn patches<'a, Repo: ReadRepository + cob::Store<Namespace = NodeId>>(
     profile: &Profile,
-    repo: &'a R,
-) -> Result<cob::patch::Cache<cob::patch::Patches<'a, R>, cob::cache::StoreReader>, list::Error> {
+    repo: &'a Repo,
+) -> Result<cob::patch::Cache<'a, Repo, ReadOnly, cob::cache::StoreReader>, list::Error> {
     match profile.patches(repo) {
         Ok(patches) => Ok(patches),
         Err(err @ profile::Error::CobsCache(cob::cache::Error::OutOfDate)) => {
-            hint(cli::cob::MIGRATION_HINT);
+            hint(cli::terminal::cob::MIGRATION_HINT);
             Err(err.into())
         }
         Err(err) => Err(err.into()),
@@ -408,17 +495,20 @@ pub(crate) fn patches<'a, R: ReadRepository + cob::Store<Namespace = NodeId>>(
 }
 
 /// Get the mutable patch store.
-pub(crate) fn patches_mut<'a>(
+pub(crate) fn patches_mut<'a, 'b, Signer: crypto::Signer>(
     profile: &Profile,
     repo: &'a storage::git::Repository,
+    signer: &'b Signer,
 ) -> Result<
-    cob::patch::Cache<cob::patch::Patches<'a, storage::git::Repository>, cob::cache::StoreWriter>,
+    cob::patch::Cache<'a, storage::git::Repository, WriteAs<'b, Signer>, cob::cache::StoreWriter>,
     push::Error,
-> {
-    match profile.patches_mut(repo) {
+>
+where
+{
+    match profile.patches_mut(repo, signer) {
         Ok(patches) => Ok(patches),
         Err(err @ profile::Error::CobsCache(cob::cache::Error::OutOfDate)) => {
-            hint(cli::cob::MIGRATION_HINT);
+            hint(cli::terminal::cob::MIGRATION_HINT);
             Err(err.into())
         }
         Err(err) => Err(err.into()),

@@ -7,9 +7,10 @@ use radicle::patch::cache::Patches as _;
 use thiserror::Error;
 
 use radicle::git::raw;
-use radicle::identity::doc;
 use radicle::identity::doc::RepoId;
+use radicle::identity::doc::{self, GetPayload as _};
 use radicle::node;
+use radicle::node::policy;
 use radicle::node::policy::Scope;
 use radicle::node::{Handle as _, Node};
 use radicle::prelude::*;
@@ -26,11 +27,10 @@ use crate::terminal as term;
 use crate::terminal::Element as _;
 
 pub use args::Args;
-pub(crate) use args::ABOUT;
 
 pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
     let profile = ctx.profile()?;
-    let mut node = radicle::Node::new(profile.socket());
+    let mut node = radicle::Node::new(profile.socket_from_env());
 
     if !node.is_running() {
         anyhow::bail!(
@@ -42,7 +42,7 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
         working_copy: working,
         repository: repo,
         doc,
-        project: proj,
+        project,
     } = clone(
         args.repo,
         args.directory.clone(),
@@ -60,7 +60,9 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
         .map(|d| **d)
         .filter(|id| id != profile.id())
         .collect::<Vec<_>>();
-    let default_branch = proj.default_branch().clone();
+
+    let default_branch = repo.identity_doc()?.default_branch_name().ok();
+
     let path = if !args.bare {
         working.workdir().unwrap()
     } else {
@@ -72,7 +74,7 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
     checkout::setup_remotes(
         project::SetupRemote {
             rid: args.repo,
-            tracking: Some(default_branch),
+            tracking: default_branch,
             repo: &working,
             fetch: true,
         },
@@ -86,8 +88,11 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
     );
 
     let mut info: term::Table<1, term::Line> = term::Table::new(term::TableOptions::bordered());
-    info.push([term::format::bold(proj.name()).into()]);
-    info.push([term::format::italic(proj.description()).into()]);
+
+    if let Some(project) = project.as_ref() {
+        info.push([term::format::bold(project.name()).into()]);
+        info.push([term::format::italic(project.description()).into()]);
+    }
 
     let issues = term::cob::issues(&profile, &repo)?.counts()?;
     let patches = term::cob::patches(&profile, &repo)?.counts()?;
@@ -101,9 +106,14 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
     ])]);
     info.print();
 
-    let location = args
-        .directory
-        .map_or(proj.name().to_string(), |loc| loc.display().to_string());
+    let location = args.directory.map_or(
+        project
+            .as_ref()
+            .map(|project| project.name().to_string())
+            .unwrap_or_else(|| repo.rid().to_string()),
+        |loc| loc.display().to_string(),
+    );
+
     term::info!(
         "Run {} to go to the repository directory.",
         term::format::command(format!("cd ./{location}")),
@@ -122,6 +132,8 @@ enum CloneError {
     NoSeeds(RepoId),
     #[error("fetch: {0}")]
     Fetch(#[from] sync::FetchError),
+    #[error("policy store: {0}")]
+    PolicyStore(#[from] policy::store::Error),
 }
 
 struct Checkout {
@@ -130,7 +142,7 @@ struct Checkout {
     path: PathBuf,
     repository: storage::git::Repository,
     doc: Doc,
-    project: Project,
+    project: Option<Project>,
     bare: bool,
 }
 
@@ -145,10 +157,16 @@ impl Checkout {
         let doc = repository
             .identity_doc()
             .map_err(|err| CheckoutFailure::Identity { rid, err })?;
-        let proj = doc
-            .project()
-            .map_err(|err| CheckoutFailure::Payload { rid, err })?;
-        let path = directory.unwrap_or_else(|| PathBuf::from(proj.name()));
+        let proj = doc.project().transpose().ok().flatten();
+
+        let path = directory.unwrap_or_else(|| {
+            PathBuf::from(
+                proj.as_ref()
+                    .map(|project| project.name().to_owned())
+                    .unwrap_or_else(|| rid.to_string()),
+            )
+        });
+
         // N.b. fail if the path exists and is not empty
         if path.exists() && path.read_dir().map_or(true, |mut dir| dir.next().is_some()) {
             return Err(CheckoutFailure::Exists { rid, path });
@@ -204,12 +222,21 @@ impl Checkout {
 fn clone(
     id: RepoId,
     directory: Option<PathBuf>,
-    scope: Scope,
+    scope: Option<Scope>,
     settings: SyncSettings,
     node: &mut Node,
     profile: &Profile,
     bare: bool,
 ) -> Result<CloneResult, CloneError> {
+    let scope = match scope {
+        Some(scope) => scope,
+        None => profile
+            .policies()?
+            .seed_policy(&id)?
+            .scope()
+            .unwrap_or(Scope::Followed),
+    };
+
     // Seed repository.
     if node.seed(id, scope)? {
         term::success!(
@@ -277,7 +304,7 @@ struct Success {
     working_copy: raw::Repository,
     repository: storage::git::Repository,
     doc: Doc,
-    project: Project,
+    project: Option<Project>,
 }
 
 impl CloneResult {

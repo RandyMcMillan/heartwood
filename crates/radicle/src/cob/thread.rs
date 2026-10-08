@@ -3,18 +3,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::sync::LazyLock;
 
-use serde::{ser::SerializeStruct, Deserialize, Serialize};
+use indexmap::IndexSet;
+use serde::{Deserialize, Serialize, ser::SerializeStruct};
 use thiserror::Error;
 
 use crate::cob;
 use crate::cob::common::{Reaction, Timestamp, Uri};
 use crate::cob::store::Cob;
-use crate::cob::{op, ActorId, Embed, EntryId, Op};
+use crate::cob::{ActorId, Embed, EntryId, Op, op};
 use crate::git;
 use crate::prelude::ReadRepository;
 
 /// Type name of a thread, as well as the domain for all thread operations.
-/// Note that threads are not usually used standalone. They are embeded into other COBs.
+/// Note that threads are not usually used standalone. They are embedded into other COBs.
 pub static TYPENAME: LazyLock<cob::TypeName> =
     LazyLock::new(|| FromStr::from_str("xyz.radicle.thread").expect("type name is valid"));
 
@@ -26,7 +27,7 @@ pub enum Error {
     /// This error indicates that the operations are not being applied
     /// in causal order, which is a requirement for this CRDT.
     ///
-    /// For example, this can occur if an operation references anothern operation
+    /// For example, this can occur if an operation references another operation
     /// that hasn't happened yet.
     #[error("causal dependency {0:?} missing")]
     Missing(EntryId),
@@ -174,8 +175,8 @@ impl<L> Comment<L> {
     }
 
     /// Return the comment author.
-    pub fn author(&self) -> ActorId {
-        self.author
+    pub fn author(&self) -> &ActorId {
+        &self.author
     }
 
     /// Return the comment this is a reply to. Returns nothing if this is the root comment.
@@ -289,16 +290,16 @@ impl From<Action> for nonempty::NonEmpty<Action> {
 #[serde(rename_all = "camelCase")]
 pub struct Thread<T = Comment> {
     /// The comments under the thread.
-    pub(crate) comments: BTreeMap<CommentId, Option<T>>,
+    comments: BTreeMap<CommentId, Option<T>>,
     /// Comment timeline.
-    pub(crate) timeline: Vec<CommentId>,
+    timeline: IndexSet<CommentId>,
 }
 
 impl<T> Default for Thread<T> {
     fn default() -> Self {
         Self {
             comments: BTreeMap::default(),
-            timeline: Vec::default(),
+            timeline: IndexSet::default(),
         }
     }
 }
@@ -313,7 +314,7 @@ impl<T> Thread<T> {
     pub fn new(id: CommentId, comment: T) -> Self {
         Self {
             comments: BTreeMap::from_iter([(id, Some(comment))]),
-            timeline: vec![id],
+            timeline: [id].into(),
         }
     }
 
@@ -357,6 +358,10 @@ impl<T> Thread<T> {
     pub fn timeline(&self) -> impl DoubleEndedIterator<Item = &EntryId> + '_ {
         self.timeline.iter()
     }
+
+    pub fn get_comment(&self, id: &CommentId) -> Option<&Option<T>> {
+        self.comments.get(id)
+    }
 }
 
 impl Thread {
@@ -399,10 +404,10 @@ impl<L> Thread<Comment<L>> {
         to: &'a CommentId,
     ) -> impl Iterator<Item = (&'a CommentId, &'a Comment<L>)> {
         self.comments().filter_map(move |(id, c)| {
-            if let Some(reply_to) = c.reply_to {
-                if &reply_to == to {
-                    return Some((id, c));
-                }
+            if let Some(reply_to) = c.reply_to
+                && &reply_to == to
+            {
+                return Some((id, c));
             }
             None
         })
@@ -503,13 +508,12 @@ pub fn comment<L>(
     if body.is_empty() {
         return Err(Error::Comment(id));
     }
-    if let Some(id) = reply_to {
-        if !thread.comments.contains_key(&id) {
-            return Err(Error::Missing(id));
-        }
+    if let Some(id) = reply_to
+        && !thread.comments.contains_key(&id)
+    {
+        return Err(Error::Missing(id));
     }
-    debug_assert!(!thread.timeline.contains(&id));
-    thread.timeline.push(id);
+    thread.timeline.insert(id);
 
     // Nb. If a comment is already present, it must be redacted, because the
     // underlying store guarantees exactly-once delivery of ops.
@@ -532,8 +536,7 @@ pub fn edit<L>(
     body: String,
     embeds: Vec<Embed<Uri>>,
 ) -> Result<(), Error> {
-    debug_assert!(!thread.timeline.contains(&id));
-    thread.timeline.push(id);
+    thread.timeline.insert(id);
 
     // It's possible for a comment to be redacted before we're able to edit it, in
     // case of a concurrent update.
@@ -552,8 +555,7 @@ pub fn edit<L>(
 
 pub fn redact<T>(thread: &mut Thread<T>, id: EntryId, comment: EntryId) -> Result<(), Error> {
     if let Some(comment) = thread.comments.get_mut(&comment) {
-        debug_assert!(!thread.timeline.contains(&id));
-        thread.timeline.push(id);
+        thread.timeline.insert(id);
 
         *comment = None;
     } else {
@@ -575,8 +577,7 @@ pub fn react<T>(
         return Err(Error::Missing(comment));
     };
     if let Some(comment) = comment {
-        debug_assert!(!thread.timeline.contains(&id));
-        thread.timeline.push(id);
+        thread.timeline.insert(id);
 
         if active {
             comment.reactions.insert(key);
@@ -597,8 +598,7 @@ pub fn resolve<T>(
     };
 
     if let Some(comment) = comment {
-        debug_assert!(!thread.timeline.contains(&id));
-        thread.timeline.push(id);
+        thread.timeline.insert(id);
         comment.resolve();
     }
     Ok(())
@@ -614,8 +614,7 @@ pub fn unresolve<T>(
     };
 
     if let Some(comment) = comment {
-        debug_assert!(!thread.timeline.contains(&id));
-        thread.timeline.push(id);
+        thread.timeline.insert(id);
         comment.unresolve();
     }
     Ok(())
@@ -624,8 +623,6 @@ pub fn unresolve<T>(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use std::ops::{Deref, DerefMut};
-
     use pretty_assertions::assert_eq;
     use qcheck_macros::quickcheck;
 
@@ -633,36 +630,17 @@ mod tests {
     use crate as radicle;
     use crate::cob::store::Cob;
     use crate::cob::test;
-    use crate::crypto::test::signer::MockSigner;
-    use crate::crypto::Signer;
-    use crate::node::device::Device;
+    use crate::cob::test::SignerOpExt;
+    use crate::crypto::SigningKey;
     use crate::profile::env;
     use crate::test::arbitrary;
-    use crate::test::arbitrary::gen;
+    use crate::test::arbitrary::r#gen;
     use crate::test::storage::MockRepository;
 
-    /// An object that can be used to create and sign changes.
-    pub struct Actor<G> {
-        inner: cob::test::Actor<G>,
-    }
-
-    impl<G: Default + Signer> Default for Actor<G> {
-        fn default() -> Self {
-            Self {
-                inner: cob::test::Actor::<G>::default(),
-            }
-        }
-    }
-
-    impl<G: Signer> Actor<G> {
-        pub fn new(signer: Device<G>) -> Self {
-            Self {
-                inner: cob::test::Actor::new(signer),
-            }
-        }
-
+    /// An extension trait that provides convenience methods for handling thread operations.
+    trait SignerThreadOpExt: SignerOpExt {
         /// Create a new comment.
-        pub fn comment(&mut self, body: &str, reply_to: Option<CommentId>) -> Op<Action> {
+        fn comment(&mut self, body: &str, reply_to: Option<CommentId>) -> Op<Action> {
             self.op::<Thread>([Action::Comment {
                 body: String::from(body),
                 reply_to,
@@ -670,12 +648,12 @@ mod tests {
         }
 
         /// Create a new redaction.
-        pub fn redact(&mut self, id: CommentId) -> Op<Action> {
+        fn redact(&mut self, id: CommentId) -> Op<Action> {
             self.op::<Thread>([Action::Redact { id }])
         }
 
         /// Edit a comment.
-        pub fn edit(&mut self, id: CommentId, body: &str) -> Op<Action> {
+        fn edit(&mut self, id: CommentId, body: &str) -> Op<Action> {
             self.op::<Thread>([Action::Edit {
                 id,
                 body: body.to_owned(),
@@ -683,25 +661,13 @@ mod tests {
         }
     }
 
-    impl<G> Deref for Actor<G> {
-        type Target = cob::test::Actor<G>;
-
-        fn deref(&self) -> &Self::Target {
-            &self.inner
-        }
-    }
-
-    impl<G> DerefMut for Actor<G> {
-        fn deref_mut(&mut self) -> &mut Self::Target {
-            &mut self.inner
-        }
-    }
+    impl<T> SignerThreadOpExt for T where T: SignerOpExt {}
 
     #[test]
-    fn test_redact_comment() {
+    fn redact_comment() {
         let radicle::test::setup::Node { signer, .. } = radicle::test::setup::Node::default();
-        let repo = gen::<MockRepository>(1);
-        let mut alice = Actor::new(signer);
+        let repo = r#gen::<MockRepository>(1);
+        let mut alice = signer;
 
         let a0 = alice.comment("First comment", None);
         let a1 = alice.comment("Second comment", Some(a0.id()));
@@ -714,7 +680,7 @@ mod tests {
         let a3 = alice.redact(a1.id());
         thread.op(a3, [], &repo).unwrap();
 
-        let (_, comment0) = thread.comments().nth(0).unwrap();
+        let (_, comment0) = thread.comments().next().unwrap();
         let (_, comment1) = thread.comments().nth(1).unwrap();
 
         assert_eq!(thread.comments().count(), 2);
@@ -723,9 +689,9 @@ mod tests {
     }
 
     #[test]
-    fn test_edit_comment() {
-        let mut alice = Actor::<MockSigner>::default();
-        let repo = gen::<MockRepository>(1);
+    fn edit_comment() {
+        let mut alice = SigningKey::mock(49);
+        let repo = r#gen::<MockRepository>(1);
 
         let c0 = alice.comment("Hello world!", None);
         let c1 = alice.edit(c0.id(), "Goodbye world.");
@@ -742,15 +708,67 @@ mod tests {
         assert_eq!(t1.comment(&c0.id()).unwrap().body(), "Goodbye world!");
     }
 
+    /// Regression test for commit `1bb04020a4afb4b7a071dad9d0a06791c087fb3a`
+    /// in `rad:z2reN9XFdJgQmSbh23KUp9va689YJ`, which occurs in patch
+    /// `0978f920a494b52744a2b349b3453a42a8106513`.
+    ///
+    /// Generally, operations may carry multiple actions, thus, multiple actions
+    /// might be referred to by the same ID.
     #[test]
-    fn test_timeline() {
-        let alice = MockSigner::default();
-        let bob = MockSigner::default();
-        let eve = MockSigner::default();
-        let repo = gen::<MockRepository>(1);
+    fn resolve_and_unresolve_multiple_comments_in_one_operation() {
+        let mut alice = SigningKey::mock(49);
+        let repo = r#gen::<MockRepository>(1);
+
+        let comment_1 = alice.comment("First", None);
+        let comment_2 = alice.comment("Second", None);
+        let mut thread = Thread::from_ops([comment_1.clone(), comment_2.clone()], &repo).unwrap();
+
+        // Note that the same `operation` is used to resolve *both*
+        // `comment_1` and `comment_2`.
+        let operation = arbitrary::entry_id();
+
+        resolve(&mut thread, operation, comment_1.id()).unwrap();
+        resolve(&mut thread, operation, comment_2.id()).unwrap();
+
+        assert!(thread.comment(&comment_1.id()).unwrap().is_resolved());
+        assert!(thread.comment(&comment_2.id()).unwrap().is_resolved());
+        assert_eq!(
+            thread
+                .timeline
+                .iter()
+                .filter(|id| **id == operation)
+                .count(),
+            1
+        );
+
+        // Note that the same `operation` is used to unresolve *both*
+        // `comment_1` and `comment_2`.
+        let operation = arbitrary::entry_id();
+
+        unresolve(&mut thread, operation, comment_1.id()).unwrap();
+        unresolve(&mut thread, operation, comment_2.id()).unwrap();
+
+        assert!(!thread.comment(&comment_1.id()).unwrap().is_resolved());
+        assert!(!thread.comment(&comment_2.id()).unwrap().is_resolved());
+        assert_eq!(
+            thread
+                .timeline
+                .iter()
+                .filter(|id| **id == operation)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn timeline() {
+        let alice = SigningKey::mock(94);
+        let bob = SigningKey::mock(103);
+        let eve = SigningKey::mock(104);
+        let repo = r#gen::<MockRepository>(1);
         let time = env::local_time();
 
-        let mut a = test::history::<Thread, _>(
+        let mut a = test::history::<Thread>(
             &[Action::Comment {
                 body: "Thread root".to_owned(),
                 reply_to: None,
@@ -811,13 +829,14 @@ mod tests {
     }
 
     #[test]
-    fn test_duplicate_comments() {
-        let repo = gen::<MockRepository>(1);
-        let alice = MockSigner::default();
-        let bob = MockSigner::default();
+    fn duplicate_comments() {
+        let repo = r#gen::<MockRepository>(1);
+        let alice = SigningKey::mock(94);
+        let bob = SigningKey::mock(103);
+        let _eve = SigningKey::mock(104);
         let time = env::local_time();
 
-        let mut a = test::history::<Thread, _>(
+        let mut a = test::history::<Thread>(
             &[Action::Comment {
                 body: "Thread root".to_owned(),
                 reply_to: None,
@@ -856,12 +875,13 @@ mod tests {
 
     #[quickcheck]
     fn prop_ordering(timestamp: u64) {
-        let repo = gen::<MockRepository>(1);
-        let alice = MockSigner::default();
-        let bob = MockSigner::default();
+        let repo = r#gen::<MockRepository>(1);
+        let alice = SigningKey::mock(94);
+        let bob = SigningKey::mock(103);
+        let _eve = SigningKey::mock(104);
         let timestamp = Timestamp::from_secs(timestamp);
 
-        let h0 = test::history::<Thread, _>(
+        let h0 = test::history::<Thread>(
             &[Action::Comment {
                 body: "Thread root".to_owned(),
                 reply_to: None,
@@ -914,9 +934,9 @@ mod tests {
     }
 
     #[test]
-    fn test_comment_redact_missing() {
-        let repo = gen::<MockRepository>(1);
-        let mut alice = Actor::<MockSigner>::default();
+    fn comment_redact_missing() {
+        let repo = r#gen::<MockRepository>(1);
+        let mut alice = SigningKey::mock(94);
         let mut t = Thread::default();
         let id = arbitrary::entry_id();
 
@@ -924,9 +944,9 @@ mod tests {
     }
 
     #[test]
-    fn test_comment_edit_missing() {
-        let repo = gen::<MockRepository>(1);
-        let mut alice = Actor::<MockSigner>::default();
+    fn comment_edit_missing() {
+        let repo = r#gen::<MockRepository>(1);
+        let mut alice = SigningKey::mock(94);
         let mut t = Thread::default();
         let id = arbitrary::entry_id();
 
@@ -934,9 +954,9 @@ mod tests {
     }
 
     #[test]
-    fn test_comment_edit_redacted() {
-        let repo = gen::<MockRepository>(1);
-        let mut alice = Actor::<MockSigner>::default();
+    fn comment_edit_redacted() {
+        let repo = r#gen::<MockRepository>(1);
+        let mut alice = SigningKey::mock(94);
 
         let a1 = alice.comment("Hi", None);
         let a2 = alice.redact(a1.id);
